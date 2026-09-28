@@ -1,0 +1,130 @@
+flash-next-rtxpro6000
+Copyright 2026 aiueo52 and contributors
+
+This repository is licensed under the Apache License, Version 2.0 (see LICENSE), except where a
+file or patch hunk is derived from third-party code under another license as listed below. The full
+texts of those other licenses are in licenses/.
+
+===================================================================================================
+Apache-2.0 projects this work builds on (notices reproduced under section 4(d) of the License)
+===================================================================================================
+
+- sglang-rtxpro6000 (John Pezzulli), https://github.com/jpezzulli/sglang-rtxpro6000
+  The base fork this work starts from (branch pennyroyal-main-sm120-final, commit 16e5682aad).
+  Its Flash-Next model code (QSA, hyper-connections, PLE, native MTP, memory pool) is an adapted
+  import of the unmerged SGLang PR #36497 (https://github.com/sgl-project/sglang/pull/36497;
+  Qiaolin-Yu with co-authors ch-wan, ispobock, JustinTong0323, samuellees, YAMY1234, yhyang201,
+  yizhang2077, zijiexia), and its GDN MTP state is adapted from the unmerged SGLang PR #30967
+  (RecoverSSM, https://github.com/sgl-project/sglang/pull/30967). The SM120 integration, recovery
+  graphs, HiCache/NIXL persistence and qualification are John Pezzulli's work in that fork (see
+  its CHANGES.md and PROVENANCE.md). patches/sglang/ contains only our changes on top of it. The fork carries SGLang's
+  Apache-2.0 LICENSE and has no NOTICE file of its own.
+
+- SGLang, Copyright 2023-2024 SGLang Team, https://github.com/sgl-project/sglang
+  Upstream of the base fork. Patch context lines and the kernel snapshots in kernels/sglang/
+  (new files written for this project inside the SGLang source tree) are distributed under
+  SGLang's Apache-2.0 license. Individual SGLang files touched by patches/sglang/ carry these
+  additional notices, retained in the patch context:
+    Copyright 2023-2026 SGLang Team
+    Copyright 2025 Qwen Team (python/sglang/srt/models/qwen3_5.py)
+    SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+      (Apache-2.0, https://github.com/vllm-project/vllm; files adapted from vLLM:
+      layers/linear.py, layers/quantization/fp8.py, modelopt_quant.py, nvfp4_online.py,
+      models/qwen2_moe.py, kernels/ops/mamba/causal_conv1d_triton.py)
+  mtp-train/mtptrain/layers.py and mtp-train/mtptrain/model.py re-implement the Qwen4-Exp MTP
+  draft layer in plain PyTorch for training, following SGLang's
+  python/sglang/srt/layers/hyperconnection.py, layers/layernorm.py and
+  models/{qwen3_5,qwen4_exp,qwen4_exp_mtp}.py (Copyright 2023-2026 SGLang Team; qwen3_5.py also
+  Copyright 2025 Qwen Team; Apache-2.0). The reference code paths of GroupedGemmaRMSNorm,
+  GemmaRMSNorm and GatedResidual.mix/combine are followed closely. The MTP dump hook in
+  patches/sglang/mtp-dump/ modifies SGLang files under the same licence; see
+  patches/sglang/MODIFICATIONS.md.
+
+- FlashInfer, https://github.com/flashinfer-ai/flashinfer (flashinfer-python 0.6.17), Apache-2.0.
+  FlashInfer's NOTICE (tag v0.6.17) reads:
+
+    FlashInfer
+    Copyright 2025-2026 NVIDIA
+    Copyright 2023-2026 FlashInfer community (https://flashinfer.ai/)
+
+    -------------------------------------------------------------------------------------------------
+    Some of the code in this project are adapted from other open-source projects with different
+    licenses. This product also bundles some third-party components under other open source licenses.
+    See licenses/ for text of these licenses.
+
+  patches/flashinfer/ (and the copies under bench/bench/moe_smallm/patches/, plus the GDN patch
+  kernels/microbench/glue_e/gdn_wy_T16_strided.patch, which the SGLang series also adds as
+  bench/glue_e/gdn_wy_T16_strided.patch) modify files shipped in the flashinfer-python wheel.
+  None of the touched files is one of the third-party components listed in FlashInfer's LICENSE
+  appendix. Their own headers:
+    flashinfer/data/csrc/fused_moe/cutlass_backend/cutlass_fused_moe_kernels.cuh
+      Copyright (c) 2020-2025, NVIDIA CORPORATION.  All rights reserved.  (Apache-2.0)
+    flashinfer/data/csrc/nv_internal/tensorrt_llm/kernels/cutlass_kernels/include/moe_kernels.h
+      Copyright (c) 2020-2023, NVIDIA CORPORATION.  All rights reserved.  (Apache-2.0)
+    flashinfer/data/csrc/fused_moe/cutlass_backend/flashinfer_cutlass_fused_moe_binding.cu
+      Copyright (c) 2022-2024, NVIDIA CORPORATION.  All rights reserved.  (Apache-2.0)
+    flashinfer/fused_moe/core.py
+      Copyright (c) 2025 by FlashInfer team.  (Apache-2.0)
+    flashinfer/gdn_kernels/gdn_decode_bf16_wy_output_only.py
+      no file header; covered by FlashInfer's LICENSE and NOTICE above.
+
+- NVIDIA TensorRT-LLM, Copyright (c) NVIDIA CORPORATION, https://github.com/NVIDIA/TensorRT-LLM
+  (Apache-2.0), via the FlashInfer MoE files above (they derive from TensorRT-LLM).
+
+- Mamba, Copyright 2023 Tri Dao, Albert Gu, https://github.com/state-spaces/mamba (Apache-2.0),
+  via the gated layer norm below.
+
+===================================================================================================
+Code under other licenses (patch hunks and context lines derived from these projects)
+===================================================================================================
+
+- flash-linear-attention (FLA), MIT License,
+  Copyright (c) 2023-2026 Songlin Yang, Yu Zhang, Zhiyuan Li,
+  https://github.com/fla-org/flash-linear-attention. Full text: licenses/LICENSE.flash-linear-attention
+  SGLang's python/sglang/kernels/ops/attention/fla/ directory is adapted from FLA. Hunks and context
+  lines of these files in this repository are derived from it:
+    python/sglang/kernels/ops/attention/fla/fused_sigmoid_gating_recurrent.py
+      patches/sglang/series/0001-*.patch, patches/sglang/perf-v1-core.diff
+    python/sglang/kernels/ops/attention/fla/layernorm_gated.py
+      ("Adapt from ... fla/modules/layernorm_gated.py; Copyright (c) 2024, Tri Dao. Based on the
+      Triton LayerNorm tutorial"): patches/sglang/series/0071-*.patch and its revert 0072-*.patch
+      (net change zero; not in perf-v1-core.diff)
+  The Triton LayerNorm tutorial it is based on is MIT-licensed, Copyright 2018-2020 Philippe
+  Tillet, Copyright 2020-2022 OpenAI. Full text: licenses/LICENSE.triton
+
+- causal-conv1d, BSD 3-Clause License, Copyright (c) 2022, the respective contributors, as shown
+  by the AUTHORS file (Tri Dao), https://github.com/Dao-AILab/causal-conv1d.
+  Full text: licenses/LICENSE.causal-conv1d
+  SGLang's python/sglang/kernels/ops/mamba/causal_conv1d_triton.py ("Copyright (c) 2024, Tri Dao.
+  Adapted from causal-conv1d ... and vLLM ...") is derived from it. Hunks and context lines of that
+  file in this repository are derived from it:
+    patches/sglang/series/0023-*.patch, patches/sglang/series/0045-*.patch,
+    patches/sglang/perf-v1-core.diff
+  The new test test/registered/kernels/ops/mamba/test_causal_conv1d_chain_parallel.py added by
+  0045 is our own code (Apache-2.0).
+
+Redistributions of those hunks must keep the notices above and the corresponding license text.
+
+Modified files (Apache-2.0 section 4(b)): every upstream SGLang/fork file and every FlashInfer file that
+the patches change is listed in patches/sglang/MODIFICATIONS.md; the patches themselves record each
+change.
+
+===================================================================================================
+Other references (not redistributed here)
+===================================================================================================
+
+- Model: Qwen/Qwen3.8-Flash-Next and the NVFP4 checkpoint RadixArk/Qwen3.8-Flash-Next-NVFP4 on
+  Hugging Face. Qwen3.8-Flash-Next is under the Qwen Community License 1.0
+  (https://huggingface.co/Qwen/Qwen3.8-Flash-Next/raw/main/LICENSE), not Apache-2.0; this repository
+  contains no model files. A checkpoint with a fine-tuned head written back is a derivative of the
+  model: include Qwen's LICENSE and notice when sharing it and check the licence's conditions.
+- The quality audit (results/quality-q1/) ran on GSM8K, MMLU, HumanEval and JCommonsenseQA. No
+  dataset content is included: no questions, choices, prompts, tests or reference answers, and no
+  model predictions. The result files keep only the dataset's item id, a correct/incorrect flag,
+  the generated-token count and the finish reason per item, plus aggregate scores.
+  bench/bench/quality/prep_data.py shows how the data files were downloaded and prepared; obtain
+  the datasets from their publishers under their own licenses.
+- The prompts under bench/workloads/ were written for this project; the needle context of
+  bench/prof/needle_test.py is generated by that script.
+- FR-Spec (reduced draft vocabulary), EAGLE / MTP speculative decoding, and programmatic dependent
+  launch (PDL) are techniques described in their respective publications and CUDA documentation.
