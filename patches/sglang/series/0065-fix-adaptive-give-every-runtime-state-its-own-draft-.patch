@@ -1,0 +1,366 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: aiueo52 <aiueo52@users.noreply.github.com>
+Date: Sat, 5 Sep 2026 21:17:10 +0900
+Subject: [PATCH 065/105] fix(adaptive): give every runtime state its own
+ draft-extend backend
+
+This is the state-construction regression: with the steps=3 state merely
+BUILT and never activated, code-edit acceptance fell 10.8 -> 5.7 and
+throughput 564 -> 311 t/s.
+
+Same root as the earlier illegal-memory-access fix. For compressed-QSA draft
+models DraftBackendFactory.create_draft_extend_backend() (draft_utils.py:139)
+returns draft_model_runner.attn_backend rather than a fresh backend, so every
+state's draft-extend runner aliased one QwenSparseAttnBackend. That backend
+caches captured graph metadata as
+
+    self._cuda_graph_metadata[(forward_mode, bs)] = metadata
+
+(qwen_sparse_attn_backend.py:1062) -- keyed by mode and batch size only, not
+by the per-request token width, which for speculative-paged modes is
+bs * num_draft_tokens. The steps=3 state's DRAFT_EXTEND_V2 capture therefore
+replaced the launch state's entry with one sliced to 4 rows instead of 16.
+The launch state then replayed its 16-wide draft-extend graph after filling
+only 4 rows of QSA metadata: no crash (the stale rows hold in-range indices),
+but the sparse selection seeding draft positions past the short state's width
+is stale, so long chains stop being accepted -- short chains unaffected,
+which is exactly the measured signature.
+
+build_adaptive_runtime_state now builds a private draft-extend backend per
+state (+0.14 GB); _override_worker_state already restored the launch one and
+apply_runtime_state already swapped draft_runner.attn_backend, so the switch
+path needed no change.
+
+SGLANG_ADAPTIVE_SPLIT (debug only, default off) carries the bisection
+switches that found this: no_draft, no_draft_graphs, no_target_graphs,
+no_gdn_recovery, shared_extend (restores the old aliasing for A/B).
+
+Config: adaptive_w16_3_15.json gains a "2" slot pinning bs>=2 to steps=15, so
+the steps=3 state captures bs=1 graphs only.
+
+Validation, one window, fnbench greedy repeats=2, needle PASS on all three:
+
+  workload     W16          W4           adaptive     vs better fixed
+  code-edit    10.38 / 483  3.86 / 332   9.57 / 504   +4%
+  prose-en      2.78 / 141  2.51 / 228   2.59 / 218   -4%
+  prose-ja      2.51 / 128  2.31 / 212   2.23 / 200   -6%
+  agent-loop    4.78 / 230  3.29 / 291   3.46 / 276   -5%
+
+dbg/FINDINGS.txt has the full bisection and the hypotheses ruled out.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+---
+ adaptive_w16_3_15.json                        |  11 ++
+ dbg/FINDINGS.txt                              | 107 +++++++++++++-----
+ dbg/w16_3_15.json                             |  11 ++
+ .../sglang/srt/speculative/eagle_worker_v2.py |  60 ++++++++--
+ .../test_adaptive_runtime_state_sizing.py     |  34 ++++++
+ 5 files changed, 190 insertions(+), 33 deletions(-)
+
+diff --git a/adaptive_w16_3_15.json b/adaptive_w16_3_15.json
+index fab7e65916..0724e7afa7 100644
+--- a/adaptive_w16_3_15.json
++++ b/adaptive_w16_3_15.json
+@@ -9,5 +9,16 @@
+     "up_hysteresis": 0.0,
+     "ceiling_coeff": 0,
+     "reset_ema_on_switch": false
++  },
++  "2": {
++    "candidate_steps": [15],
++    "ema_alpha": 0.1,
++    "update_interval": 20,
++    "warmup_batches": 15,
++    "switch_grace_batches": 40,
++    "down_hysteresis": 3.5,
++    "up_hysteresis": 0.0,
++    "ceiling_coeff": 0,
++    "reset_ema_on_switch": false
+   }
+ }
+diff --git a/dbg/FINDINGS.txt b/dbg/FINDINGS.txt
+index 38a204f345..c2274c4633 100644
+--- a/dbg/FINDINGS.txt
++++ b/dbg/FINDINGS.txt
+@@ -1,26 +1,81 @@
+-w16_3_15.json -- two-state adaptive speculative config for Qwen3.8-Flash-Next
+-(NEXTN, topk=1), tuned 2026-09-05 against the measured per-workload acceptance.
+-
+-  cd ~/tools/sglang-rtxpro6000 && PYTHONPATH=~/tools/sglang-adaptive/python \
+-    ./serve-fast.sh w16 --speculative-adaptive \
+-      --speculative-adaptive-config ~/tools/flash-next-bench/adaptive/w16_3_15.json
+-
+-Thresholds (accepted drafts per verify, i.e. fnbench acc - 1):
+-  at steps=15  drop to 3 when EMA <= 6.0   (measured: code 10.85, agent 4.59,
+-                                            prose-en 1.99, prose-ja 1.64)
+-  at steps=3   rise to 15 when EMA >  2.5  (measured: code 2.77, agent 2.22,
+-                                            prose-en 1.50, prose-ja 1.46)
+-
+-NOT RECOMMENDED FOR PRODUCTION as of 2026-09-05. Building the second runtime
+-state costs the base (steps=15) profile 10-38% throughput even when the
+-controller never switches -- see the pin15 vs ctlw16 control below, same
+-measurement window, identical flags except that pin15's thresholds make it
+-stay at steps=15 forever:
+-
+-  workload    pin15 (2 states)   plain W16 (1 state)
+-  code-edit   acc 6.19 / 304     acc 9.28 / 488
+-  agent-loop  acc 3.84 / 202     acc 4.86 / 266
+-  prose-en    acc 2.83 / 151     acc 3.04 / 170
+-  prose-ja    acc 2.51 / 137     acc 2.60 / 150
+-
+-Keep the fixed w4 / w16 profiles until that regression is found.
++Adaptive speculative decoding on Qwen3.8-Flash-Next (NEXTN, topk=1) -- 2026-09-05
++================================================================================
++
++Two independent defects, both from the same root: for compressed-QSA draft
++models DraftBackendFactory.create_draft_extend_backend() (draft_utils.py:139)
++returns draft_model_runner.attn_backend instead of a fresh backend, so every
++adaptive runtime state's draft-extend runner shared ONE QwenSparseAttnBackend.
++
++(1) CRASH -- illegal memory access at the first decode after warmup.
++    eagle_draft_extend_cuda_graph_runner.py called
++    init_cuda_graph_state(max_bs, max_bs * num_draft_tokens) on that shared
++    backend, and QwenSparseAttnBackend.init_cuda_graph_state
++    (qwen_sparse_attn_backend.py:897-940) *reallocates* _graph_seq_lens /
++    _graph_compressed_page_table / _graph_fa2_* ... Building the steps=3 (8
++    rows) and steps=7 (16 rows) states freed the 32-row tensors the already
++    captured steps=15 draft-extend graphs had baked in.
++    Fix: init_cuda_graph_state_no_shrink() in adaptive_runtime_state.py.
++
++(2) SILENT ACCEPTANCE COLLAPSE -- the state-construction regression.
++    QwenSparseAttnBackend caches captured graph metadata as
++      self._cuda_graph_metadata[(forward_mode, bs)] = metadata
++    (qwen_sparse_attn_backend.py:1062), keyed by mode and batch size only --
++    NOT by the per-request token width. metadata_rows = bs * num_draft_tokens
++    for speculative-paged modes, so the steps=3 state's DRAFT_EXTEND_V2
++    capture REPLACED the launch state's entry with one sliced to 4 rows
++    instead of 16. The launch state then replayed its 16-wide draft-extend
++    graph after filling only 4 rows of QSA metadata: no crash (the stale rows
++    hold in-range indices), but the sparse selection seeding draft positions
++    past the short state's width is stale, so long chains stop being accepted.
++    Short chains are unaffected -- which is exactly the measured signature.
++    Fix: build a per-state draft-extend backend in
++    build_adaptive_runtime_state (eagle_worker_v2.py); costs ~0.14 GB/state.
++
++Bisection (pin15 = steps=3 state BUILT and never activated, 0 switches;
++fnbench greedy repeats=2; each block is one measurement window)
++
++  window 20:41-20:50            code-edit acc/tps   agent-loop acc/tps
++    plain W16, no adaptive        8.60 / 460          4.77 / 261
++    adaptive, nothing suppressed  5.66 / 311          4.39 / 242   <- regressed
++    no_draft (no draft backends
++      and no draft graphs)       11.62 / 604          4.94 / 268   <- recovered
++    no_target_graphs             6.13 / 334           3.91 / 215   <- regressed
++  => the loss is entirely on the draft side.
++
++  window 20:58-21:05
++    plain W16, no adaptive       10.77 / 564          4.72 / 240
++    no_draft_graphs (backends
++      built, capture skipped)     9.29 / 462          5.04 / 282   <- recovered
++    private_extend (own
++      draft-extend backend)      10.27 / 550          4.78 / 268   <- recovered
++  => the collision is created by the draft-extend graph CAPTURE writing into
++     the shared backend, and removing the aliasing removes it.
++
++Checked and cleared as causes: mamba/SSM slot accounting (same mamba usage and
++max_running_requests either way), the KV pool sizing, verify_mask (per backend,
++and unused by this backend), QwenSparseAttnBackend.__init__ (pure -- reads the
++runner, mutates nothing global), QSAMTPSharedSparseIndices (per state, and
++_override_worker_state reinstalls the launch state's object), the topk=1 chain
++buffers (rebuilt on restore; arange content is identical), and the FlashInfer
++autotune cache (would cost latency, not acceptance).
++
++Debug switches used, all default-off (never set in production; each leaves the
++extra state unusable): SGLANG_ADAPTIVE_SPLIT=no_draft | no_draft_graphs |
++no_target_graphs | no_gdn_recovery | shared_extend (restores the old aliasing
++for A/B). SGLANG_ADAPTIVE_DEBUG=1 logs what the controller's EMA actually saw
++per decision.
++
++After the fix -- final validation, one measurement window 21:07-21:16,
++fnbench greedy repeats=2, mem fraction 0.93, needle PASS on all three:
++
++  workload     W16 acc/tps    W4 acc/tps     adaptive acc/tps   vs better fixed
++  code-edit    10.38 / 483    3.86 / 332     9.57 / 504         +4%
++  prose-en      2.78 / 141    2.51 / 228     2.59 / 218         -4%
++  prose-ja      2.51 / 128    2.31 / 212     2.23 / 200         -6%
++  agent-loop    4.78 / 230    3.29 / 291     3.46 / 276         -5%
++
++One server now lands within noise of the better hand-picked profile on every
++workload, and above W16 on code-edit. 24 switches over the whole benchmark.
++Free VRAM while serving: 4.12 GB (sglang) / 3.94 GiB (nvidia-smi) vs 4.87 /
++4.68 for plain W16; the steps=3 state costs 0.67 GB with its graphs pruned to
++bs=1 (config slot "2" pins bs>=2 to steps=15).
+diff --git a/dbg/w16_3_15.json b/dbg/w16_3_15.json
+index fab7e65916..0724e7afa7 100644
+--- a/dbg/w16_3_15.json
++++ b/dbg/w16_3_15.json
+@@ -9,5 +9,16 @@
+     "up_hysteresis": 0.0,
+     "ceiling_coeff": 0,
+     "reset_ema_on_switch": false
++  },
++  "2": {
++    "candidate_steps": [15],
++    "ema_alpha": 0.1,
++    "update_interval": 20,
++    "warmup_batches": 15,
++    "switch_grace_batches": 40,
++    "down_hysteresis": 3.5,
++    "up_hysteresis": 0.0,
++    "ceiling_coeff": 0,
++    "reset_ema_on_switch": false
+   }
+ }
+diff --git a/python/sglang/srt/speculative/eagle_worker_v2.py b/python/sglang/srt/speculative/eagle_worker_v2.py
+index af5470d56e..c7335cc1d0 100644
+--- a/python/sglang/srt/speculative/eagle_worker_v2.py
++++ b/python/sglang/srt/speculative/eagle_worker_v2.py
+@@ -1,5 +1,6 @@
+ import contextlib
+ import logging
++import os
+ import time
+ from dataclasses import replace
+ from typing import List, Optional
+@@ -1180,6 +1181,16 @@ class EagleDraftWorker(EagleDraftWorkerBase):
+             next_draft_input.dsa_topk_indices = dsa_seed_topk_indices
+ 
+ 
++def _adaptive_split() -> frozenset:
++    """Debug-only construction-step switches, see build_adaptive_runtime_state."""
++    raw = os.environ.get("SGLANG_ADAPTIVE_SPLIT", "")
++    if not raw:
++        return frozenset()
++    parts = frozenset(p.strip() for p in raw.split(",") if p.strip())
++    logger.warning("SGLANG_ADAPTIVE_SPLIT=%s: extra spec states are DEBUG ONLY", raw)
++    return parts
++
++
+ class EAGLEWorkerV2(BaseSpecWorker):
+     def __init__(
+         self,
+@@ -1511,9 +1522,41 @@ class EAGLEWorkerV2(BaseSpecWorker):
+             )
+ 
+             backup_private = set_private_input_buffers(True)
++            # Debug-only bisection switches (SGLANG_ADAPTIVE_SPLIT, comma
++            # separated). Building an extra runtime state measurably degrades
++            # the *base* state's long-chain acceptance on qwen4_exp even when
++            # the extra state is never activated; these let one server session
++            # attribute that to a single construction step. Never set in
++            # production -- each one leaves the extra state unusable.
++            split = _adaptive_split()
+             try:
+-                self._draft_worker.init_attention_backend()
+-                self._draft_worker._capture_cuda_graphs()
++                if "no_draft" not in split:
++                    if "shared_extend" not in split:
++                        # Every state needs its OWN draft-extend backend.
++                        # DraftBackendFactory.create_draft_extend_backend()
++                        # returns draft_model_runner.attn_backend for
++                        # compressed-QSA draft models, so without this every
++                        # state's draft-extend runner would alias one backend
++                        # -- and QwenSparseAttnBackend caches its captured
++                        # graph metadata in a dict keyed only by
++                        # (forward_mode, bs). This state's capture would then
++                        # replace the launch state's DRAFT_EXTEND_V2 entry with
++                        # one sliced to *this* state's narrower token width, so
++                        # the launch state would replay its 16-wide graph after
++                        # filling only 4 rows of metadata: no crash, but the
++                        # sparse selection seeding draft positions past the
++                        # short state's width is stale, and long-chain
++                        # acceptance collapses (measured: code-edit acc 10.8 ->
++                        # 5.7 with the steps=3 state merely built).
++                        # _override_worker_state restores the base backend.
++                        draft_runner.attn_backend = (
++                            draft_runner._get_attention_backend(
++                                init_new_workspace=True
++                            )
++                        )
++                    self._draft_worker.init_attention_backend()
++                    if "no_draft_graphs" not in split:
++                        self._draft_worker._capture_cuda_graphs()
+             finally:
+                 draft_runner.init_new_workspace = backup_draft_ws
+                 set_private_input_buffers(backup_private)
+@@ -1529,7 +1572,9 @@ class EAGLEWorkerV2(BaseSpecWorker):
+                 target_model_runner.init_new_workspace = backup_init
+ 
+             target_graph_runner = None
+-            if not check_cuda_graph_backend(Phase.DECODE, Backend.DISABLED):
++            if not check_cuda_graph_backend(
++                Phase.DECODE, Backend.DISABLED
++            ) and "no_target_graphs" not in split:
+                 TargetGraphRunnerCls = (
+                     NPUGraphRunner if _is_npu else DecodeCudaGraphRunner
+                 )
+@@ -1548,10 +1593,11 @@ class EAGLEWorkerV2(BaseSpecWorker):
+                     speculative_num_steps=speculative_num_steps,
+                     speculative_num_draft_tokens=speculative_num_draft_tokens,
+                 )
+-                target_model_runner.maybe_capture_gdn_recovery_graphs(
+-                    attn_backend=target_attn_backend,
+-                    capture_bs=target_graph_runner.capture_bs,
+-                )
++                if "no_gdn_recovery" not in split:
++                    target_model_runner.maybe_capture_gdn_recovery_graphs(
++                        attn_backend=target_attn_backend,
++                        capture_bs=target_graph_runner.capture_bs,
++                    )
+                 _set_private(_backup_private_t)
+                 target_graph_after_mem = get_available_gpu_memory(
+                     self.device, self.gpu_id
+diff --git a/test/registered/unit/spec/test_adaptive_runtime_state_sizing.py b/test/registered/unit/spec/test_adaptive_runtime_state_sizing.py
+index 5049f66ce3..4fd5cd0468 100644
+--- a/test/registered/unit/spec/test_adaptive_runtime_state_sizing.py
++++ b/test/registered/unit/spec/test_adaptive_runtime_state_sizing.py
+@@ -16,6 +16,7 @@ point at, freeing them (illegal memory access at the next replay).
+ """
+ 
+ import json
++import os
+ import tempfile
+ import unittest
+ from unittest.mock import patch
+@@ -216,5 +217,38 @@ class TestControllerSettles(CustomTestCase):
+         )
+ 
+ 
++class TestPerStateDraftExtendBackend(CustomTestCase):
++    """Each runtime state must build its own draft-extend attention backend.
++
++    For compressed-QSA draft models DraftBackendFactory returns the draft
++    runner's own backend, and QwenSparseAttnBackend caches captured graph
++    metadata in a dict keyed only by (forward_mode, bs). Two states sharing
++    one backend therefore collide on the DRAFT_EXTEND_V2 entry: the last one
++    captured wins, and the other replays its wider graph over metadata filled
++    for the narrower token width. Measured cost of that collision with the
++    steps=3 state merely built and never activated: code-edit acceptance
++    10.8 -> 5.7, 564 -> 311 t/s.
++    """
++
++    def test_sharing_is_off_by_default(self):
++        from sglang.srt.speculative import eagle_worker_v2
++
++        with patch.dict(os.environ, {}, clear=False):
++            os.environ.pop("SGLANG_ADAPTIVE_SPLIT", None)
++            self.assertEqual(eagle_worker_v2._adaptive_split(), frozenset())
++        self.assertNotIn("shared_extend", eagle_worker_v2._adaptive_split())
++
++    def test_split_switches_parse(self):
++        from sglang.srt.speculative import eagle_worker_v2
++
++        with patch.dict(
++            os.environ, {"SGLANG_ADAPTIVE_SPLIT": "shared_extend, no_draft"}
++        ):
++            self.assertEqual(
++                eagle_worker_v2._adaptive_split(),
++                frozenset({"shared_extend", "no_draft"}),
++            )
++
++
+ if __name__ == "__main__":
+     unittest.main()
+-- 
+2.43.0
+

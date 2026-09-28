@@ -1,0 +1,120 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: aiueo52 <aiueo52@users.noreply.github.com>
+Date: Thu, 3 Sep 2026 20:38:44 +0900
+Subject: [PATCH 6/9] mtp dump: apply the lm_head through its quant method
+
+The standard serving config (--qwen4-exp-dense-fp8 ...,lm_head) gives both the
+target and the draft a W8A16 FP8 head, which a plain F.linear cannot apply.
+Route through the same quant method LogitsProcessor._compute_lm_head selects.
+For the target dump, a projection failure now disables the dump loudly instead
+of writing files without target_argmax -- that tensor is the training label.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+---
+ python/sglang/srt/models/mtp_dump.py | 61 +++++++++++++++++++---------
+ 1 file changed, 42 insertions(+), 19 deletions(-)
+
+diff --git a/python/sglang/srt/models/mtp_dump.py b/python/sglang/srt/models/mtp_dump.py
+index e8e9a0e4d0..00e7f7e779 100644
+--- a/python/sglang/srt/models/mtp_dump.py
++++ b/python/sglang/srt/models/mtp_dump.py
+@@ -67,6 +67,28 @@ def get_dumper() -> Optional["MTPDumper"]:
+     return _DUMPER
+ 
+ 
++def project_lm_head(lm_head, x: "torch.Tensor") -> "torch.Tensor":
++    """Apply the (possibly quantized) lm_head exactly as the server does.
++
++    Under `--qwen4-exp-dense-fp8 ...,lm_head` the head is W8A16 FP8 and a plain
++    F.linear cannot be used, so route through the same quant method that
++    LogitsProcessor._compute_lm_head picks.
++    """
++    quant_method = getattr(lm_head, "quant_method", None)
++    if quant_method is not None:
++        try:
++            from sglang.srt.layers.logits_processor import (
++                should_apply_lm_head_quant_method,
++            )
++
++            if should_apply_lm_head_quant_method(lm_head, quant_method):
++                return quant_method.apply(lm_head, x, None)
++        except ImportError:
++            pass
++    weight = lm_head.weight
++    return torch.nn.functional.linear(x.to(weight.dtype), weight)
++
++
+ class MTPDumper:
+     def __init__(self, directory: str):
+         self.dir = directory
+@@ -150,12 +172,6 @@ class MTPDumper:
+                 self.stopped = True
+             return
+         input_ids, positions, forward_batch, mixed, hc_hidden = staged
+-        weight = getattr(lm_head, "weight", None)
+-        if weight is None or weight.dim() != 2:
+-            logger.error("MTP dump: unusable lm_head %r; disabling", type(lm_head))
+-            self.stopped = True
+-            return
+-
+         n = int(input_ids.shape[0])
+         argmax = torch.empty(n, dtype=torch.int32, device=mixed.device)
+         topk_ids = topk_vals = None
+@@ -164,17 +180,25 @@ class MTPDumper:
+             topk_vals = torch.empty(
+                 n, self.topk, dtype=torch.float16, device=mixed.device
+             )
+-        for start in range(0, n, self.chunk):
+-            end = min(n, start + self.chunk)
+-            logits = torch.nn.functional.linear(
+-                mixed[start:end].to(weight.dtype), weight
++        try:
++            for start in range(0, n, self.chunk):
++                end = min(n, start + self.chunk)
++                logits = project_lm_head(lm_head, mixed[start:end])
++                argmax[start:end] = logits.argmax(dim=-1).to(torch.int32)
++                if self.topk > 0:
++                    vals, ids = torch.topk(logits.float(), self.topk, dim=-1)
++                    topk_ids[start:end] = ids.to(torch.int32)
++                    topk_vals[start:end] = vals.to(torch.float16)
++                del logits
++        except Exception as exc:  # noqa: BLE001
++            # target_argmax is the training label: a dump without it is useless,
++            # so stop dumping loudly rather than write unlabelled files.
++            logger.error(
++                "MTP dump: target lm_head projection failed (%s); DISABLING dump",
++                exc,
+             )
+-            argmax[start:end] = logits.argmax(dim=-1).to(torch.int32)
+-            if self.topk > 0:
+-                vals, ids = torch.topk(logits.float(), self.topk, dim=-1)
+-                topk_ids[start:end] = ids.to(torch.int32)
+-                topk_vals[start:end] = vals.to(torch.float16)
+-            del logits
++            self.stopped = True
++            return
+ 
+         seq_lens = forward_batch.extend_seq_lens_cpu
+         if seq_lens is None and forward_batch.extend_seq_lens is not None:
+@@ -342,9 +366,7 @@ class MTPDraftDumper:
+         try:
+             for start in range(0, n, self.chunk):
+                 end = min(n, start + self.chunk)
+-                logits = torch.nn.functional.linear(
+-                    mixed[start:end].to(weight.dtype), weight
+-                ).float()
++                logits = project_lm_head(lm_head, mixed[start:end]).float()
+                 argmax[start:end] = logits.argmax(dim=-1).to(torch.int32)
+                 vals, ids = torch.topk(logits, self.topk, dim=-1)
+                 topk_ids[start:end] = ids.to(torch.int32)
+@@ -437,6 +459,7 @@ def maybe_dump_draft(
+ 
+ 
+ __all__ = [
++    "project_lm_head",
+     "MTPDumper",
+     "MTPDraftDumper",
+     "dump_enabled",
+-- 
+2.43.0
+

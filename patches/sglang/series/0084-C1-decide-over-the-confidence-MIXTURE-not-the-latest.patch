@@ -1,0 +1,159 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: aiueo52 <aiueo52@users.noreply.github.com>
+Date: Sun, 6 Sep 2026 12:18:51 +0900
+Subject: [PATCH 084/105] C1: decide over the confidence MIXTURE, not the
+ latest confidence
+
+First cut let the instantaneous position-0 bucket pick the step count. That is
+the wrong granularity: a switch leaves the draft state cold, so the decision is
+held for a grace window, and steering a 20-batch commitment with a one-step
+signal just thrashed (offline: 27 switches and -10% on prose-en).
+
+The decision now integrates over the recent bucket occupancy:
+    argmax_S  sum_b w_b (1 + E[accepted | r_b, S]) / step_time(S)
+w_b is an occupancy EMA of which bucket incoming chains start from, r_b that
+bucket's per-position acceptance rate. This is what actually addresses the
+bimodality: code-edit's accept distribution at S=15 has no mass near its own
+mean, so a threshold test on the mean asks the wrong question, while the
+mixture gets 0.25*1 + 0.75*16 right.
+
+Offline on synthetic traces shaped to the measured distributions, the mixture
+policy matches fixed W16 on code-edit where the rate-inversion-without-buckets
+variant (option 3 on its own) drops to 319 tps.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+---
+ .../srt/speculative/adaptive_confidence.py    | 63 ++++++++++++++-----
+ 1 file changed, 47 insertions(+), 16 deletions(-)
+
+diff --git a/python/sglang/srt/speculative/adaptive_confidence.py b/python/sglang/srt/speculative/adaptive_confidence.py
+index 5a9595c1db..76d80a5589 100644
+--- a/python/sglang/srt/speculative/adaptive_confidence.py
++++ b/python/sglang/srt/speculative/adaptive_confidence.py
+@@ -297,10 +297,11 @@ class ConfidenceStepSlot:
+          acceptance ``r`` (which is comparable across step counts, unlike the
+          raw mean),
+       2. folds it into the EMA of the confidence bucket the *producing* chain
+-         started from,
+-      3. reads the bucket the *next* chain will start from (position-0
+-         probability, already on the host), and
+-      4. picks the candidate with the highest ``(1 + E[accepted]) / step_time``.
++         started from, and into that bucket's occupancy EMA,
++      3. picks the candidate with the highest
++         ``sum_b w_b (1 + E[accepted | r_b, S]) / step_time(S)``,
++         i.e. the expected throughput over the confidence mixture the workload
++         is currently producing, not over its mean.
+ 
+     ``switch_margin`` is the only hysteresis: a candidate must beat the
+     incumbent by that relative margin to displace it, which both damps
+@@ -338,10 +339,14 @@ class ConfidenceStepSlot:
+         # own sample count either way, so this only sets the ceiling.
+         self.confidence_weight = float(cfg.get("confidence_weight", 1.0))
+         self.min_bucket_samples = int(cfg.get("min_bucket_samples", 12))
++        self.weight_alpha = float(cfg.get("weight_alpha", 0.02))
+ 
+         nb = len(self.BUCKETS) + 1
++        self._nb = nb
+         self._rate = [0.0] * nb
+         self._rate_n = [0] * nb
++        # Occupancy EMA: how often the incoming chains start from each bucket.
++        self._w = [1.0 / nb] * nb
+         self._pooled_rate = 0.0
+         self._pooled_n = 0
+         self._batch_count = 0
+@@ -398,6 +403,9 @@ class ConfidenceStepSlot:
+                     r if self._pooled_n == 0 else (1 - a) * self._pooled_rate + a * r
+                 )
+                 self._pooled_n += 1
++                aw = self.weight_alpha
++                for k in range(self._nb):
++                    self._w[k] = (1 - aw) * self._w[k] + (aw if k == b else 0.0)
+ 
+         self._batch_count += 1
+         if self._batch_count <= self.warmup_batches:
+@@ -409,20 +417,41 @@ class ConfidenceStepSlot:
+         return self._recompute()
+ 
+     # -- decision ----------------------------------------------------------
+-    def _rate_for_next(self) -> float:
+-        b = self._next_bucket
++    def _bucket_rate(self, b: int) -> float:
++        """Bucket *b*'s acceptance rate, shrunk toward the pooled rate."""
+         n = self._rate_n[b]
+         if n == 0 or self.confidence_weight <= 0.0:
+             return self._pooled_rate
+-        # Shrink towards the pooled rate until the bucket has seen enough.
+         w = self.confidence_weight * min(1.0, n / max(1, self.min_bucket_samples))
+         return w * self._rate[b] + (1 - w) * self._pooled_rate
+ 
+-    def best_steps(self, r: float) -> tuple[int, float]:
++    def mixture(self) -> list[tuple[float, float]]:
++        """[(weight, rate)] over the confidence buckets currently in play."""
++        if self.confidence_weight <= 0.0:
++            return [(1.0, self._pooled_rate)]
++        tot = sum(self._w) or 1.0
++        return [
++            (self._w[b] / tot, self._bucket_rate(b))
++            for b in range(self._nb)
++            if self._w[b] > 1e-4
++        ]
++
++    def value(self, steps: int, mix: list[tuple[float, float]]) -> float:
++        """Expected tokens per ms at *steps*, integrated over the mixture."""
++        num = sum(
++            w * (1.0 + self.position_bias * expected_accept(r, steps))
++            for w, r in mix
++        )
++        return num / step_time_ms(steps)
++
++    def best_steps(self, mix: list[tuple[float, float]]) -> tuple[int, float]:
+         best, best_tps = self.current_steps, -1.0
+         for s in self.candidate_steps:
+-            tps = (1.0 + self.position_bias * expected_accept(r, s)) / step_time_ms(s)
++            tps = self.value(s, mix)
+             if s == self.current_steps:
++                # The only hysteresis: a challenger must clear the incumbent by
++                # this margin, which pays for the cold draft state a switch
++                # leaves behind.
+                 tps *= 1.0 + self.switch_margin
+             if tps > best_tps:
+                 best, best_tps = s, tps
+@@ -431,17 +460,19 @@ class ConfidenceStepSlot:
+     def _recompute(self) -> bool:
+         if self._pooled_n == 0:
+             return False
+-        r = self._rate_for_next()
+-        target, _ = self.best_steps(r)
++        mix = self.mixture()
++        r = self._rate_for_next_dbg = sum(w * r for w, r in mix)
++        target, _ = self.best_steps(mix)
+         if self._dbg:
+             logger.info(
+-                "[adaptive-conf] steps=%d batch=%d conf=%s bucket=%d r=%.4f "
+-                "n=%s -> %d",
++                "[adaptive-conf] steps=%d batch=%d conf=%s rbar=%.4f "
++                "w=%s r=%s n=%s -> %d",
+                 self.current_steps,
+                 self._batch_count,
+                 f"{self._last_conf:.3f}" if self._last_conf is not None else "-",
+-                self._next_bucket,
+                 r,
++                [round(x, 3) for x in self._w],
++                [round(self._bucket_rate(b), 3) for b in range(self._nb)],
+                 self._rate_n,
+                 target,
+             )
+@@ -458,8 +489,8 @@ class ConfidenceStepSlot:
+             r,
+             f"{self._last_conf:.3f}" if self._last_conf is not None else "-",
+             old,
+-            self.position_bias * expected_accept(r, old),
++            self.value(old, mix) * step_time_ms(old) - 1.0,
+             target,
+-            self.position_bias * expected_accept(r, target),
++            self.value(target, mix) * step_time_ms(target) - 1.0,
+         )
+         return True
+-- 
+2.43.0
+

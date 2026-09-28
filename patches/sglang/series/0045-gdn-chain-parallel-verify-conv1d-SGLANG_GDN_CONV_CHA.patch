@@ -1,0 +1,656 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: aiueo52 <aiueo52@users.noreply.github.com>
+Date: Sat, 5 Sep 2026 14:20:51 +0900
+Subject: [PATCH 045/105] gdn: chain-parallel verify conv1d
+ (SGLANG_GDN_CONV_CHAIN_PARALLEL)
+
+The target-verify causal conv1d walks the T draft tokens of a sequence
+serially inside one CTA, so the 16-token verify costs ~2.5x the 4-token
+one purely from loop length (36 calls/step, 261us at T=16 vs 106us at
+T=4).
+
+With topk=1 chain speculation the draft tokens are a straight line, so
+out[t] = act(bias + sum_k w[k]*x[t-(W-1)+k]) is independent per position
+(x[<0] from the incoming conv state). The new
+_causal_conv1d_update_chain_kernel spreads the tokens over a third grid
+axis of BLOCK_T-wide tiles while keeping the per-output accumulation
+order, the fp32 accumulator, the SiLU and the store rounding of the
+serial kernel unchanged.
+
+The incoming conv state is read and rolled forward by the tile-0 CTA
+only (BLOCK_T >= width-1 guarantees it owns every output whose window
+reaches before token 0), so there is a single writer and no race.
+
+Off by default; the eagle tree path (topk>1), num_accept_tokens rolling,
+circular cache_seqlens, seqlen==1 decode, width outside 2..4 and out=
+aliasing x all keep the old kernel.
+
+Measured on RTX PRO 6000 (bs=1, dim=10240, width=4, SAVE_INTERMEDIATE),
+kernel self time: T=16 4.24us -> 2.15us (1.97x), T=4 1.64 -> 1.62us.
+84/84 torch.equal cases pass on outputs, conv state and intermediate
+window.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+---
+ .../kernels/ops/mamba/causal_conv1d_triton.py | 390 ++++++++++++++++++
+ .../test_causal_conv1d_chain_parallel.py      | 193 +++++++++
+ 2 files changed, 583 insertions(+)
+ create mode 100644 test/registered/kernels/ops/mamba/test_causal_conv1d_chain_parallel.py
+
+diff --git a/python/sglang/kernels/ops/mamba/causal_conv1d_triton.py b/python/sglang/kernels/ops/mamba/causal_conv1d_triton.py
+index 8d9a0efb4b..a498bc5a15 100644
+--- a/python/sglang/kernels/ops/mamba/causal_conv1d_triton.py
++++ b/python/sglang/kernels/ops/mamba/causal_conv1d_triton.py
+@@ -36,6 +36,32 @@ def _update_block_n(batch: int, dim: int) -> int:
+     return _UPDATE_BLOCK_N_LARGE_GRID
+ 
+ 
++# Chain-parallel verify conv (R4). OFF by default: with the flag unset the
++# dispatch below is untouched and every call keeps using the serial-over-tokens
++# `_causal_conv1d_update_kernel`.
++def _env_flag(name: str) -> bool:
++    v = os.environ.get(name)
++    return v is not None and v.strip().lower() not in ("", "0", "false", "off", "no")
++
++
++_CHAIN_PARALLEL_ENABLED = _env_flag("SGLANG_GDN_CONV_CHAIN_PARALLEL")
++_CHAIN_BLOCK_T_ENV = os.environ.get("SGLANG_GDN_CONV_CHAIN_BLOCK_T")
++_CHAIN_BLOCK_N_ENV = os.environ.get("SGLANG_GDN_CONV_CHAIN_BLOCK_N")
++_CHAIN_WARPS_ENV = os.environ.get("SGLANG_GDN_CONV_CHAIN_WARPS")
++
++
++def _chain_block_t(seqlen: int, width: int) -> int:
++    """Token tile size. Must be >= width - 1 so that tile 0 owns every output
++    whose conv window reaches into the incoming state (single state writer)."""
++    if _CHAIN_BLOCK_T_ENV:
++        bt = int(_CHAIN_BLOCK_T_ENV)
++    else:
++        bt = 4
++    bt = max(bt, triton.next_power_of_2(max(width - 1, 1)))
++    bt = min(triton.next_power_of_2(seqlen), max(bt, 1))
++    return triton.next_power_of_2(bt)
++
++
+ @triton.jit()
+ def _causal_conv1d_fwd_kernel(  # continuous batching
+     # Pointers to matrices
+@@ -1015,6 +1041,290 @@ def _causal_conv1d_update_kernel(
+         tl.extra.cuda.gdc_launch_dependents()
+ 
+ 
++# ---------------------------------------------------------------------------
++# Chain-parallel verify update kernel (SGLANG_GDN_CONV_CHAIN_PARALLEL=1).
++#
++# `_causal_conv1d_update_kernel` walks the `seqlen` speculative tokens of a
++# sequence one at a time inside a single CTA (STEP 5's serial loop), so the
++# 16-token target-verify conv costs ~2.5x the 4-token one purely from loop
++# length. With topk=1 chain speculation the draft tokens are a straight line:
++# every output position is
++#     out[t] = act(bias + sum_k w[k] * x[t - (W-1) + k])
++# with x[<0] taken from the incoming conv state, so the tokens can be evaluated
++# independently. This kernel keeps the per-output accumulation order, the fp32
++# accumulator, the SiLU and the store rounding of the serial kernel byte for
++# byte, and only spreads the tokens over a third grid axis of BLOCK_T-wide
++# tiles.
++#
++# State ownership: the incoming conv state is read AND rolled forward by the
++# tile-0 CTA only (STEP 1/STEP 2 below). Because BLOCK_T >= KERNEL_WIDTH - 1,
++# tile 0 covers every output whose window reaches before token 0, so no other
++# CTA touches `conv_state` and there is no read/write race on it (the state
++# loads of the other tiles are predicated off). The rolled-forward state is a
++# pure function of `x`, exactly as in the serial kernel.
++#
++# Not used for: the eagle tree path (topk>1, retrieve_next_token given),
++# num_accept_tokens (IS_SPEC_DECODING), circular cache_seqlens, seqlen==1
++# decode, width outside 2..4, and out= aliasing x. Those keep the old kernel.
++# ---------------------------------------------------------------------------
++@triton.jit()
++def _causal_conv1d_update_chain_kernel(
++    # Pointers to matrices
++    x_ptr,  # (batch, dim, seqlen)
++    w_ptr,  # (dim, width)
++    bias_ptr,
++    conv_state_ptr,
++    conv_state_indices_ptr,
++    intermediate_conv_window_ptr,
++    intermediate_state_indices_ptr,
++    o_ptr,  # (batch, dim, seqlen)
++    # Matrix dimensions
++    batch: int,
++    dim: tl.constexpr,
++    seqlen: tl.constexpr,
++    state_len: tl.constexpr,
++    num_cache_lines: tl.constexpr,
++    # Strides
++    stride_x_seq: tl.constexpr,
++    stride_x_dim: tl.constexpr,
++    stride_x_token: tl.constexpr,
++    stride_w_dim: tl.constexpr,
++    stride_w_width: tl.constexpr,
++    stride_conv_state_seq: tl.constexpr,
++    stride_conv_state_dim: tl.constexpr,
++    stride_conv_state_tok: tl.constexpr,
++    stride_state_indices: tl.constexpr,
++    stride_inter_seq: tl.constexpr,
++    stride_inter_step: tl.constexpr,
++    stride_inter_dim: tl.constexpr,
++    stride_inter_win: tl.constexpr,
++    stride_intermediate_state_indices: tl.constexpr,
++    stride_o_seq: tl.constexpr,
++    stride_o_dim: tl.constexpr,
++    stride_o_token: tl.constexpr,
++    # others
++    pad_slot_id: tl.constexpr,
++    # Meta-parameters
++    HAS_BIAS: tl.constexpr,
++    KERNEL_WIDTH: tl.constexpr,
++    SILU_ACTIVATION: tl.constexpr,
++    IS_CONTINUOUS_BATCHING: tl.constexpr,
++    NP2_STATELEN: tl.constexpr,
++    USE_PAD_SLOT: tl.constexpr,
++    BLOCK_N: tl.constexpr,
++    BLOCK_T: tl.constexpr,
++    SAVE_INTERMEDIATE: tl.constexpr,
++    USE_GDC: tl.constexpr = False,
++):
++    # ruff: noqa: E501
++    if USE_GDC:
++        tl.extra.cuda.gdc_wait()
++
++    idx_seq = tl.program_id(0)
++    if idx_seq >= batch:
++        return
++
++    # [BLOCK_N,] elements along the feature-dimension (channel)
++    idx_feats = tl.program_id(1) * BLOCK_N + tl.arange(0, BLOCK_N)
++    # [BLOCK_T,] output tokens handled by this CTA
++    idx_tile = tl.program_id(2)
++    is_first_tile = idx_tile == 0
++
++    if IS_CONTINUOUS_BATCHING:
++        conv_state_batch_coord = tl.load(
++            conv_state_indices_ptr + idx_seq * stride_state_indices
++        ).to(tl.int64)
++        if SAVE_INTERMEDIATE:
++            intermediate_state_batch_coord = tl.load(
++                intermediate_state_indices_ptr
++                + idx_seq * stride_intermediate_state_indices
++            ).to(tl.int64)
++    else:
++        conv_state_batch_coord = idx_seq
++    if USE_PAD_SLOT:  # noqa
++        if conv_state_batch_coord == pad_slot_id:
++            # not processing as this is not the actual sequence
++            return
++
++    mask_w = idx_feats < dim
++    x_base = x_ptr + (idx_seq * stride_x_seq) + (idx_feats * stride_x_dim)  # [BLOCK_N]
++
++    # STEP 1: READ init_state data (tile 0 only: it owns every output whose
++    # window reaches before token 0, and it is the single writer of STEP 2).
++    conv_states_base = (
++        conv_state_ptr
++        + (conv_state_batch_coord * stride_conv_state_seq)
++        + (idx_feats * stride_conv_state_dim)
++    )
++    mask_state = mask_w & is_first_tile
++
++    prior_tokens = conv_states_base
++    if KERNEL_WIDTH >= 2:
++        conv_states_ptrs = prior_tokens  # [BLOCK_N]
++        col0 = tl.load(conv_states_ptrs, mask_state, 0.0)
++    if KERNEL_WIDTH >= 3:
++        conv_states_ptrs = prior_tokens + 1 * stride_conv_state_tok  # [BLOCK_N]
++        col1 = tl.load(conv_states_ptrs, mask_state, 0.0)
++    if KERNEL_WIDTH >= 4:
++        conv_states_ptrs = prior_tokens + 2 * stride_conv_state_tok  # [BLOCK_N]
++        col2 = tl.load(conv_states_ptrs, mask_state, 0.0)
++
++    # STEP 2: roll the conv state forward. Identical to the serial kernel
++    # (non-spec-decoding branch, conv_state_token_offset == 0); executed by the
++    # tile-0 CTA only so there is exactly one writer per (seq, channel block).
++    if is_first_tile:
++        idx_tokens = tl.arange(0, NP2_STATELEN)  # [BLOCK_M]
++
++        conv_state_ptrs_source = (
++            conv_state_ptr
++            + (conv_state_batch_coord * stride_conv_state_seq)
++            + (idx_feats * stride_conv_state_dim)[None, :]
++            + ((idx_tokens + seqlen) * stride_conv_state_tok)[:, None]
++        )  # [BLOCK_M, BLOCK_N]
++        mask_src = (
++            (conv_state_batch_coord < num_cache_lines)
++            & ((idx_tokens + seqlen) < state_len)[:, None]
++            & (idx_feats < dim)[None, :]
++        )
++        conv_state = tl.load(conv_state_ptrs_source, mask_src, other=0.0)
++
++        VAL = state_len - seqlen
++        x_ptrs = (
++            x_base[None, :] + ((idx_tokens - VAL) * stride_x_token)[:, None]
++        )  # [BLOCK_M, BLOCK_N]
++        mask_x = (
++            (idx_tokens - VAL >= 0)[:, None]
++            & (idx_tokens - VAL < seqlen)[:, None]
++            & (idx_feats < dim)[None, :]
++        )
++        loaded_x = tl.load(x_ptrs, mask_x, 0.0)
++        tl.debug_barrier()
++
++        new_conv_state = tl.where(mask_src, conv_state, loaded_x)
++
++        conv_state_ptrs_target = (
++            conv_states_base + (idx_tokens * stride_conv_state_tok)[:, None]
++        )  # [BLOCK_M, BLOCK_N]
++        mask_tgt = (idx_tokens < state_len)[:, None] & (idx_feats < dim)[None, :]
++        tl.store(conv_state_ptrs_target, new_conv_state, mask_tgt)
++
++    # STEP 3: init accumulator
++    if HAS_BIAS:
++        bias = bias_ptr + idx_feats
++        mask_bias = idx_feats < dim
++        acc_preload = tl.load(bias, mask=mask_bias, other=0.0).to(
++            tl.float32
++        )  # [BLOCK_N]
++    else:
++        acc_preload = tl.zeros((BLOCK_N,), dtype=tl.float32)
++
++    # STEP 4: PRE-LOAD WEIGHTS
++    w_base = w_ptr + (idx_feats * stride_w_dim)  # [BLOCK_N,]
++    if KERNEL_WIDTH >= 2:
++        w_ptrs = w_base + (0 * stride_w_width)  # [BLOCK_N] tensor
++        w_col0 = tl.load(w_ptrs, mask_w, other=0.0)
++        w_ptrs = w_base + (1 * stride_w_width)  # [BLOCK_N] tensor
++        w_col1 = tl.load(w_ptrs, mask_w, other=0.0)
++    if KERNEL_WIDTH >= 3:
++        w_ptrs = w_base + (2 * stride_w_width)  # [BLOCK_N] tensor
++        w_col2 = tl.load(w_ptrs, mask_w, other=0.0)
++    if KERNEL_WIDTH >= 4:
++        w_ptrs = w_base + (3 * stride_w_width)  # [BLOCK_N] tensor
++        w_col3 = tl.load(w_ptrs, mask_w, other=0.0)
++
++    # STEP 5: all BLOCK_T outputs of this tile at once. matrix_x_j is the
++    # tile of inputs feeding weight column j, i.e. x[t - (KERNEL_WIDTH-1) + j],
++    # with the negative positions spliced in from the incoming conv state.
++    idx_t = idx_tile * BLOCK_T + tl.arange(0, BLOCK_T)  # [BLOCK_T]
++    mask_t = idx_t < seqlen
++    mask_out = mask_t[:, None] & (idx_feats < dim)[None, :]
++
++    idx_in0 = idx_t - (KERNEL_WIDTH - 1)
++    x_ptrs0 = x_base[None, :] + (idx_in0 * stride_x_token)[:, None]
++    matrix_x0 = tl.load(
++        x_ptrs0,
++        (idx_in0 >= 0)[:, None] & (idx_in0 < seqlen)[:, None] & mask_w[None, :],
++        0.0,
++    )
++    if KERNEL_WIDTH == 2:
++        matrix_x0 = tl.where((idx_in0 == -1)[:, None], col0[None, :], matrix_x0)
++    elif KERNEL_WIDTH == 3:
++        matrix_x0 = tl.where((idx_in0 == -1)[:, None], col1[None, :], matrix_x0)
++        matrix_x0 = tl.where((idx_in0 == -2)[:, None], col0[None, :], matrix_x0)
++    elif KERNEL_WIDTH == 4:
++        matrix_x0 = tl.where((idx_in0 == -1)[:, None], col2[None, :], matrix_x0)
++        matrix_x0 = tl.where((idx_in0 == -2)[:, None], col1[None, :], matrix_x0)
++        matrix_x0 = tl.where((idx_in0 == -3)[:, None], col0[None, :], matrix_x0)
++    acc = acc_preload[None, :] + matrix_x0 * w_col0[None, :]
++
++    idx_in1 = idx_t - (KERNEL_WIDTH - 2)
++    x_ptrs1 = x_base[None, :] + (idx_in1 * stride_x_token)[:, None]
++    matrix_x1 = tl.load(
++        x_ptrs1,
++        (idx_in1 >= 0)[:, None] & (idx_in1 < seqlen)[:, None] & mask_w[None, :],
++        0.0,
++    )
++    if KERNEL_WIDTH == 3:
++        matrix_x1 = tl.where((idx_in1 == -1)[:, None], col1[None, :], matrix_x1)
++    elif KERNEL_WIDTH == 4:
++        matrix_x1 = tl.where((idx_in1 == -1)[:, None], col2[None, :], matrix_x1)
++        matrix_x1 = tl.where((idx_in1 == -2)[:, None], col1[None, :], matrix_x1)
++    acc = acc + matrix_x1 * w_col1[None, :]
++
++    if KERNEL_WIDTH >= 3:
++        idx_in2 = idx_t - (KERNEL_WIDTH - 3)
++        x_ptrs2 = x_base[None, :] + (idx_in2 * stride_x_token)[:, None]
++        matrix_x2 = tl.load(
++            x_ptrs2,
++            (idx_in2 >= 0)[:, None] & (idx_in2 < seqlen)[:, None] & mask_w[None, :],
++            0.0,
++        )
++        if KERNEL_WIDTH == 4:
++            matrix_x2 = tl.where((idx_in2 == -1)[:, None], col2[None, :], matrix_x2)
++        acc = acc + matrix_x2 * w_col2[None, :]
++
++    if KERNEL_WIDTH >= 4:
++        idx_in3 = idx_t
++        x_ptrs3 = x_base[None, :] + (idx_in3 * stride_x_token)[:, None]
++        matrix_x3 = tl.load(
++            x_ptrs3,
++            (idx_in3 >= 0)[:, None] & (idx_in3 < seqlen)[:, None] & mask_w[None, :],
++            0.0,
++        )
++        acc = acc + matrix_x3 * w_col3[None, :]
++
++    if SAVE_INTERMEDIATE:
++        # Window state after consuming token t: the last KERNEL_WIDTH-1 inputs,
++        # i.e. slot i holds x[t - (KERNEL_WIDTH-2) + i] == matrix_x{i+1}.
++        # Layout: [seq(cache line), step, dim, win(K-1)]
++        base_ptr = (
++            intermediate_conv_window_ptr
++            + intermediate_state_batch_coord * stride_inter_seq
++            + (idx_t * stride_inter_step)[:, None]
++            + (idx_feats * stride_inter_dim)[None, :]
++        )
++        mask_inter = mask_t[:, None] & mask_w[None, :]
++        if KERNEL_WIDTH >= 2:
++            tl.store(base_ptr + 0 * stride_inter_win, matrix_x1, mask=mask_inter)
++        if KERNEL_WIDTH >= 3:
++            tl.store(base_ptr + 1 * stride_inter_win, matrix_x2, mask=mask_inter)
++        if KERNEL_WIDTH >= 4:
++            tl.store(base_ptr + 2 * stride_inter_win, matrix_x3, mask=mask_inter)
++
++    if SILU_ACTIVATION:
++        acc = acc / (1 + tl.exp(-acc))
++
++    o_ptrs = (
++        o_ptr
++        + (idx_seq) * stride_o_seq
++        + (idx_t * stride_o_token)[:, None]
++        + (idx_feats * stride_o_dim)[None, :]
++    )
++    tl.store(o_ptrs, acc, mask_out)
++
++    if USE_GDC:
++        tl.extra.cuda.gdc_launch_dependents()
++
+ def causal_conv1d_update(
+     x: torch.Tensor,
+     conv_state: torch.Tensor,
+@@ -1176,6 +1486,86 @@ def causal_conv1d_update(
+ 
+     pdl_kwargs = {"USE_GDC": True, "launch_pdl": True} if is_arch_support_pdl() else {}
+ 
++    # R4: topk=1 chain verify -> evaluate the seqlen draft tokens in parallel
++    # instead of the serial per-token loop of _causal_conv1d_update_kernel.
++    # Guarded by SGLANG_GDN_CONV_CHAIN_PARALLEL (default off). Every excluded
++    # case (eagle tree mask, num_accept_tokens rolling, circular cache_seqlens,
++    # seqlen==1 decode, width outside 2..4, out= aliasing x) falls through to
++    # the original kernel below.
++    if (
++        _CHAIN_PARALLEL_ENABLED
++        and seqlen > 1
++        and cache_seqlens is None
++        and num_accept_tokens is None
++        and retrieve_next_token is None
++        and retrieve_next_sibling is None
++        and retrieve_parent_token is None
++        and 2 <= width <= 4
++        and x.is_cuda
++        and out.data_ptr() != x.data_ptr()
++    ):
++        block_t = _chain_block_t(seqlen, width)
++        assert (
++            triton.cdiv(seqlen, block_t) == 1 or block_t >= width - 1
++        ), "chain conv: tile 0 must own every state-reading output"
++        block_n = (
++            int(_CHAIN_BLOCK_N_ENV) if _CHAIN_BLOCK_N_ENV else _update_block_n(batch, dim)
++        )
++        chain_kwargs = dict(pdl_kwargs)
++        # 8 warps: the tile is BLOCK_T*BLOCK_N elements, so the default 4 warps
++        # leaves lanes idle at BLOCK_N=64. Measured on RTX PRO 6000 (bs=1,
++        # dim=10240, width=4, SAVE_INTERMEDIATE): T=16 2.50us -> 2.18us,
++        # T=4 unchanged. num_warps does not affect the elementwise math.
++        chain_kwargs["num_warps"] = int(_CHAIN_WARPS_ENV) if _CHAIN_WARPS_ENV else 8
++        _causal_conv1d_update_chain_kernel[
++            (batch, triton.cdiv(dim, block_n), triton.cdiv(seqlen, block_t))
++        ](
++            x,
++            weight,
++            bias,
++            conv_state,
++            conv_state_indices,
++            intermediate_conv_window if intermediate_conv_window is not None else x,
++            intermediate_state_indices,
++            out,
++            batch,
++            dim,
++            seqlen,
++            state_len,
++            num_cache_lines,
++            stride_x_seq,
++            stride_x_dim,
++            stride_x_token,
++            stride_w_dim,
++            stride_w_width,
++            stride_istate_seq,
++            stride_istate_dim,
++            stride_istate_token,
++            stride_state_indices,
++            stride_inter_seq,
++            stride_inter_step,
++            stride_inter_dim,
++            stride_inter_win,
++            stride_intermediate_state_indices,
++            stride_o_seq,
++            stride_o_dim,
++            stride_o_token,
++            pad_slot_id,
++            HAS_BIAS=bias is not None,
++            KERNEL_WIDTH=width,
++            SILU_ACTIVATION=activation in ["silu", "swish"],
++            IS_CONTINUOUS_BATCHING=conv_state_indices is not None,
++            NP2_STATELEN=np2_statelen,
++            USE_PAD_SLOT=pad_slot_id is not None,
++            BLOCK_N=block_n,
++            BLOCK_T=block_t,
++            SAVE_INTERMEDIATE=intermediate_conv_window is not None,
++            **chain_kwargs,
++        )
++        if unsqueeze:
++            out = out.squeeze(-1)
++        return out
++
+     _causal_conv1d_update_kernel[grid](
+         # Pointers to matrices
+         x,
+diff --git a/test/registered/kernels/ops/mamba/test_causal_conv1d_chain_parallel.py b/test/registered/kernels/ops/mamba/test_causal_conv1d_chain_parallel.py
+new file mode 100644
+index 0000000000..e608fd8377
+--- /dev/null
++++ b/test/registered/kernels/ops/mamba/test_causal_conv1d_chain_parallel.py
+@@ -0,0 +1,193 @@
++"""Bit-exactness of the chain-parallel verify conv1d (R4).
++
++`SGLANG_GDN_CONV_CHAIN_PARALLEL=1` swaps the serial-over-tokens
++`_causal_conv1d_update_kernel` for `_causal_conv1d_update_chain_kernel` on the
++topk=1 speculative-verify path. The replacement must be byte-identical: same
++outputs, same rolled-forward conv state, same intermediate conv window.
++
++Run:
++    PYTHONPATH=<worktree>/python .venv/bin/python -m pytest -q \
++        test/registered/kernels/ops/mamba/test_causal_conv1d_chain_parallel.py
++"""
++
++import itertools
++import os
++
++import pytest
++import torch
++
++import sglang.kernels.ops.mamba.causal_conv1d_triton as ccv
++
++
++def _skip_if_no_cuda():
++    if not torch.cuda.is_available():
++        pytest.skip("CUDA required")
++
++
++def _make_inputs(bs, dim, seqlen, width, state_len, num_cache_lines, dtype, seed):
++    g = torch.Generator(device="cuda").manual_seed(seed)
++    # x laid out exactly as the verify call site builds it:
++    # mixed_qkv.view(bs, seqlen, dim).transpose(1, 2)
++    x = (
++        torch.randn(
++            (bs, seqlen, dim), generator=g, device="cuda", dtype=torch.float32
++        )
++        .to(dtype)
++        .transpose(1, 2)
++    )
++    conv_state = torch.randn(
++        (num_cache_lines, dim, state_len),
++        generator=g,
++        device="cuda",
++        dtype=torch.float32,
++    ).to(dtype)
++    weight = torch.randn(
++        (dim, width), generator=g, device="cuda", dtype=torch.float32
++    ).to(dtype)
++    bias = torch.randn((dim,), generator=g, device="cuda", dtype=torch.float32).to(
++        dtype
++    )
++    cache_indices = torch.randperm(num_cache_lines, generator=g, device="cuda")[
++        :bs
++    ].to(torch.int32)
++    inter_indices = torch.randperm(num_cache_lines, generator=g, device="cuda")[
++        :bs
++    ].to(torch.int32)
++    return x, conv_state, weight, bias, cache_indices, inter_indices
++
++
++def _run(chain, x, conv_state, weight, bias, cache_indices, inter_indices, has_bias,
++         activation, save_intermediate, seqlen, width, dtype):
++    bs, dim, _ = x.shape
++    state = conv_state.clone()
++    inter = None
++    if save_intermediate:
++        inter = torch.full(
++            (conv_state.shape[0], seqlen, dim, width - 1),
++            float("nan"),
++            device="cuda",
++            dtype=dtype,
++        )
++    out = torch.empty_like(x)
++    old = ccv._CHAIN_PARALLEL_ENABLED
++    ccv._CHAIN_PARALLEL_ENABLED = chain
++    try:
++        ccv.causal_conv1d_update(
++            x,
++            state,
++            weight,
++            bias if has_bias else None,
++            activation,
++            conv_state_indices=cache_indices,
++            intermediate_conv_window=inter,
++            intermediate_state_indices=inter_indices if save_intermediate else None,
++            out=out,
++        )
++    finally:
++        ccv._CHAIN_PARALLEL_ENABLED = old
++    torch.cuda.synchronize()
++    return out, state, inter
++
++
++# dim 10240 / width 4 are the real Qwen3.8-Flash-Next GDN conv shapes
++# (linear_conv_kernel_dim=4, q 16*128 + k 16*128 + v 48*128); seqlen 4 / 16 are
++# --speculative-num-draft-tokens for the W4 / W16 profiles.
++REAL_SHAPES = [
++    # (bs, dim, seqlen, width)
++    (1, 10240, 4, 4),
++    (1, 10240, 16, 4),
++]
++RANDOM_SHAPES = [
++    (1, 64, 4, 4),
++    (1, 129, 16, 4),
++    (2, 512, 8, 4),
++    (3, 1024, 16, 3),
++    (4, 333, 5, 2),
++    (1, 2048, 2, 4),
++    (2, 10240, 16, 4),
++    (5, 96, 7, 3),
++]
++
++
++@pytest.mark.parametrize("shape", REAL_SHAPES + RANDOM_SHAPES)
++@pytest.mark.parametrize("has_bias", [True, False])
++@pytest.mark.parametrize("activation", ["silu", None])
++@pytest.mark.parametrize("save_intermediate", [True, False])
++def test_chain_parallel_bit_exact(shape, has_bias, activation, save_intermediate):
++    _skip_if_no_cuda()
++    bs, dim, seqlen, width = shape
++    dtype = torch.bfloat16
++    state_len = width - 1
++    num_cache_lines = bs + 3
++    args = _make_inputs(
++        bs, dim, seqlen, width, state_len, num_cache_lines, dtype, seed=hash(shape) % 10007
++    )
++    ref = _run(False, *args, has_bias, activation, save_intermediate, seqlen, width, dtype)
++    new = _run(True, *args, has_bias, activation, save_intermediate, seqlen, width, dtype)
++    assert torch.equal(ref[0], new[0]), "output mismatch"
++    assert torch.equal(ref[1], new[1]), "conv state mismatch"
++    if save_intermediate:
++        a, b = ref[2], new[2]
++        assert torch.equal(
++            torch.nan_to_num(a, nan=1234.0), torch.nan_to_num(b, nan=1234.0)
++        ), "intermediate conv window mismatch"
++
++
++@pytest.mark.parametrize("block_t", [4, 8, 16])
++def test_chain_parallel_block_t_invariance(block_t):
++    """Tile size must not change the result (single state writer stays tile 0)."""
++    _skip_if_no_cuda()
++    bs, dim, seqlen, width = 1, 10240, 16, 4
++    dtype = torch.bfloat16
++    args = _make_inputs(bs, dim, seqlen, width, width - 1, bs + 2, dtype, seed=7)
++    ref = _run(False, *args, True, "silu", True, seqlen, width, dtype)
++    old = ccv._CHAIN_BLOCK_T_ENV
++    ccv._CHAIN_BLOCK_T_ENV = str(block_t)
++    try:
++        new = _run(True, *args, True, "silu", True, seqlen, width, dtype)
++    finally:
++        ccv._CHAIN_BLOCK_T_ENV = old
++    assert torch.equal(ref[0], new[0])
++    assert torch.equal(ref[1], new[1])
++    assert torch.equal(
++        torch.nan_to_num(ref[2], nan=1.0), torch.nan_to_num(new[2], nan=1.0)
++    )
++
++
++def test_decode_and_tree_paths_untouched():
++    """seqlen==1 decode and the eagle-tree (topk>1) call must keep the old kernel."""
++    _skip_if_no_cuda()
++    dim, width = 512, 4
++    dtype = torch.bfloat16
++    g = torch.Generator(device="cuda").manual_seed(3)
++    x = torch.randn((2, dim), generator=g, device="cuda", dtype=torch.float32).to(dtype)
++    conv_state = torch.randn(
++        (4, dim, width - 1), generator=g, device="cuda", dtype=torch.float32
++    ).to(dtype)
++    weight = torch.randn(
++        (dim, width), generator=g, device="cuda", dtype=torch.float32
++    ).to(dtype)
++    bias = torch.randn((dim,), generator=g, device="cuda", dtype=torch.float32).to(dtype)
++    idx = torch.tensor([0, 2], device="cuda", dtype=torch.int32)
++
++    def go(chain):
++        st = conv_state.clone()
++        old = ccv._CHAIN_PARALLEL_ENABLED
++        ccv._CHAIN_PARALLEL_ENABLED = chain
++        try:
++            o = ccv.causal_conv1d_update(
++                x, st, weight, bias, "silu", conv_state_indices=idx
++            )
++        finally:
++            ccv._CHAIN_PARALLEL_ENABLED = old
++        torch.cuda.synchronize()
++        return o, st
++
++    a = go(False)
++    b = go(True)
++    assert torch.equal(a[0], b[0])
++    assert torch.equal(a[1], b[1])
++
++
++if __name__ == "__main__":
++    raise SystemExit(pytest.main([__file__, "-q"]))
+-- 
+2.43.0
+

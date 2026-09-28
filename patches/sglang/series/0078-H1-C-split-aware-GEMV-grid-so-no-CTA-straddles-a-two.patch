@@ -1,0 +1,216 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: aiueo52 <aiueo52@users.noreply.github.com>
+Date: Sun, 6 Sep 2026 01:28:27 +0900
+Subject: [PATCH 078/105] H1-C: split-aware GEMV grid so no CTA straddles a
+ two-destination split
+
+SGLANG_GEMV_BA_SPLIT_GRID=1 (default off). When w8a16_gemv/bf16_gemv writes
+its N columns into two caller-owned buffers split at SPLIT_N and SPLIT_N is
+not a multiple of BLOCK_N, one n block straddles the split and every CTA pays
+for two masked stores. On GDN in_proj_ba (bf16, N=96, K=2560, split 48,
+BLOCK_N=32, 3 CTAs) that costs +0.9 us/call at M=16 in the server.
+
+633f70f5ff tried to make the two non-straddling CTAs take a single-store
+branch; ccf9d2faba reverted it, because the straddling CTA still does both
+stores and, on a 3-CTA launch, it alone sets the kernel's latency. This takes
+the other route: give each side of the split its own contiguous block range
+(grid n = cdiv(SPLIT_N, BLOCK_N) + cdiv(N - SPLIT_N, BLOCK_N)), so no CTA
+straddles at all and every CTA has exactly one destination. For in_proj_ba the
+grid goes 3 -> 4 CTAs, which is free on 188 SMs.
+
+Bit-exact: each output column is still produced by exactly one CTA running the
+same k loop with the same scale index and the same bf16 rounding; only the
+(pid_n -> columns) map changes. bench/h1/h1_check.py numerics is torch.equal
+against both the flag-off split path and the unsplit single-destination
+reference, at M=1/4/16, for N=96 split 48 (in_proj_ba), N=96 split 37
+(unaligned), N=16384 split 10240 (qkvz, aligned -> re-grid not taken) and
+N=2560 K=640 split 700 (fp8, split-K).
+
+CUDA-graph safe (the split-K counters still self-reset; the scratch guard
+refuses the re-grid when the extra block would not fit). PDL wait/trigger
+placement unchanged.
+
+Micro-benchmark cannot resolve this shape (it is launch-bound at 3-4 CTAs):
+5.31 -> 5.28 us at M=4, 5.89 -> 5.82 at M=16. Server A/B is the deciding
+measurement.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+---
+ .../srt/layers/quantization/w8a16_gemv.py     | 80 +++++++++++++++++--
+ 1 file changed, 74 insertions(+), 6 deletions(-)
+
+diff --git a/python/sglang/srt/layers/quantization/w8a16_gemv.py b/python/sglang/srt/layers/quantization/w8a16_gemv.py
+index e48d529320..69c9a51dc0 100644
+--- a/python/sglang/srt/layers/quantization/w8a16_gemv.py
++++ b/python/sglang/srt/layers/quantization/w8a16_gemv.py
+@@ -27,6 +27,7 @@ that holds for the decode path, which issues every linear on one stream.
+ """
+ 
+ import functools
++import os
+ from typing import Optional
+ 
+ import torch
+@@ -36,6 +37,23 @@ import triton.language as tl
+ from sglang.kernels.triton_pdl import PDL, pdl_trigger, pdl_wait
+ 
+ 
++def _env_flag(name: str, default: str = "0") -> bool:
++    return os.environ.get(name, default).lower() in ("1", "true", "yes", "on")
++
++
++#: When a two-destination store's column split does not land on a BLOCK_N tile
++#: boundary, the straddling CTA runs *both* stores and, on a 3-CTA launch like
++#: GDN in_proj_ba, sets the whole kernel's latency (see the revert of
++#: 633f70f5ff: branching inside the straddling CTA only made it worse -- the
++#: straddler still does both stores and there is nothing to hide the extra
++#: control flow behind). This flag re-grids instead: the [0, SPLIT_N) and
++#: [SPLIT_N, N) column ranges get their own contiguous block ranges, so *no*
++#: CTA straddles and every CTA has exactly one destination. Each weight row is
++#: still read by exactly one CTA running the same k loop, so the output is
++#: bit-identical -- only the (pid_n -> columns) map changes.
++BA_SPLIT_GRID = _env_flag("SGLANG_GEMV_BA_SPLIT_GRID")
++
++
+ @triton.jit
+ def _store_split(
+     acc,
+@@ -48,7 +66,9 @@ def _store_split(
+     stride_y2m,
+     m_mask,
+     n_mask,
++    seg1,
+     SPLIT_N: tl.constexpr,
++    SEG_NB0: tl.constexpr,
+ ):
+     """Write the rounded accumulator to `y`, or to `y`/`y2` split at column SPLIT_N.
+ 
+@@ -56,12 +76,31 @@ def _store_split(
+     original epilogue. With SPLIT_N > 0 columns [0, SPLIT_N) land in `y` and
+     columns [SPLIT_N, N) land in `y2` at column `n - SPLIT_N`; both stores see
+     the same rounded value, so the numerics are identical either way.
++
++    SEG_NB0 > 0 (the re-gridded form, see BA_SPLIT_GRID) means the caller has
++    already restricted this CTA's columns to one side of the split and passes
++    which side in `seg1`, so exactly one store is emitted.
+     """
+     # Round to bf16 first even when the destination is fp32: an fp32 destination
+     # is only ever the shared logits buffer, whose old contents were a bf16
+     # result widened by `.copy_()`. Rounding here keeps that bit-identical.
+     val = acc.to(tl.bfloat16).to(y_ptr.dtype.element_ty)
+-    if SPLIT_N > 0:
++    if SEG_NB0 > 0:
++        if seg1:
++            tl.store(
++                y2_ptr
++                + offs_m[:, None] * stride_y2m
++                + (offs_n - SPLIT_N)[None, :] * stride_yn,
++                val,
++                mask=m_mask[:, None] & n_mask[None, :],
++            )
++        else:
++            tl.store(
++                y_ptr + offs_m[:, None] * stride_ym + offs_n[None, :] * stride_yn,
++                val,
++                mask=m_mask[:, None] & n_mask[None, :],
++            )
++    elif SPLIT_N > 0:
+         lo = offs_n < SPLIT_N
+         tl.store(
+             y_ptr + offs_m[:, None] * stride_ym + offs_n[None, :] * stride_yn,
+@@ -111,13 +150,24 @@ def _w8a16_gemv_kernel(
+     W_KN: tl.constexpr,
+     USE_DOT: tl.constexpr,
+     USE_PDL: tl.constexpr = False,
++    SEG_NB0: tl.constexpr = 0,
+ ):
+     pid_n = tl.program_id(0)
+     pid_k = tl.program_id(1)
+-    offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
++    # SEG_NB0 > 0: the n grid is two back-to-back segments, [0, SPLIT_N) in
++    # blocks [0, SEG_NB0) and [SPLIT_N, N) in the rest, so no CTA straddles the
++    # two-destination split and every CTA has a single store.
++    seg1 = SEG_NB0 > 0 and pid_n >= SEG_NB0
++    if SEG_NB0 > 0:
++        n_lo = tl.where(seg1, SPLIT_N + (pid_n - SEG_NB0) * BLOCK_N, pid_n * BLOCK_N)
++        n_hi = tl.where(seg1, N, SPLIT_N)
++    else:
++        n_lo = pid_n * BLOCK_N
++        n_hi = N
++    offs_n = n_lo + tl.arange(0, BLOCK_N)
+     offs_m = tl.arange(0, M_PAD)
+     offs_k = tl.arange(0, BLOCK_K)
+-    n_mask = offs_n < N
++    n_mask = offs_n < n_hi
+     m_mask = offs_m < M
+     # x comes from the previous kernel; the weight/scale loads below are all
+     # inside the reduction loop, so the wait sits at the top and what PDL buys
+@@ -179,7 +229,9 @@ def _w8a16_gemv_kernel(
+             stride_y2m,
+             m_mask,
+             n_mask,
++            seg1,
+             SPLIT_N,
++            SEG_NB0,
+         )
+         pdl_trigger(USE_PDL)
+         return
+@@ -210,7 +262,9 @@ def _w8a16_gemv_kernel(
+             stride_y2m,
+             m_mask,
+             n_mask,
++            seg1,
+             SPLIT_N,
++            SEG_NB0,
+         )
+         # Every increment for this N block has happened, so a plain store is enough to
+         # leave the counter at 0 for the next launch / graph replay.
+@@ -413,13 +467,14 @@ def _plan(M: int, N: int, K: int, contig_n: bool, w_bytes: int, sms: int):
+     return _fit(M, N, (block_n, block_k, splits, use_dot, None, warps, 3))
+ 
+ 
+-def _fit(M: int, N: int, cfg):
++def _fit(M: int, N: int, cfg, n_blocks: Optional[int] = None):
+     """Drop to SPLITS=1 if the plan would not fit the preallocated scratch."""
+     block_n, block_k, splits, use_dot, w_kn, warps, stages = cfg
+     if splits == 1:
+         return cfg
+     m_pad = 16 if (use_dot or M > 1) else 1
+-    n_blocks = triton.cdiv(N, block_n)
++    if n_blocks is None:
++        n_blocks = triton.cdiv(N, block_n)
+     if (
+         splits > _MAX_SPLITS
+         or n_blocks > _WS_COUNTERS
+@@ -434,7 +489,19 @@ def _launch(x, w, s, y, M, N, K, per_channel, cfg, y2=None, split_n=0):
+     use_dot = use_dot or M > 1
+     m_pad = 16 if use_dot else 1
+     ws, cnt = _workspace(x.device)
+-    _w8a16_gemv_kernel[(triton.cdiv(N, block_n), splits)](
++    n_blocks = triton.cdiv(N, block_n)
++    seg_nb0 = 0
++    if BA_SPLIT_GRID and split_n > 0 and split_n % block_n != 0:
++        # Re-grid so the two destinations own disjoint block ranges.
++        nb0 = triton.cdiv(split_n, block_n)
++        nb = nb0 + triton.cdiv(N - split_n, block_n)
++        # The re-grid adds at most one block; only take it if the split-K
++        # scratch (sized from cdiv(N, BLOCK_N) in _fit) still covers it.
++        if splits == 1 or (
++            nb <= _WS_COUNTERS and nb * splits * m_pad * block_n <= _WS_FLOATS
++        ):
++            seg_nb0, n_blocks = nb0, nb
++    _w8a16_gemv_kernel[(n_blocks, splits)](
+         x,
+         w,
+         s,
+@@ -462,6 +529,7 @@ def _launch(x, w, s, y, M, N, K, per_channel, cfg, y2=None, split_n=0):
+         W_KN=(w.stride(0) == 1) if w_kn is None else w_kn,
+         USE_DOT=use_dot,
+         USE_PDL=PDL,
++        SEG_NB0=seg_nb0,
+         launch_pdl=PDL,
+         num_warps=num_warps,
+         num_stages=num_stages,
+-- 
+2.43.0
+

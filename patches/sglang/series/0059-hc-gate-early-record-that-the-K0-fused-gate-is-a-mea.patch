@@ -1,0 +1,72 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: aiueo52 <aiueo52@users.noreply.github.com>
+Date: Sat, 5 Sep 2026 15:57:45 +0900
+Subject: [PATCH 059/105] hc gate early: record that the K0-fused gate is a
+ measured loss
+
+W4 prof A/B (median x count over the HC boundary family, prod-0905 baseline):
+FUSED +114 us/step -- K0's median goes 1.5 -> 4.3 us because its grid is only
+M*hc CTAs, so four extra dependent row loads and block reductions cost far
+more than the 2 us gate launch they remove. MOVED is -12..-20 us/step and is
+what R6/R7 build on. Warn if FUSED is selected.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+---
+ python/sglang/srt/environ.py                | 8 +++++---
+ python/sglang/srt/layers/hyperconnection.py | 8 ++++++++
+ 2 files changed, 13 insertions(+), 3 deletions(-)
+
+diff --git a/python/sglang/srt/environ.py b/python/sglang/srt/environ.py
+index 535c79575a..f326c68aad 100644
+--- a/python/sglang/srt/environ.py
++++ b/python/sglang/srt/environ.py
+@@ -1036,9 +1036,11 @@ class Envs:
+     SGLANG_HC_COMBINE_SPLIT = EnvBool(True)
+     # Compute the HC combine gate at mix time instead of after the block, so
+     # only the apply stage is left on the boundary's post-block critical path.
+-    # 0 = off, 1 = fold the partial dots into the HC mix K0 branch CTAs (no
+-    # gate launch at all), 2 = keep the split gate kernel but launch it early
+-    # (bit-identical values).
++    # MOVED is worth -12..-20 us/step at W4 on its own (the gate's own median
++    # drops 2.0 -> 1.5 us next to the mix) and is what SGLANG_SHARED_GATE_EARLY
++    # and SGLANG_HC_APPLY_MIX_FUSED need. FUSED measured +114 us/step: K0 has
++    # only M*hc CTAs, so four more dependent row loads and block reductions
++    # cost it 1.5 -> 4.3 us, far more than the 2 us gate launch it removes.
+     SGLANG_HC_GATE_EARLY = EnvInt(HCGateEarly.OFF)
+     # Compute the shared-expert gate before the routed experts and fold the
+     # `routed + gate * shared` join into the HC combine's apply stage.
+diff --git a/python/sglang/srt/layers/hyperconnection.py b/python/sglang/srt/layers/hyperconnection.py
+index 2e0b7fecbd..d80713a948 100644
+--- a/python/sglang/srt/layers/hyperconnection.py
++++ b/python/sglang/srt/layers/hyperconnection.py
+@@ -1,5 +1,6 @@
+ from __future__ import annotations
+ 
++import logging
+ import os
+ from typing import TYPE_CHECKING, Optional
+ 
+@@ -11,6 +12,8 @@ import torch.nn.functional as F
+ from sglang.srt.layers.hc_mix_triton import fused_hc_mix, fused_hc_mix_supported
+ from sglang.srt.layers.linear import ReplicatedLinear
+ 
++logger = logging.getLogger(__name__)
++
+ _HC_FUSED = os.environ.get("SGLANG_HC_FUSED", "0") == "1"
+ # Single-launch combine (gate + apply in one Triton kernel), see
+ # sglang.srt.layers.hc_combine_fused_triton. Replaces the sgl-kernel
+@@ -42,6 +45,11 @@ def _hc_gate_early_mode() -> int:
+     from sglang.srt.environ import HCGateEarly, envs
+ 
+     mode = int(envs.SGLANG_HC_GATE_EARLY.get())
++    if mode == HCGateEarly.FUSED:
++        logger.warning(
++            "SGLANG_HC_GATE_EARLY=FUSED measured +114 us/step at W4 (K0 median "
++            "1.5 -> 4.3 us); MOVED is the useful setting."
++        )
+     if not mode and envs.SGLANG_SHARED_GATE_EARLY.get():
+         return int(HCGateEarly.MOVED)
+     return mode
+-- 
+2.43.0
+

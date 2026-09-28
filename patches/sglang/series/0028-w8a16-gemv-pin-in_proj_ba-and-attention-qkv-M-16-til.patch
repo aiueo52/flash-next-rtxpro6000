@@ -1,0 +1,43 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: aiueo52 <aiueo52@users.noreply.github.com>
+Date: Thu, 3 Sep 2026 19:56:54 +0900
+Subject: [PATCH 028/105] w8a16 gemv: pin in_proj_ba and attention-qkv M=16
+ tiles to the server-measured winners
+
+In-server (W16 profile) the bench's split-K in_proj_ba tile ran 9.2us vs 6.7us for
+the single-launch (32,512) tile, and both wide attention-qkv tiles ran 27.5us vs
+25.6us for the narrow (32,128) tile, so the shape table keeps those.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+---
+ python/sglang/srt/layers/quantization/w8a16_gemv.py | 7 ++++++-
+ 1 file changed, 6 insertions(+), 1 deletion(-)
+
+diff --git a/python/sglang/srt/layers/quantization/w8a16_gemv.py b/python/sglang/srt/layers/quantization/w8a16_gemv.py
+index 1e00f56061..e496521e1c 100644
+--- a/python/sglang/srt/layers/quantization/w8a16_gemv.py
++++ b/python/sglang/srt/layers/quantization/w8a16_gemv.py
+@@ -193,7 +193,9 @@ _BY_SHAPE = {
+     (1, False, 32768, 2560): (128, 256, 1, True, None, 8, 3),  # draft lm_head, 1.14x
+     (1, False, 248320, 2560): (128, 256, 1, True, None, 8, 3),  # lm_head, 1.02x
+     # bf16, bf16_gemv
+-    (2, False, 96, 2560): (16, 256, 10, True, None, 2, 4),  # GDN in_proj_ba, 2.0-2.2x
++    # GDN in_proj_ba: the bench's split-K winner (16,256,10,...,2,4) measured 9.2us in the
++    # server vs 7.9us for this single-launch tile (2026-09-03 gemv3 trace), so keep it.
++    (2, False, 96, 2560): (32, 512, 1, True, None, 4, 3),
+     (2, False, 512, 2560): (16, 128, 10, True, None, 2, 4),  # MoE router gate, 1.04x
+     # The 2560x6144 out_proj/o_proj and the 13312x2560 attention qkv are absent at
+     # M > 1 because _plan's fallback already emits the fastest tile measured for them.
+@@ -202,6 +204,9 @@ _BY_SHAPE_M16 = {
+     # The _BY_SHAPE gate_up tile loses 12% at M=16; the qkvz tile below loses 1% at M=4.
+     (1, False, 1280, 2560): (16, 64, 10, True, None, 4, 3),  # shared gate_up, 1.03x
+     (1, False, 16384, 2560): (64, 128, 1, True, None, 4, 3),  # GDN in_proj_qkvz, 1.04x
++    # attention qkv at M=16: both the wide (128,256,8w) tile and the (64,128) qkvz tile
++    # measured 27.5us in the server vs 25.6us for the narrow single-split tile; pin it.
++    (1, False, 13312, 2560): (32, 128, 1, True, None, 4, 3),
+ }
+ _BY_SHAPE_M1 = {
+     # USE_DOT False (the broadcast path, M_PAD 1) is only legal at M == 1.
+-- 
+2.43.0
+

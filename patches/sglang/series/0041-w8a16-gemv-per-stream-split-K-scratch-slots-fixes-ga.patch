@@ -1,0 +1,120 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: aiueo52 <aiueo52@users.noreply.github.com>
+Date: Fri, 4 Sep 2026 05:49:39 +0900
+Subject: [PATCH 041/105] w8a16 gemv: per-stream split-K scratch slots (fixes
+ garbage output with SGLANG_ROUTER_GEMV=1)
+
+The MoE block overlaps the shared expert with the router/routed experts on an alt
+stream; two split-K launches sharing one scratch and one counter array while running
+concurrently corrupted each other's partials. Work inside the alt-stream blocks now
+uses scratch slot 1 (scratch_slot context manager), prealloc materializes both slots.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+---
+ .../srt/layers/quantization/w8a16_gemv.py     | 44 +++++++++++++++++--
+ python/sglang/srt/models/qwen2_moe.py         |  5 ++-
+ 2 files changed, 43 insertions(+), 6 deletions(-)
+
+diff --git a/python/sglang/srt/layers/quantization/w8a16_gemv.py b/python/sglang/srt/layers/quantization/w8a16_gemv.py
+index 38386edb7f..0c44da3725 100644
+--- a/python/sglang/srt/layers/quantization/w8a16_gemv.py
++++ b/python/sglang/srt/layers/quantization/w8a16_gemv.py
+@@ -161,17 +161,52 @@ _WS = {}
+ _ONES = {}
+ 
+ 
+-def _workspace(device):
+-    ws = _WS.get(device)
++# Split-K scratch slots. The decode path issues most linears on one stream, but the
++# MoE block overlaps the shared expert with the router/routed experts on an alt
++# stream (qwen2_moe.py), and two split-K launches that share one scratch and one
++# counter array while running concurrently corrupt each other's partials (seen as
++# garbage generations with SGLANG_ROUTER_GEMV=1). Work issued inside
++# ``with scratch_slot(1):`` uses a second, independent scratch.
++_N_SLOTS = 2
++_SLOT = 0
++
++
++class scratch_slot:
++    """Context manager selecting the split-K scratch slot for launches inside it."""
++
++    def __init__(self, slot: int):
++        assert 0 <= slot < _N_SLOTS
++        self.slot = slot
++        self.prev = 0
++
++    def __enter__(self):
++        global _SLOT
++        self.prev = _SLOT
++        _SLOT = self.slot
++        return self
++
++    def __exit__(self, *exc):
++        global _SLOT
++        _SLOT = self.prev
++        return False
++
++
++def _workspace_slot(device, slot: int):
++    key = (device, slot)
++    ws = _WS.get(key)
+     if ws is None:
+         ws = (
+             torch.empty(_WS_FLOATS, dtype=torch.float32, device=device),
+             torch.zeros(_WS_COUNTERS, dtype=torch.int32, device=device),
+         )
+-        _WS[device] = ws
++        _WS[key] = ws
+     return ws
+ 
+ 
++def _workspace(device):
++    return _workspace_slot(device, _SLOT)
++
++
+ def prealloc(device) -> None:
+     """Materialize the per-device scratch before any CUDA graph is captured.
+ 
+@@ -180,7 +215,8 @@ def prealloc(device) -> None:
+     first be allocated inside a capture and would live in that graph's private
+     memory pool. Called from ``Fp8LinearMethod.process_weights_after_loading``.
+     """
+-    _workspace(device)
++    for slot in range(_N_SLOTS):
++        _workspace_slot(device, slot)
+     if device not in _ONES:
+         _ONES[device] = torch.ones(1, dtype=torch.float32, device=device)
+ 
+diff --git a/python/sglang/srt/models/qwen2_moe.py b/python/sglang/srt/models/qwen2_moe.py
+index f802bf69c3..e1cce941ab 100644
+--- a/python/sglang/srt/models/qwen2_moe.py
++++ b/python/sglang/srt/models/qwen2_moe.py
+@@ -41,6 +41,7 @@ from sglang.srt.eplb.expert_distribution import get_global_expert_distribution_r
+ from sglang.srt.eplb.expert_location import ModelConfigForExpertLocation
+ from sglang.srt.eplb.expert_location_dispatch import ExpertLocationDispatchInfo
+ from sglang.srt.layers.activation import SiluAndMul
++from sglang.srt.layers.quantization.w8a16_gemv import scratch_slot as _gemv_scratch_slot
+ from sglang.srt.layers.communicator import (
+     LayerCommunicator,
+     LayerScatterModes,
+@@ -657,7 +658,7 @@ class Qwen2MoeSparseMoeBlock(nn.Module):
+             elif enable_cuda_shared_overlap:
+                 current_stream = torch.cuda.current_stream()
+                 self.alt_stream.wait_stream(current_stream)
+-                with torch.cuda.stream(self.alt_stream):
++                with torch.cuda.stream(self.alt_stream), _gemv_scratch_slot(1):
+                     shared_output = self._forward_shared_experts(hidden_states)
+                     shared_output.record_stream(self.alt_stream)
+                     shared_event = self.alt_stream.record_event()
+@@ -764,7 +765,7 @@ class Qwen2MoeSparseMoeBlock(nn.Module):
+                 staged = True
+         # ===== END TO BE REFACTORED ====
+ 
+-        with torch.cuda.stream(self.alt_stream):
++        with torch.cuda.stream(self.alt_stream), _gemv_scratch_slot(1):
+             router_output = self._forward_router_experts(hidden_states)
+ 
+         current_stream.wait_stream(self.alt_stream)
+-- 
+2.43.0
+

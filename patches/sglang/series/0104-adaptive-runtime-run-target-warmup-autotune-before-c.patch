@@ -1,0 +1,189 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: aiueo52 <aiueo52@users.noreply.github.com>
+Date: Mon, 7 Sep 2026 22:54:51 +0900
+Subject: [PATCH 104/105] adaptive runtime: run target warmup/autotune before
+ capturing candidate graphs (SGLANG_ADAPTIVE_TARGET_AUTOTUNE=1, default off;
+ 49 tests)
+
+Implemented by gpt-6-astra (X3). Removes 48 finalizeMoeRouting launches/step and restores the fast MoE GEMM in the non-initial adaptive state (S=7 step -10.7%).
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+---
+ .../srt/speculative/adaptive_runtime_state.py | 34 ++++++++
+ .../sglang/srt/speculative/eagle_worker_v2.py | 16 ++--
+ .../spec/test_adaptive_target_autotune.py     | 80 +++++++++++++++++++
+ 3 files changed, 124 insertions(+), 6 deletions(-)
+ create mode 100644 test/registered/unit/spec/test_adaptive_target_autotune.py
+
+diff --git a/python/sglang/srt/speculative/adaptive_runtime_state.py b/python/sglang/srt/speculative/adaptive_runtime_state.py
+index 62f9d1fd0a..2cc99fc073 100644
+--- a/python/sglang/srt/speculative/adaptive_runtime_state.py
++++ b/python/sglang/srt/speculative/adaptive_runtime_state.py
+@@ -1,3 +1,5 @@
++import os
++from contextlib import contextmanager
+ from dataclasses import dataclass
+ from typing import TYPE_CHECKING, Protocol
+ 
+@@ -18,6 +20,38 @@ if TYPE_CHECKING:
+     )
+ 
+ 
++@contextmanager
++def adaptive_target_graph_warmup(model_runner, attn_backend):
++    """Opt in to target autotuning before each additional state's capture.
++
++    BaseRunner.warmup normally runs once per model. Additional adaptive
++    states share that model but introduce a new verify width after the draft
++    autotuner has run. Skipping their target warmup can capture untuned MoE
++    tactics (including a separate finalize kernel) for the state's lifetime.
++
++    Reuse the normal warmup and its disable/determinism gates. The dummy
++    forward reads model_runner.attn_backend, so temporarily install the
++    candidate's backend as well; never warm up against the base state's
++    graph metadata. This context is only used during state construction.
++    """
++    if os.environ.get("SGLANG_ADAPTIVE_TARGET_AUTOTUNE", "") != "1":
++        yield
++        return
++    missing = object()
++    warmed = getattr(model_runner, "_kernel_warmed_up", missing)
++    backend = model_runner.attn_backend
++    model_runner._kernel_warmed_up = False
++    model_runner.attn_backend = attn_backend
++    try:
++        yield
++    finally:
++        model_runner.attn_backend = backend
++        if warmed is missing:
++            del model_runner._kernel_warmed_up
++        else:
++            model_runner._kernel_warmed_up = warmed
++
++
+ def init_cuda_graph_state_no_shrink(
+     attn_backend, max_bs: int, max_num_token: int
+ ) -> None:
+diff --git a/python/sglang/srt/speculative/eagle_worker_v2.py b/python/sglang/srt/speculative/eagle_worker_v2.py
+index 75f926929f..a3567b7349 100644
+--- a/python/sglang/srt/speculative/eagle_worker_v2.py
++++ b/python/sglang/srt/speculative/eagle_worker_v2.py
+@@ -65,6 +65,7 @@ from sglang.srt.speculative.adaptive_confidence import (
+ from sglang.srt.speculative.adaptive_runtime_state import (
+     AdaptiveController,
+     SpecRuntimeState,
++    adaptive_target_graph_warmup,
+ )
+ from sglang.srt.speculative.base_spec_worker import BaseSpecWorker, EagleDraftWorkerBase
+ from sglang.srt.speculative.draft_utils import DraftBackendFactory
+@@ -1795,12 +1796,15 @@ class EAGLEWorkerV2(BaseSpecWorker):
+                 )
+ 
+                 _backup_private_t = _set_private(True)
+-                target_graph_runner = TargetGraphRunnerCls(
+-                    target_model_runner,
+-                    attn_backend=target_attn_backend,
+-                    speculative_num_steps=speculative_num_steps,
+-                    speculative_num_draft_tokens=speculative_num_draft_tokens,
+-                )
++                with adaptive_target_graph_warmup(
++                    target_model_runner, target_attn_backend
++                ):
++                    target_graph_runner = TargetGraphRunnerCls(
++                        target_model_runner,
++                        attn_backend=target_attn_backend,
++                        speculative_num_steps=speculative_num_steps,
++                        speculative_num_draft_tokens=speculative_num_draft_tokens,
++                    )
+                 if "no_gdn_recovery" not in split:
+                     target_model_runner.maybe_capture_gdn_recovery_graphs(
+                         attn_backend=target_attn_backend,
+diff --git a/test/registered/unit/spec/test_adaptive_target_autotune.py b/test/registered/unit/spec/test_adaptive_target_autotune.py
+new file mode 100644
+index 0000000000..0624433b46
+--- /dev/null
++++ b/test/registered/unit/spec/test_adaptive_target_autotune.py
+@@ -0,0 +1,80 @@
++"""CPU-only regression for candidate target warmup before graph capture."""
++import os
++import unittest
++from types import SimpleNamespace
++from unittest.mock import Mock, patch
++
++from sglang.srt.speculative.adaptive_runtime_state import adaptive_target_graph_warmup
++
++FLAG = 'SGLANG_ADAPTIVE_TARGET_AUTOTUNE'
++
++
++class TestAdaptiveTargetAutotune(unittest.TestCase):
++    def test_disabled_preserves_model_and_constructor_changes(self):
++        for value in ('', '0', 'true'):
++            with self.subTest(value=value), patch.dict(os.environ, {FLAG: value}):
++                base, candidate = object(), object()
++                mr = SimpleNamespace(attn_backend=base, _kernel_warmed_up=True)
++                with adaptive_target_graph_warmup(mr, candidate):
++                    self.assertIs(mr.attn_backend, base)
++                    self.assertTrue(mr._kernel_warmed_up)
++                    mr._kernel_warmed_up = 'constructor-owned'
++                self.assertEqual(mr._kernel_warmed_up, 'constructor-owned')
++
++    def test_enabled_uses_candidate_then_restores(self):
++        with patch.dict(os.environ, {FLAG: '1'}):
++            base, candidate = object(), object()
++            mr = SimpleNamespace(attn_backend=base, _kernel_warmed_up=True)
++            with adaptive_target_graph_warmup(mr, candidate):
++                self.assertIs(mr.attn_backend, candidate)
++                self.assertFalse(mr._kernel_warmed_up)
++                mr._kernel_warmed_up = True
++            self.assertIs(mr.attn_backend, base)
++            self.assertTrue(mr._kernel_warmed_up)
++
++    def test_restores_on_capture_failure(self):
++        with patch.dict(os.environ, {FLAG: '1'}):
++            base = object()
++            mr = SimpleNamespace(attn_backend=base, _kernel_warmed_up=True)
++            with self.assertRaisesRegex(RuntimeError, 'capture failed'):
++                with adaptive_target_graph_warmup(mr, object()):
++                    raise RuntimeError('capture failed')
++            self.assertIs(mr.attn_backend, base)
++            self.assertTrue(mr._kernel_warmed_up)
++
++    def test_absent_warmup_attribute_is_restored(self):
++        with patch.dict(os.environ, {FLAG: '1'}):
++            mr = SimpleNamespace(attn_backend=object())
++            with adaptive_target_graph_warmup(mr, object()):
++                self.assertFalse(mr._kernel_warmed_up)
++            self.assertFalse(hasattr(mr, '_kernel_warmed_up'))
++
++    def test_real_base_warmup_retunes_and_respects_existing_gate(self):
++        from sglang.srt.model_executor.runner.base_runner import BaseRunner
++        module = 'sglang.srt.model_executor.runner.base_runner'
++        for enabled, allowed in ((False, True), (True, False), (True, True)):
++            with self.subTest(enabled=enabled, allowed=allowed):
++                base, candidate = object(), object()
++                mr = SimpleNamespace(attn_backend=base, _kernel_warmed_up=True,
++                                     device='cuda', ps=SimpleNamespace(pp_size=1))
++                seen = []
++                runner = SimpleNamespace(
++                    model_runner=mr,
++                    _pre_initialize_flashinfer_allreduce_workspace=Mock(),
++                    _pre_initialize_fi_a2a_workspace=Mock(),
++                    _autotune_buffers=lambda: (object(), 1),
++                    _flashinfer_autotune=lambda **kw: seen.append(mr.attn_backend),
++                )
++                with patch.dict(os.environ, {FLAG: '1' if enabled else '0'}), \
++                     patch(module+'.should_run_flashinfer_autotune', return_value=allowed), \
++                     patch(module+'.maybe_flashinfer_autotune_extend'):
++                    with adaptive_target_graph_warmup(mr, candidate):
++                        BaseRunner.warmup(runner)
++                        BaseRunner.warmup(runner)
++                self.assertEqual(seen, [candidate] if enabled and allowed else [])
++                self.assertIs(mr.attn_backend, base)
++                self.assertTrue(mr._kernel_warmed_up)
++
++
++if __name__ == '__main__':
++    unittest.main()
+-- 
+2.43.0
+

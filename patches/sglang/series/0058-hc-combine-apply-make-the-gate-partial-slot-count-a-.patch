@@ -1,0 +1,150 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: aiueo52 <aiueo52@users.noreply.github.com>
+Date: Sat, 5 Sep 2026 15:44:54 +0900
+Subject: [PATCH 058/105] hc combine apply: make the gate partial-slot count a
+ template parameter
+
+The runtime loop cost ~0.4 us a call (1.6 vs 1.2 us median at W4) against the
+original apply kernel's unrolled kSplit loop. One export per (shared fold,
+slot count) instead.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+---
+ .../jit/csrc/elementwise/hc_combine.cuh       | 26 ++++++++---------
+ .../kernels/ops/elementwise/hc_combine.py     | 28 +++++++++++++------
+ 2 files changed, 32 insertions(+), 22 deletions(-)
+
+diff --git a/python/sglang/kernels/jit/csrc/elementwise/hc_combine.cuh b/python/sglang/kernels/jit/csrc/elementwise/hc_combine.cuh
+index 9508de2196..3d6b8e42bf 100644
+--- a/python/sglang/kernels/jit/csrc/elementwise/hc_combine.cuh
++++ b/python/sglang/kernels/jit/csrc/elementwise/hc_combine.cuh
+@@ -417,18 +417,17 @@ struct HcCombineApplyParams {
+   const void* residual;         // [M, HC * H]
+   const void* shared_output;    // [M, H], only read when kUseShared
+   const float* shared_gate;     // [M],    only read when kUseShared
+-  const float* partials;        // [M, num_partials, HC]
++  const float* partials;        // [M, kNumPartials, HC]
+   void* output;                 // [M, HC * H]
+-  int32_t num_partials;
+ };
+ 
+ /**
+  * \brief Apply-only stage of the HC combine, for a gate computed earlier.
+  *
+  * Same geometry and math as ``hc_combine_apply_kernel``, except that the number
+- * of gate partial slots is a runtime value: the standalone gate kernel emits
+- * kSplit=8 of them, while the HC-mix K0 epilogue (SGLANG_HC_GATE_EARLY) emits
+- * one per branch CTA, i.e. kHcCount.
++ * of gate partial slots is a template parameter: the standalone gate kernel
++ * emits kSplit=8 of them, while the HC-mix K0 epilogue (SGLANG_HC_GATE_EARLY)
++ * emits one per branch CTA, i.e. kHcCount.
+  *
+  * With kUseShared the shared-expert join is folded in as well
+  * (SGLANG_SHARED_GATE_EARLY):
+@@ -440,7 +439,7 @@ struct HcCombineApplyParams {
+  * ``fused_gate_sigmoid_mul_add`` performs before the combine reads it, so the
+  * folded path is bit-identical to the separate-kernel one.
+  */
+-template <int64_t kHcCount, int64_t kHiddenSize, bool kUsePDL, typename Float, bool kUseShared>
++template <int64_t kHcCount, int64_t kHiddenSize, bool kUsePDL, typename Float, bool kUseShared, int kNumPartials>
+ __global__ __launch_bounds__(hc_combine_split_detail::kApplyThreads) void hc_combine_apply2_kernel(
+     const HcCombineApplyParams __grid_constant__ params) {
+   using namespace device;
+@@ -465,10 +464,10 @@ __global__ __launch_bounds__(hc_combine_split_detail::kApplyThreads) void hc_com
+ 
+   PDLWaitPrimary<kUsePDL>();
+ 
+-  const int32_t num_partials = params.num_partials;
+   float total = 0.0f;
+-  for (int32_t s = 0; s < num_partials; ++s) {
+-    total += params.partials[(static_cast<int64_t>(m) * num_partials + s) * kHcCount + branch];
++#pragma unroll
++  for (int s = 0; s < kNumPartials; ++s) {
++    total += params.partials[(static_cast<int64_t>(m) * kNumPartials + s) * kHcCount + branch];
+   }
+   const float a = 2.0f / (1.0f + math::exp(-total / kHcCount));
+ 
+@@ -513,10 +512,11 @@ __global__ __launch_bounds__(hc_combine_split_detail::kApplyThreads) void hc_com
+   PDLTriggerSecondary<kUsePDL>();
+ }
+ 
+-template <int64_t kHcCount, int64_t kHiddenSize, bool kUsePDL, typename DType, bool kUseShared>
++template <int64_t kHcCount, int64_t kHiddenSize, bool kUsePDL, typename DType, bool kUseShared, int kNumPartials>
+ struct HcCombineApplyKernel {
+   static_assert(sizeof(DType) == 2, "HcCombine only supports 2-byte dtypes");
+-  static constexpr auto kernel = hc_combine_apply2_kernel<kHcCount, kHiddenSize, kUsePDL, DType, kUseShared>;
++  static constexpr auto kernel =
++      hc_combine_apply2_kernel<kHcCount, kHiddenSize, kUsePDL, DType, kUseShared, kNumPartials>;
+ 
+   /// Apply without the shared-expert fold; `block_output` is the finished block output.
+   static void
+@@ -548,8 +548,7 @@ struct HcCombineApplyKernel {
+         .verify(residual)
+         .verify(output);
+     auto part_rows = SymbolicSize{"partial_rows"};
+-    auto num_partials = SymbolicSize{"num_partials"};
+-    TensorMatcher({part_rows, num_partials, kHcCount}).with_dtype<fp32_t>().with_device(device).verify(partials);
++    TensorMatcher({part_rows, kNumPartials, kHcCount}).with_dtype<fp32_t>().with_device(device).verify(partials);
+     if constexpr (kUseShared) {
+       TensorMatcher({M, kHiddenSize}).with_dtype<DType>().with_device(device).verify(shared_output);
+       auto gate_rows = SymbolicSize{"gate_rows"};
+@@ -563,7 +562,6 @@ struct HcCombineApplyKernel {
+         .shared_gate = kUseShared ? static_cast<const float*>(shared_gate.data_ptr()) : nullptr,
+         .partials = static_cast<const float*>(partials.data_ptr()),
+         .output = output.data_ptr(),
+-        .num_partials = static_cast<int32_t>(num_partials.unwrap()),
+     };
+ 
+     const auto num_tokens = static_cast<uint32_t>(M.unwrap());
+diff --git a/python/sglang/kernels/ops/elementwise/hc_combine.py b/python/sglang/kernels/ops/elementwise/hc_combine.py
+index 09afe37386..f5891e972d 100644
+--- a/python/sglang/kernels/ops/elementwise/hc_combine.py
++++ b/python/sglang/kernels/ops/elementwise/hc_combine.py
+@@ -43,13 +43,24 @@ def _jit_hc_combine_module(
+             ("hc_combine", f"HcCombineKernel<{args}>::run"),
+             ("hc_combine_split", f"HcCombineSplitKernel<{args}>::run"),
+             ("hc_combine_gate", f"HcCombineSplitKernel<{args}>::run_gate"),
+-            (
+-                "hc_combine_apply",
+-                f"HcCombineApplyKernel<{args}, false>::run_plain",
++            # One export per (shared fold, partial-slot count): the slot count
++            # is 8 from the split gate kernel and hc_count from the HC-mix K0
++            # epilogue, and unrolling that loop is worth ~0.4 us a call.
++            *(
++                (
++                    f"hc_combine_apply_p{n}",
++                    f"HcCombineApplyKernel<{args}, false, {n}>::run_plain",
++                )
++                for n in (hc_count, 8)
++                if n == 8 or hc_count != 8
+             ),
+-            (
+-                "hc_combine_apply_shared",
+-                f"HcCombineApplyKernel<{args}, true>::run",
++            *(
++                (
++                    f"hc_combine_apply_shared_p{n}",
++                    f"HcCombineApplyKernel<{args}, true, {n}>::run",
++                )
++                for n in (hc_count, 8)
++                if n == 8 or hc_count != 8
+             ),
+         ],
+     )
+@@ -173,10 +184,11 @@ def hc_combine_apply(
+     else:
+         out = out.reshape(-1, hc_count * hidden_size)
+     module = _jit_hc_combine_module(hc_count, hidden_size, residual.dtype)
++    n = partials.shape[1]
+     if shared_output is None:
+-        module.hc_combine_apply(y, r, partials, out)
++        getattr(module, f"hc_combine_apply_p{n}")(y, r, partials, out)
+     else:
+-        module.hc_combine_apply_shared(
++        getattr(module, f"hc_combine_apply_shared_p{n}")(
+             y, r, shared_output.reshape(-1, hidden_size), shared_gate, partials, out
+         )
+     return out.reshape(residual.shape)
+-- 
+2.43.0
+

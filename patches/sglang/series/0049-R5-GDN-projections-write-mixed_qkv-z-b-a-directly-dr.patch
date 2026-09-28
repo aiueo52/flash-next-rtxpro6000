@@ -1,0 +1,281 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: aiueo52 <aiueo52@users.noreply.github.com>
+Date: Sat, 5 Sep 2026 14:20:27 +0900
+Subject: [PATCH 049/105] R5: GDN projections write mixed_qkv/z/b/a directly,
+ dropping the re-layout copy
+
+SGLANG_GDN_PROJ_DIRECT_LAYOUT=1 (default off).
+
+For the contiguous Qwen3.5 checkpoint layout the fused split/reshape/cat kernel
+is a pure row compaction: in_proj_qkvz produces [all_q | all_k | all_v | all_z]
+and the consumers want [all_q | all_k | all_v] plus z as two separately
+row-contiguous tensors; in_proj_ba produces [all_b | all_a] and the consumers
+want b and a. No head is reordered, no value changes -- the kernel only exists
+because the two halves need their own row strides. That is 36 launches per
+verify step (one per GDN layer), ~2.8 us each.
+
+With the flag on, the layer allocates the four consumer buffers up front and
+the two projections write them with the two-destination GEMV epilogue: qkvz via
+`Fp8LinearMethod.apply_into_split` (new; the W8A16 GEMV path only), b/a via
+`bf16_gemv(out=, out2=, split_n=)`. The qkvz/ba parallel-stream structure is
+preserved exactly (qkvz on the current stream, ba on alt_stream under the same
+capture-mode/threshold condition). Composes with R2: when the backend hands
+back stash slices, the ba GEMV writes the stash and no a/b buffer is allocated
+at all.
+
+Everything else falls back to the untouched control flow: non-CUDA, aiter,
+TP>1, the merged BF16 in_proj weight, a non-fused head-group ratio, a
+non-GEMV-able qkvz weight, M>16, or a non-2-D/non-bf16 input.
+
+Bit-exactness on real layer-0 weights (in_proj_qkv/z/a/b of
+Qwen3.8-Flash-Next-NVFP4-mtpft3, per-channel FP8 for qkvz), M=1/4/16: all four
+of mixed_qkv, z, b and a are torch.equal to the current
+gemv-then-split-kernel result. The GEMV itself is untouched -- same k loop,
+same fp32 accumulation order, same per-channel scale index, same bf16 rounding.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+---
+ python/sglang/srt/layers/quantization/fp8.py |  39 +++++
+ python/sglang/srt/models/qwen3_5.py          | 148 ++++++++++++++++++-
+ 2 files changed, 182 insertions(+), 5 deletions(-)
+
+diff --git a/python/sglang/srt/layers/quantization/fp8.py b/python/sglang/srt/layers/quantization/fp8.py
+index 88b8c8a3bc..ed7d275463 100644
+--- a/python/sglang/srt/layers/quantization/fp8.py
++++ b/python/sglang/srt/layers/quantization/fp8.py
+@@ -1017,6 +1017,45 @@ class Fp8LinearMethod(LinearMethodBase):
+             return None
+         return w8a16_gemv(x, w, layer.weight_scale, out=out)
+ 
++    def apply_into_split(
++        self,
++        layer: torch.nn.Module,
++        x: torch.Tensor,
++        out: torch.Tensor,
++        out2: torch.Tensor,
++        split_n: int,
++        bias: Optional[torch.Tensor] = None,
++    ) -> bool:
++        """`apply` writing the output columns into two caller-owned buffers.
++
++        Columns [0, split_n) land in `out`, columns [split_n, N) in `out2` at
++        column `n - split_n`. Only the GEMV's store epilogue differs from
++        `apply_into`, so the bytes are identical to `apply` followed by two
++        slice copies. Returns False when this call cannot take the GEMV path
++        (the caller must then fall back to `apply`).
++        """
++        if bias is not None or not self._w8a16_gemv_ok(layer, x):
++            return False
++        from sglang.srt.layers.quantization.w8a16_gemv import w8a16_gemv
++
++        w = layer.weight.t()
++        N = w.shape[0]
++        M = x.shape[0]
++        if (
++            not (0 < split_n < N)
++            or tuple(out.shape) != (M, split_n)
++            or tuple(out2.shape) != (M, N - split_n)
++            or out.dtype is not torch.bfloat16
++            or out2.dtype is not torch.bfloat16
++            or out.device != x.device
++            or out2.device != x.device
++            or out.stride(1) != 1
++            or out2.stride(1) != 1
++        ):
++            return False
++        w8a16_gemv(x, w, layer.weight_scale, out=out, out2=out2, split_n=split_n)
++        return True
++
+     def apply(
+         self,
+         layer: torch.nn.Module,
+diff --git a/python/sglang/srt/models/qwen3_5.py b/python/sglang/srt/models/qwen3_5.py
+index a150f1951f..438aa39dbb 100644
+--- a/python/sglang/srt/models/qwen3_5.py
++++ b/python/sglang/srt/models/qwen3_5.py
+@@ -23,9 +23,12 @@ import torch
+ import os as _os
+ 
+ _GDN_BA_TRITON_GEMV = _os.environ.get("SGLANG_GDN_BA_TRITON_GEMV", "0") == "1"
+-# R2: a/b are written straight into the RecoverSSM stash, so the two per-layer
+-# stash copies of the verify step disappear. Destination change only -- the
+-# stored values are the same bytes.
++# R5: the GDN projections write mixed_qkv/z and b/a in the consumer layout, so
++# the per-layer fused split/reshape/cat kernel disappears (36 launches / verify
++# step). R2: a/b are written straight into the RecoverSSM stash, so the two
++# per-layer stash copies disappear. Both are output-destination changes only --
++# same GEMV, same accumulation order, same scales, same bf16 rounding.
++_GDN_PROJ_DIRECT_LAYOUT = _os.environ.get("SGLANG_GDN_PROJ_DIRECT_LAYOUT", "0") == "1"
+ _GDN_AB_STASH_DIRECT = _os.environ.get("SGLANG_GDN_AB_STASH_DIRECT", "0") == "1"
+ import torch.nn as nn
+ import triton
+@@ -752,6 +755,52 @@ class Qwen3_5GatedDeltaNet(nn.Module):
+             projected_states_ba = self._in_proj_ba_skinny(hs_bf16)
+         return projected_states_qkvz, projected_states_ba
+ 
++    # ---- direct-layout GDN projection (SGLANG_GDN_PROJ_DIRECT_LAYOUT) -------
++    #
++    # The contiguous checkpoint layout makes `fused_qkvzba_split_reshape_cat_
++    # contiguous` a pure row compaction: mixed_qkvz is [all_q | all_k | all_v |
++    # all_z] and the consumers want [all_q | all_k | all_v] and z as two
++    # separately row-contiguous tensors; mixed_ba is [all_b | all_a] and the
++    # consumers want b and a. No head is reordered. So the two projections can
++    # write those four buffers directly with a two-destination store, and the
++    # copy kernel is not needed at all.
++
++    def _direct_layout_ok(self) -> bool:
++        """Whether this layer can run the direct-layout projection at all.
++
++        Static (weight/config) part only; the per-call shape checks live in
++        `_forward_input_proj_direct`. Cached because it is asked once per layer
++        per forward.
++        """
++        ok = getattr(self, "_direct_layout_ok_cached", None)
++        if ok is not None:
++            return ok
++        ok = (
++            _is_cuda
++            and not _is_npu
++            and not _is_cpu
++            and not _use_aiter
++            and self._fused_in_proj_weight is None
++            and not self._fused_input_proj_cpu_enabled.value
++            and self.num_k_heads > 0
++            and self.num_v_heads % self.num_k_heads == 0
++            and self.num_v_heads // self.num_k_heads in _GDN_FUSED_QKVZBA_RATIOS
++            and self.attn_tp_size == 1
++            # b/a: the Triton skinny BF16 GEMV, which takes out=/out2=.
++            and _GDN_BA_TRITON_GEMV
++            and self.in_proj_ba.weight.dtype == torch.bfloat16
++            and getattr(self.in_proj_ba, "bias", None) is None
++            and self.in_proj_ba.weight.shape[0] == 2 * self.num_v_heads
++            # q/k/v/z: the W8A16 Triton GEMV behind Fp8LinearMethod.
++            and getattr(self.in_proj_qkvz.quant_method, "apply_into_split", None)
++            is not None
++            and getattr(self.in_proj_qkvz, "bias", None) is None
++            and self.in_proj_qkvz.weight.shape[-1]
++            == 2 * self.key_dim + 2 * self.value_dim
++        )
++        self._direct_layout_ok_cached = ok
++        return ok
++
+     def _gdn_ab_stash_out(self, forward_batch: ForwardBatch, num_tokens: int):
+         """(a, b) destinations inside the RecoverSSM stash, or None.
+ 
+@@ -773,6 +822,78 @@ class Qwen3_5GatedDeltaNet(nn.Module):
+             self.in_proj_ba.weight.device,
+         )
+ 
++    def _forward_input_proj_direct(self, hidden_states: torch.Tensor, ab_out):
++        """Project straight into (mixed_qkv, z, b, a); None if not applicable."""
++        if not self._direct_layout_ok():
++            return None
++        if (
++            hidden_states.dim() != 2
++            or hidden_states.dtype != torch.bfloat16
++            or hidden_states.shape[0] > 16
++            or hidden_states.shape[0] == 0
++        ):
++            return None
++        num_tokens = hidden_states.shape[0]
++        qkv_dim = 2 * self.key_dim + self.value_dim
++        dev, dt = hidden_states.device, hidden_states.dtype
++        mixed_qkv = torch.empty((num_tokens, qkv_dim), dtype=dt, device=dev)
++        z = torch.empty(
++            (num_tokens, self.num_v_heads, self.head_v_dim), dtype=dt, device=dev
++        )
++        if ab_out is not None:
++            a, b = ab_out
++        else:
++            b = torch.empty((num_tokens, self.num_v_heads), dtype=dt, device=dev)
++            a = torch.empty_like(b)
++
++        # b/a first when it goes to the alt stream: the qkvz launch on the main
++        # stream is the long pole, exactly as in `_forward_input_proj`.
++        from sglang.srt.layers.quantization.w8a16_gemv import bf16_gemv
++
++        def _run_ba():
++            bf16_gemv(
++                hidden_states,
++                self.in_proj_ba.weight,
++                out=b,
++                out2=a,
++                split_n=self.num_v_heads,
++            )
++
++        use_alt = (
++            self.alt_stream is not None
++            and get_is_capture_mode()
++            and num_tokens < 1024
++            and _gdn_use_alt_stream
++        )
++        if use_alt:
++            current_stream = torch.cuda.current_stream()
++            self.alt_stream.wait_stream(current_stream)
++            written = self.in_proj_qkvz.quant_method.apply_into_split(
++                self.in_proj_qkvz,
++                hidden_states,
++                mixed_qkv,
++                z.view(num_tokens, -1),
++                qkv_dim,
++            )
++            with torch.cuda.stream(self.alt_stream):
++                _run_ba()
++            current_stream.wait_stream(self.alt_stream)
++        else:
++            written = self.in_proj_qkvz.quant_method.apply_into_split(
++                self.in_proj_qkvz,
++                hidden_states,
++                mixed_qkv,
++                z.view(num_tokens, -1),
++                qkv_dim,
++            )
++            _run_ba()
++        if not written:
++            # The qkvz projection could not take the GEMV path (an unexpected
++            # dtype/width); fall back to the untouched control flow. b/a were
++            # already written, but the fallback overwrites them.
++            return None
++        return mixed_qkv, z, b, a
++
+     def _forward_xpu(
+         self,
+         backend: object,
+@@ -819,8 +940,17 @@ class Qwen3_5GatedDeltaNet(nn.Module):
+         3. Output projection
+         """
+         ab_out = None
+-        if _GDN_AB_STASH_DIRECT and _is_cuda and hidden_states.dim() == 2:
+-            ab_out = self._gdn_ab_stash_out(forward_batch, hidden_states.shape[0])
++        if (
++            (_GDN_AB_STASH_DIRECT or _GDN_PROJ_DIRECT_LAYOUT)
++            and _is_cuda
++            and hidden_states.dim() == 2
++        ):
++            if _GDN_AB_STASH_DIRECT:
++                ab_out = self._gdn_ab_stash_out(forward_batch, hidden_states.shape[0])
++            if _GDN_PROJ_DIRECT_LAYOUT:
++                direct = self._forward_input_proj_direct(hidden_states, ab_out)
++                if direct is not None:
++                    return self._forward_core(forward_batch, *direct)
+ 
+         projected_states_qkvz, projected_states_ba = self._forward_input_proj(
+             hidden_states
+@@ -868,6 +998,14 @@ class Qwen3_5GatedDeltaNet(nn.Module):
+             )
+             mixed_qkv = torch.cat((query, key, value), dim=-1)
+ 
++        return self._forward_core(forward_batch, mixed_qkv, z, b, a)
++
++    def _forward_core(self, forward_batch, mixed_qkv, z, b, a):
++        """Core attention + gated norm + output projection.
++
++        Split out of `forward` so the direct-layout projection can hand over the
++        same four tensors without duplicating the tail.
++        """
+         core_attn_out = self.attn(
+             forward_batch,
+             mixed_qkv=mixed_qkv,
+-- 
+2.43.0
+

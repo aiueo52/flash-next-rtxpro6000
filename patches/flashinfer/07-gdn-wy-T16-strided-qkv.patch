@@ -1,0 +1,90 @@
+--- a/flashinfer/gdn_kernels/gdn_decode_bf16_wy_output_only.py
++++ b/flashinfer/gdn_kernels/gdn_decode_bf16_wy_output_only.py
+@@ -1974,8 +1974,54 @@
+ _NATIVE_T = _os.environ.get("FLASHINFER_GDN_WY_NATIVE_T", "1") != "0"
+ # (strided-qkv) read q/k/v directly from the fused conv-output column slices (token
+ # stride = conv_dim) instead of .contiguous()-materializing them. Removes the 3 big
+-# q/k/v copies from the verify region. Only valid on the native path (T in {4,8}).
++# q/k/v copies from the verify region. Valid on the native path (T in {4,8}) and,
++# since the T16-strided patch, on the full-tile path (T == T_KERNEL == 16, the W16
++# NEXTN verify shape) where n_valid == T so no smem-tail zeroing is involved.
++# NOTE: the strided read forces `mk_dyn` onto the fully-static descriptor fallback,
++# so the compile cache key gains (B, pool_size) — one cute.compile per CUDA-graph
++# batch bucket at warm-up instead of one for all of them.
+ _STRIDED_QKV = _os.environ.get("FLASHINFER_GDN_WY_STRIDED_QKV", "0") != "0"
++
++
++def _strided_qkv_ok(q, k, v, n_valid, H, HK, HV, K_dim, V_dim):
++    """True iff q/k/v can be read in place with one shared per-token row stride.
++
++    The kernel does not use the CuTe layouts of q/k/v at all: it takes their base
++    pointers (``gQ.iterator.toint()``) and addresses every element with the strides
++    rebuilt in ``_kernel_body`` as
++
++        base + b*(n_valid*rs) + t*rs + head*(K_DIM | V_DIM) + col
++
++    so the only stride it can absorb is the per-token one, and it must be the SAME
++    for q, k and v.  Everything else has to already be the canonical compact value:
++
++      * feature stride 1 and head stride K_DIM / V_DIM (features stay contiguous
++        inside a token in the conv-output column slices),
++      * batch stride exactly ``n_valid * rs`` (checked only when B > 1; at B == 1
++        the kernel multiplies it by pid_b == 0),
++      * ``rs`` a multiple of 8 elements and every base pointer 16 B aligned, because
++        the q/k/v loads are 16 B ``cp.async.ca`` (8 bf16) instructions.
++
++    The pre-existing native-short-T path only compared ``stride(1)``; a caller with
++    a non-canonical head or batch stride would have been read as garbage.  Using
++    this predicate there too can only turn the optimisation OFF (falling back to
++    ``.contiguous()``), never change a result.
++    """
++    rs = q.stride(1)
++    if k.stride(1) != rs or v.stride(1) != rs:
++        return False
++    if rs <= 0 or rs % 8 != 0:  # 16 B cp.async granularity
++        return False
++    for t, heads, feat in ((q, H, K_dim), (k, HK, K_dim), (v, HV, V_dim)):
++        if t.stride(-1) != 1:
++            return False
++        if heads > 1 and t.stride(2) != feat:
++            return False
++        if t.shape[0] > 1 and t.stride(0) != n_valid * rs:
++            return False
++        if (t.data_ptr() % 16) != 0:
++            return False
++    return True
+ # (native-a/b) read a/b directly from the real [B, n_valid, HV] tensors instead of staging
+ # them into T_KERNEL-row zero-padded buffers (removes the 2 a/b staging copies). Bit-exact on
+ # the compact [B,T] output: gamma is a causal prefix-sum, so the unloaded tail rows (which get
+@@ -2135,9 +2181,19 @@
+         False  # True => a/b read native [B,n_valid,HV] (no staging); _NATIVE_AB
+     )
+     if T == T_KERNEL:
+-        q = q.contiguous()
+-        k = k.contiguous()
+-        v = v.contiguous()
++        # (strided-qkv at the full tile) n_valid == T == T_KERNEL here, so the kernel
++        # takes its plain path: every row is loaded, no smem tail zeroing, identical
++        # MMA schedule. The ONLY thing the strided read changes is the gmem address
++        # arithmetic for q/k/v (token stride `rs` instead of the compact H*K_DIM /
++        # HV*V_DIM), so the loaded values — and therefore the output — are identical
++        # to staging the same columns into a contiguous buffer first. This removes the
++        # three big q/k/v copies (one per GDN layer) from the W16 verify region.
++        if _STRIDED_QKV and _strided_qkv_ok(q, k, v, n_valid, H, HK, HV, K_dim, V_dim):
++            _qkv_rs = q.stride(1)
++        else:
++            q = q.contiguous()
++            k = k.contiguous()
++            v = v.contiguous()
+         a = a.contiguous()
+         b = b.contiguous()
+     elif _native:
+@@ -2146,7 +2202,7 @@
+         # Strided-qkv: q/k/v are the fused conv-output column slices (token stride =
+         # conv_dim, features contiguous within a token). Pass that row stride to the
+         # kernel and skip the copies — bit-identical (same values, strided gmem read).
+-        if _STRIDED_QKV and q.stride(1) == k.stride(1) == v.stride(1):
++        if _STRIDED_QKV and _strided_qkv_ok(q, k, v, n_valid, H, HK, HV, K_dim, V_dim):
+             _qkv_rs = q.stride(1)
+         else:
+             q = q.contiguous()

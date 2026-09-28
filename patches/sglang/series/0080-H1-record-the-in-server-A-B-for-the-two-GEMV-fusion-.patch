@@ -1,0 +1,130 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: aiueo52 <aiueo52@users.noreply.github.com>
+Date: Sun, 6 Sep 2026 01:51:59 +0900
+Subject: [PATCH 080/105] H1: record the in-server A/B for the two GEMV fusion
+ flags
+
+Four same-build prof runs inside one hour (h1off/h1on at 01:34-01:42, h1B at
+01:43-01:49), plus MODE=full on the recommended config.
+
+SGLANG_NORM_INTO_GEMV (H1-B) -- KEEP, recommend ON.
+  Per-call CUPTI medians, out_proj grid [80,6,1] -> [40,4,1], against the
+  flag-off plain GEMV plus `_layer_norm_fwd_1pass_kernel`: -1.59 / -1.22 (W4
+  code-edit), -1.01 / +0.19 (W4 prose-en), -1.05 / -1.08 (W16 code-edit),
+  -1.19 / -0.64 (W16 prose-en) us/call over two sessions each. Mean -0.95,
+  median -1.06 us/call x 36 GDN layers = -36 us/step (-0.35% W4, -0.21% W16),
+  and 36 of 1596 (W4) / 2211 (W16) kernels per step disappear.
+  Step busy_ms itself cannot resolve this: the MoE grouped GEMM alone drifts
+  +-500 us/step between sessions (h1off W16 code 6810 -> h1B 7304 us/step
+  exclusive with no code touching it), which is 10x the effect.
+  MODE=full on the flag (needle 18.5k PASS both profiles):
+    W4  code 373.7 t/s / 10.20 ms step -> accept 3.81   (band 3.8-4.0)
+    W4  prose 266.1 / 9.72 -> 2.59                      (band ~2.5)
+    W4  agent 326.6 / ~10.0 -> 3.27                     (band 3.2-3.6)
+    W16 code 578.8 / 17.09 -> 9.89                      (band 9-13)
+    W16 prose 183.3 / 16.91 -> 3.10                     (band 2.4-4)
+    W16 agent 288.2 / ~17.0 -> 4.90                     (band 4.8-5.6)
+
+SGLANG_GEMV_BA_SPLIT_GRID (H1-C) -- KEEP the flag, recommend OFF.
+  in_proj_ba grid [3,1,1] -> [4,1,1]: 7.82 -> 7.61 (W16 code), 7.43 -> 7.23
+  (W16 prose), 5.82 -> 5.84 (W4 code), 5.61 -> 6.16 (W4 prose) us/call. It
+  recovers ~0.2 of the 0.9 us/call the two-destination store costs at M=16 and
+  is noise at M=4 -- below the 1 us/call bar. The kernel is bit-exact either
+  way and the re-grid is the right shape for a two-destination split that is
+  not launch-bound at 3-4 CTAs, so the flag stays.
+
+Also extends bench/h1/h1_check.py numerics to the sigmoid gate, which is what
+the served checkpoint uses (output_gate_type=sigmoid); the norm fold is 0 ulp
+for both gates at M=1/4/16, and the whole deviation vs the flag-off path is the
+(64,128,4) vs (32,128,6) split-K re-partition: <=1 ulp at M=1/4 and <=6 (swish
+<=3) ulp on 0.03-0.04% of elements at M=16.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+---
+ bench/h1/h1_check.py                          | 11 +++++---
+ .../srt/layers/quantization/w8a16_gemv.py     | 26 +++++++++++++++++++
+ 2 files changed, 33 insertions(+), 4 deletions(-)
+
+diff --git a/bench/h1/h1_check.py b/bench/h1/h1_check.py
+index 5a615d81cf..54fbaba171 100644
+--- a/bench/h1/h1_check.py
++++ b/bench/h1/h1_check.py
+@@ -110,16 +110,19 @@ def numerics():
+     gv.NORM_INTO_GEMV = True
+     w, sc = _fp8_weight(HIDDEN, VALUE_DIM, seed=3)
+     nw = (torch.randn(HEAD_V, device=dev) * 0.3 + 1.0).to(torch.bfloat16)
+-    for M in MS:
++    # The served checkpoint has output_gate_type=sigmoid; swish is the fla
++    # default, so both gates are covered.
++    for act, M in [(a, m) for a in ("sigmoid", "swish") for m in MS]:
+         x = (torch.randn(M * NUM_V, HEAD_V, device=dev) * 0.5).to(torch.bfloat16)
+         z = (torch.randn(M * NUM_V, HEAD_V, device=dev) * 0.5).to(torch.bfloat16)
+         normed = rms_norm_gated(
+             x=x, weight=nw, bias=None, z=z, eps=1e-6, group_size=None,
+-            norm_before_gate=True, is_rms_norm=True, activation="swish",
++            norm_before_gate=True, is_rms_norm=True, activation=act,
+         )
+         ref = gv.w8a16_gemv(normed.view(M, VALUE_DIM), w, sc)
+         got = gv.w8a16_gemv_norm_gated(
+-            x.view(M, VALUE_DIM), w, sc, z.view(M, VALUE_DIM), nw, HEAD_V, 1e-6
++            x.view(M, VALUE_DIM), w, sc, z.view(M, VALUE_DIM), nw, HEAD_V, 1e-6,
++            sigmoid_gate=(act == "sigmoid"),
+         )
+         torch.cuda.synchronize()
+         u, frac = _ulp_report(ref, got)
+@@ -136,7 +139,7 @@ def numerics():
+         un, fn = _ulp_report(yc, got)
+         ok &= un <= 1
+         print(
+-            f"  M={M:2d}  vs server-plan ref: max_ulp={u} ({frac*100:.2f}%)  "
++            f"  {act:7s} M={M:2d}  vs server-plan ref: max_ulp={u} ({frac*100:.2f}%)  "
+             f"max_rel={rel:.2e}   | split-K retile alone: {uc} ulp ({fc*100:.2f}%)"
+             f"   | norm fold alone: {un} ulp ({fn*100:.2f}%)   plan={cfg}"
+         )
+diff --git a/python/sglang/srt/layers/quantization/w8a16_gemv.py b/python/sglang/srt/layers/quantization/w8a16_gemv.py
+index 468446f358..ef688445e5 100644
+--- a/python/sglang/srt/layers/quantization/w8a16_gemv.py
++++ b/python/sglang/srt/layers/quantization/w8a16_gemv.py
+@@ -51,6 +51,14 @@ def _env_flag(name: str, default: str = "0") -> bool:
+ #: CTA straddles and every CTA has exactly one destination. Each weight row is
+ #: still read by exactly one CTA running the same k loop, so the output is
+ #: bit-identical -- only the (pid_n -> columns) map changes.
++#:
++#: Measured (server A/B 2026-09-06, in_proj_ba grid [3,1,1] -> [4,1,1], CUPTI
++#: medians): W16 code-edit 7.82 -> 7.61 us/call, W16 prose-en 7.43 -> 7.23,
++#: W4 code-edit 5.82 -> 5.84, W4 prose-en 5.61 -> 6.16. So it recovers ~0.2 us
++#: of the 0.9 us the split costs at M=16 and is neutral-to-noise at M=4.
++#: Below the 1 us/call bar -> RECOMMENDED OFF; kept because it is bit-exact and
++#: is the right shape for any future two-destination split that is not
++#: launch-bound at 3-4 CTAs.
+ BA_SPLIT_GRID = _env_flag("SGLANG_GEMV_BA_SPLIT_GRID")
+ 
+ 
+@@ -694,6 +702,24 @@ NORM_INTO_GEMV = _env_flag("SGLANG_NORM_INTO_GEMV")
+ #   M    plain gemv + norm      fused (64, 128, 4, 8w)
+ #    4   12.54 + 1.31 = 13.85   13.44   (-0.41)
+ #   16   12.74 + 1.50 = 14.24   14.08   (-0.16)
++#
++# In the server the norm launch costs 1.88 us (W4) / 1.98 us (W16) rather than
++# the 1.3-1.5 us it costs here, so the fold is worth more there. Server A/B
++# (2026-09-06, out_proj grid [80,6,1] -> [40,4,1], CUPTI medians per call):
++#
++#   profile / workload   plain + norm            fused    delta
++#   W4  code-edit        13.84 + 1.88 = 15.72    14.13    -1.59
++#                                                14.50    -1.22
++#   W4  prose-en         13.19 + 1.88 = 15.07    14.06    -1.01
++#                                                15.26    +0.19
++#   W16 code-edit        13.11 + 1.98 = 15.09    14.04    -1.05
++#                                                14.01    -1.08
++#   W16 prose-en         12.96 + 1.98 = 14.94    13.75    -1.19
++#                                                14.30    -0.64
++#
++# (two independent server sessions per row) -> mean -0.95, median -1.06
++# us/call over 36 GDN layers = -36 us/step, and 36 of the 1596 (W4) / 2211
++# (W16) kernels per step disappear.
+ _FUSED_NORM_BY_SHAPE = {
+     (4, 2560, 6144, 128): (64, 128, 4, True, None, 8, 4),
+     (16, 2560, 6144, 128): (64, 128, 4, True, None, 8, 3),
+-- 
+2.43.0
+

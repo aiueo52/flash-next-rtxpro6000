@@ -1,0 +1,259 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: aiueo52 <aiueo52@users.noreply.github.com>
+Date: Sat, 5 Sep 2026 15:11:01 +0900
+Subject: [PATCH 055/105] qwen4-exp moe: shared-expert gate early, join folded
+ into HC apply (SGLANG_SHARED_GATE_EARLY)
+
+`fused_gate_sigmoid_mul_add` runs after the routed/shared join, so its
+1.7-2.1 us x 51 calls/step land on the critical path even though the gate
+itself depends only on the MoE input.
+
+Split it: `shared_expert_gate_sigmoid` computes the fp32 gate before the
+dual-stream section -- on the current stream, which carries only the (short)
+shared expert while the routed experts run on the alt stream -- and the MoE
+hands `(shared_output, gate)` to the caller instead of doing the add. The
+Qwen4Exp decoder layer passes them to the HC combine, whose apply stage forms
+`bf16(routed + gate * shared)` and then the residual update in one kernel.
+
+The gate stays fp32 and the routed+shared sum is rounded to bf16 before the
+combine, exactly as the two-kernel order did, so the join is bit-identical;
+the gate kernel reuses the fused kernel's block shape and warp count, so its
+reduction tree -- and its value -- match as well.
+
+Needs the gate at mix time to have an apply stage to fold into, so it implies
+SGLANG_HC_GATE_EARLY=MOVED when R1 is left off. Default off.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+---
+ .../kernels/ops/elementwise/elementwise.py    | 107 ++++++++++++++++++
+ python/sglang/srt/models/qwen2_moe.py         |  39 ++++++-
+ python/sglang/srt/models/qwen4_exp.py         |   9 +-
+ 3 files changed, 152 insertions(+), 3 deletions(-)
+
+diff --git a/python/sglang/kernels/ops/elementwise/elementwise.py b/python/sglang/kernels/ops/elementwise/elementwise.py
+index 21d5263aa3..2dc68e6641 100644
+--- a/python/sglang/kernels/ops/elementwise/elementwise.py
++++ b/python/sglang/kernels/ops/elementwise/elementwise.py
+@@ -1,3 +1,5 @@
++from typing import Optional
++
+ import torch
+ import triton
+ import triton.language as tl
+@@ -547,3 +549,108 @@ def fused_gate_sigmoid_mul_add(
+         **config,
+         **pdl_kwargs,
+     )
++
++
++@triton.jit
++def _shared_expert_gate_kernel(
++    hidden_states_ptr,  # [num_tokens, hidden_dim]
++    gate_weight_ptr,  # [hidden_dim]
++    gate_out_ptr,  # [num_tokens] fp32
++    hidden_dim: tl.constexpr,
++    BLOCK_SIZE: tl.constexpr,
++):
++    pid = tl.program_id(axis=0).to(tl.int64)
++    row_offset = pid * hidden_dim
++    offsets = tl.arange(0, BLOCK_SIZE)
++    mask = offsets < hidden_dim
++    w = tl.load(gate_weight_ptr + offsets, mask=mask, other=0.0).to(tl.float32)
++    h = tl.load(hidden_states_ptr + row_offset + offsets, mask=mask, other=0.0).to(
++        tl.float32
++    )
++    tl.store(gate_out_ptr + pid, tl.sigmoid(tl.sum(h * w, axis=0)))
++
++
++def _gate_launch_config(hidden_dim: int, num_tokens: int) -> dict:
++    max_warps = 16 if _is_hip else 32
++    config = {
++        "BLOCK_SIZE": triton.next_power_of_2(hidden_dim),
++        "num_warps": max(
++            min(triton.next_power_of_2(triton.cdiv(hidden_dim, 256)), max_warps), 4
++        ),
++    }
++    if num_tokens >= 1024:
++        config["num_warps"] = min(config["num_warps"], 8)
++    return config
++
++
++def shared_expert_gate_sigmoid(
++    hidden_states: torch.Tensor,
++    gate_weight: torch.Tensor,
++    out: Optional[torch.Tensor] = None,
++) -> torch.Tensor:
++    """`sigmoid(hidden_states @ gate_weight)` as fp32, one value per row.
++
++    This is the gate half of `fused_gate_sigmoid_mul_add`, split out so it can
++    run before the routed experts (SGLANG_SHARED_GATE_EARLY): it depends only
++    on the MoE input. The block shape and warp count match the fused kernel, so
++    the reduction tree -- and therefore the gate value -- is bit-identical.
++    """
++    assert hidden_states.is_contiguous(), "hidden_states must be contiguous"
++    assert gate_weight.is_contiguous(), "gate_weight must be contiguous"
++    num_tokens, hidden_dim = hidden_states.shape
++    assert gate_weight.shape == (hidden_dim,)
++    if out is None:
++        out = torch.empty(
++            num_tokens, dtype=torch.float32, device=hidden_states.device
++        )
++    _shared_expert_gate_kernel[(num_tokens,)](
++        hidden_states,
++        gate_weight,
++        out,
++        hidden_dim=hidden_dim,
++        **_gate_launch_config(hidden_dim, num_tokens),
++    )
++    return out
++
++
++@triton.jit
++def _shared_mul_add_kernel(
++    gate_ptr,  # [num_tokens] fp32
++    shared_output_ptr,  # [num_tokens, hidden_dim]
++    final_hidden_states_ptr,  # [num_tokens, hidden_dim]
++    hidden_dim: tl.constexpr,
++    BLOCK_SIZE: tl.constexpr,
++):
++    pid = tl.program_id(axis=0).to(tl.int64)
++    row_offset = pid * hidden_dim
++    offsets = tl.arange(0, BLOCK_SIZE)
++    mask = offsets < hidden_dim
++    g = tl.load(gate_ptr + pid).to(tl.float32)
++    s = tl.load(shared_output_ptr + row_offset + offsets, mask=mask, other=0.0).to(
++        tl.float32
++    )
++    f = tl.load(
++        final_hidden_states_ptr + row_offset + offsets, mask=mask, other=0.0
++    ).to(tl.float32)
++    tl.store(final_hidden_states_ptr + row_offset + offsets, f + g * s, mask=mask)
++
++
++def fused_gate_sigmoid_mul_add_precomputed(
++    final_hidden_states: torch.Tensor,
++    shared_output: torch.Tensor,
++    gate: torch.Tensor,
++) -> torch.Tensor:
++    """`final += gate * shared` for a gate already computed as fp32 per row.
++
++    Fallback for shapes the fused HC apply cannot take; the arithmetic and the
++    bf16 store match `fused_gate_sigmoid_mul_add`.
++    """
++    num_tokens, hidden_dim = final_hidden_states.shape
++    _shared_mul_add_kernel[(num_tokens,)](
++        gate,
++        shared_output,
++        final_hidden_states,
++        hidden_dim=hidden_dim,
++        **_gate_launch_config(hidden_dim, num_tokens),
++    )
++    return final_hidden_states
+diff --git a/python/sglang/srt/models/qwen2_moe.py b/python/sglang/srt/models/qwen2_moe.py
+index e1cce941ab..591cec2e92 100644
+--- a/python/sglang/srt/models/qwen2_moe.py
++++ b/python/sglang/srt/models/qwen2_moe.py
+@@ -28,7 +28,10 @@ import torch.nn.functional as F
+ from torch import nn
+ from transformers import PretrainedConfig
+ 
+-from sglang.kernels.ops.elementwise.elementwise import fused_gate_sigmoid_mul_add
++from sglang.kernels.ops.elementwise.elementwise import (
++    fused_gate_sigmoid_mul_add,
++    shared_expert_gate_sigmoid,
++)
+ from sglang.srt.batch_overlap.two_batch_overlap import model_forward_maybe_tbo
+ from sglang.srt.distributed import (
+     get_pp_group,
+@@ -121,6 +124,10 @@ from sglang.srt.runtime_context import get_stream
+ from sglang.srt.utils.hf_transformers_utils import get_rope_config
+ 
+ _SGLANG_EXPERIMENTAL_LORA_OPTI = envs.SGLANG_EXPERIMENTAL_LORA_OPTI.get()
++# R6: compute the shared-expert gate before the routed experts and let the HC
++# combine's apply stage do the `routed + gate * shared` join, so the separate
++# post-join gate/mul/add kernel disappears from the boundary.
++_SHARED_GATE_EARLY = envs.SGLANG_SHARED_GATE_EARLY.get()
+ 
+ logger = logging.getLogger(__name__)
+ 
+@@ -331,6 +338,10 @@ class Qwen2MoeMLP(nn.Module):
+ 
+ 
+ class Qwen2MoeSparseMoeBlock(nn.Module):
++    # Set by `forward` when SGLANG_SHARED_GATE_EARLY defers the shared-expert
++    # join to the caller's HC combine: (shared_output, fp32 gate per row).
++    _pending_shared_join = None
++
+     def __init__(
+         self,
+         layer_id: int,
+@@ -783,6 +794,8 @@ class Qwen2MoeSparseMoeBlock(nn.Module):
+     ) -> torch.Tensor:
+         num_tokens, hidden_dim = hidden_states.shape
+         hidden_states = hidden_states.view(-1, hidden_dim)
++        # Never let a previous call's deferred join be picked up by mistake.
++        self._pending_shared_join = None
+ 
+         if get_moe_a2a_backend().is_deepep() or get_moe_a2a_backend().is_mori():
+             return self._forward_deepep(hidden_states, forward_batch)
+@@ -793,6 +806,24 @@ class Qwen2MoeSparseMoeBlock(nn.Module):
+             and not use_intel_amx_backend(self.shared_expert_gate)
+             and not is_npu()
+         )
++        # R6 (SGLANG_SHARED_GATE_EARLY): the shared-expert gate depends only on
++        # the MoE input, so compute it here -- it costs one small kernel on the
++        # stream that carries the (short) shared expert while the routed
++        # experts run on the alt stream -- and hand the join to the HC apply.
++        early_gate = None
++        if (
++            _SHARED_GATE_EARLY
++            and use_fused_gate
++            and self.shared_expert is not None
++            and hidden_states.shape[0] > 0
++            and self.tp_size == 1
++            and get_moe_a2a_backend().is_none()
++            and hidden_states.dtype == torch.bfloat16
++            and hidden_states.is_contiguous()
++        ):
++            early_gate = shared_expert_gate_sigmoid(
++                hidden_states, self.shared_expert_gate.weight.squeeze()
++            )
+ 
+         if hidden_states.shape[0] == 0:
+             # M=0 guard for idle DP ranks: skip shared_experts and gate
+@@ -815,7 +846,11 @@ class Qwen2MoeSparseMoeBlock(nn.Module):
+             )
+             final_hidden_states = self._forward_router_experts(hidden_states)
+ 
+-        if shared_output is not None:
++        if shared_output is not None and early_gate is not None:
++            # Deferred: the caller (Qwen4Exp decoder layer) folds
++            # `final + gate * shared` into the HC combine's apply stage.
++            self._pending_shared_join = (shared_output, early_gate)
++        elif shared_output is not None:
+             if use_fused_gate:
+                 fused_gate_sigmoid_mul_add(
+                     hidden_states,
+diff --git a/python/sglang/srt/models/qwen4_exp.py b/python/sglang/srt/models/qwen4_exp.py
+index e359128e26..0bf1e90924 100644
+--- a/python/sglang/srt/models/qwen4_exp.py
++++ b/python/sglang/srt/models/qwen4_exp.py
+@@ -1414,7 +1414,14 @@ class Qwen4ExpLayerExtensionMixin:
+         residual: Optional[torch.Tensor],
+         forward_batch: ForwardBatch,
+     ):
+-        hidden_states = self.mlp_hyper_connection.combine(hidden_states, residual)
++        # R6: when the MoE deferred its shared-expert join, hand it to the HC
++        # apply so `routed + gate * shared` and the residual update are one
++        # kernel. `_pending_shared_join` is reset by every MoE forward.
++        pending = getattr(self.mlp, "_pending_shared_join", None)
++        shared_output, shared_gate = pending if pending is not None else (None, None)
++        hidden_states = self.mlp_hyper_connection.combine(
++            hidden_states, residual, shared_output, shared_gate
++        )
+         return hidden_states, None
+ 
+ 
+-- 
+2.43.0
+

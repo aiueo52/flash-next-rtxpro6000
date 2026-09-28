@@ -1,0 +1,345 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: aiueo52 <aiueo52@users.noreply.github.com>
+Date: Sat, 5 Sep 2026 15:13:38 +0900
+Subject: [PATCH 056/105] hc boundary: fold the combine apply into the next
+ mix's K0 (SGLANG_HC_APPLY_MIX_FUSED)
+
+The combine writes the branch residual and the next boundary's K0 reads it
+straight back to norm it. K0's grid is one CTA per (row, branch) -- exactly
+the slice the apply writes -- so the apply becomes K0's prologue: the CTA
+reduces the gate partials for its branch, forms `residual + a * block_output`,
+stores the new residual once, and carries it in registers into the sum of
+squares. One kernel and one row round trip per boundary go away.
+
+Wired through the existing `combine_then_mix` seam, so it covers the
+attention->MoE boundary inside a layer (48 of the 96 target boundaries per
+step); the layer->layer boundary still runs the standalone apply. The fused
+path needs a gate from R1, K0 to exist, and one branch to fit one tile;
+anything else falls back to combine + mix. Default off.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+---
+ python/sglang/srt/environ.py                |  3 +
+ python/sglang/srt/layers/hc_mix2_triton.py  | 93 +++++++++++++++++++--
+ python/sglang/srt/layers/hyperconnection.py | 53 ++++++++++++
+ python/sglang/srt/models/qwen4_exp.py       |  7 +-
+ 4 files changed, 150 insertions(+), 6 deletions(-)
+
+diff --git a/python/sglang/srt/environ.py b/python/sglang/srt/environ.py
+index 69fe7afedb..535c79575a 100644
+--- a/python/sglang/srt/environ.py
++++ b/python/sglang/srt/environ.py
+@@ -1043,6 +1043,9 @@ class Envs:
+     # Compute the shared-expert gate before the routed experts and fold the
+     # `routed + gate * shared` join into the HC combine's apply stage.
+     SGLANG_SHARED_GATE_EARLY = EnvBool(False)
++    # Fold the HC combine's apply stage into the next boundary's HC mix K0,
++    # whose branch CTAs already own exactly the row slice the apply writes.
++    SGLANG_HC_APPLY_MIX_FUSED = EnvBool(False)
+     SGLANG_DEEPGEMM_STANDARD_LAYOUT = EnvStr("auto")
+     SGLANG_DEEPGEMM_MASKED_MEMORY_BUDGET_FRACTION = EnvFloat(0.25)
+     # Cap the DeepGEMM masked grouped-GEMM per-expert padded capacity at
+diff --git a/python/sglang/srt/layers/hc_mix2_triton.py b/python/sglang/srt/layers/hc_mix2_triton.py
+index f98be7fe0e..4a225eacd0 100644
+--- a/python/sglang/srt/layers/hc_mix2_triton.py
++++ b/python/sglang/srt/layers/hc_mix2_triton.py
+@@ -8,7 +8,12 @@ three independent launches, each of which streams one thing:
+ * K0 (grid = M * hc) -- one CTA per (row, branch): the sum of squares, the
+   ``inv_rms`` it implies, the bf16 ``normed`` row chunk, and a slice of the
+   fp32 split-K workspace cleared for K1's atomics. Folding the clear in here
+-  is what keeps the graph free of a separate memset node.
++  is what keeps the graph free of a separate memset node. Two optional stages
++  ride along on the branch slice this CTA already owns: ``FUSE_APPLY`` runs
++  the *previous* HC boundary's combine apply as a prologue (``x_ptr`` is then
++  the output residual, ``apply_resid_ptr`` the input one) and ``FUSE_GATE``
++  dots ``normed`` against the inject weight as an epilogue, leaving the gate
++  partials the *next* boundary's apply needs.
+ * K1 (grid = k_groups x n_blocks) -- ``BLOCK_G`` chunks of ``BLOCK_K`` columns
+   against the matching ``w_down`` tile, accumulated in registers and pushed to
+   ``t_raw`` with one device-scope atomic per CTA.
+@@ -133,6 +138,9 @@ def _hc_branch_stats_kernel(
+     t_raw_ptr,
+     inject_w_ptr,
+     gate_partials_ptr,
++    apply_resid_ptr,
++    apply_block_ptr,
++    apply_part_ptr,
+     num_tasks,
+     zero_span,
+     K,
+@@ -144,6 +152,8 @@ def _hc_branch_stats_kernel(
+     WRITE_NORMED: tl.constexpr,
+     SINGLE_TILE: tl.constexpr,
+     FUSE_GATE: tl.constexpr,
++    FUSE_APPLY: tl.constexpr,
++    PREV_SPLITS: tl.constexpr,
+ ):
+     pid = tl.program_id(0)
+     m = pid // HC
+@@ -156,7 +166,26 @@ def _hc_branch_stats_kernel(
+         # the weight latency overlaps the sum-of-squares reduction instead of
+         # starting a second dependent round trip after it.
+         mask_s = offs < HS
+-        x = tl.load(x_ptr + base + offs, mask=mask_s, other=0.0).to(tl.float32)
++        if FUSE_APPLY:
++            # Previous boundary's HC combine apply (SGLANG_HC_APPLY_MIX_FUSED):
++            # this CTA owns branch `c` of the row, which is exactly the slice
++            # the apply would write, so form the new residual here and keep it
++            # in registers instead of storing it and reading it back.
++            total = 0.0
++            for ps in tl.static_range(PREV_SPLITS):
++                total += tl.load(apply_part_ptr + (m * PREV_SPLITS + ps) * HC + c)
++            a = 2.0 / (1.0 + tl.exp(-total / HC))
++            y = tl.load(
++                apply_block_ptr + m * HS + offs, mask=mask_s, other=0.0
++            ).to(tl.float32)
++            r = tl.load(
++                apply_resid_ptr + base + offs, mask=mask_s, other=0.0
++            ).to(tl.float32)
++            xb = (r + a * y).to(x_ptr.dtype.element_ty)
++            tl.store(x_ptr + base + offs, xb, mask=mask_s)
++            x = xb.to(tl.float32)
++        else:
++            x = tl.load(x_ptr + base + offs, mask=mask_s, other=0.0).to(tl.float32)
+         if WRITE_NORMED:
+             w = tl.load(norm_w_ptr + c * HS + offs, mask=mask_s, other=0.0).to(
+                 tl.float32
+@@ -185,6 +214,8 @@ def _hc_branch_stats_kernel(
+                         tl.sum(nrm32 * gw, axis=0),
+                     )
+     else:
++        # FUSE_APPLY / FUSE_GATE are gated to the single-tile shape by the
++        # launcher, so this branch stays the plain statistics pass.
+         acc = tl.zeros((BLOCK_S,), dtype=tl.float32)
+         for s0 in range(0, HS, BLOCK_S):
+             s = s0 + offs
+@@ -460,6 +491,25 @@ def hc_norm_mix2_supported(
+     )
+ 
+ 
++def hc_apply_norm_mix2_supported(
++    hs: int,
++    w_down: torch.Tensor,
++    config: HCMix2Config | None = None,
++) -> bool:
++    """Whether `hc_norm_mix2` can absorb the previous boundary's combine apply.
++
++    K0 must exist (not the "redundant" stats mode) and one branch must fit in
++    one tile, which is what lets the applied row stay in registers.
++    """
++    if config is None:
++        config = (
++            _DEFAULT_CONFIG_FP8
++            if w_down.dtype == torch.float8_e4m3fn
++            else _DEFAULT_CONFIG
++        )
++    return config.stats_mode != "redundant" and config.stats_block >= hs
++
++
+ def hc_norm_mix2(
+     hyper_input: torch.Tensor,
+     norm_w: torch.Tensor,
+@@ -472,6 +522,7 @@ def hc_norm_mix2(
+     s_down: torch.Tensor | None = None,
+     s_up: torch.Tensor | None = None,
+     inject_weight: torch.Tensor | None = None,
++    apply_inputs: tuple | None = None,
+ ) -> tuple[torch.Tensor, torch.Tensor]:
+     """Per-branch Gemma RMSNorm followed by the gated low-rank mix.
+ 
+@@ -482,6 +533,13 @@ def hc_norm_mix2(
+     ``w_down``/``w_up`` may be fp8 e4m3 (weight-only), in which case ``s_down``
+     (one fp32 scale per lowrank row) and ``s_up`` (one per hc*hs row) are
+     required; ``normed`` is bit-identical to the bf16 path either way.
++
++    ``inject_weight`` adds the next combine's gate to K0 and makes the return
++    ``(mixed, normed, gate_partials[M, hc, hc])``. ``apply_inputs`` is
++    ``(block_output, gate_partials)`` of the *previous* boundary: K0 then
++    applies that combine to ``hyper_input`` first, and the return grows to
++    ``(mixed, normed, gate_partials, applied)`` where ``applied`` is the
++    combined residual. Check `hc_apply_norm_mix2_supported` before passing it.
+     """
+     w_fp8 = w_down.dtype == torch.float8_e4m3fn
+     if config is None:
+@@ -500,11 +558,28 @@ def hc_norm_mix2(
+     device = hyper_input.device
+     rows_pad = _HC_MIX2_MAX_ROWS
+ 
+-    normed = torch.empty_like(hyper_input)
+     mixed = torch.empty((rows, hs), dtype=hyper_input.dtype, device=device)
+     redundant_stats = config.stats_mode == "redundant"
+     read_normed = config.stats_mode == "norm"
+     single_tile = config.stats_block >= hs
++    fuse_apply = apply_inputs is not None and not redundant_stats and single_tile
++    if fuse_apply:
++        # `hyper_input` is the *previous* boundary's residual: K0 runs that
++        # boundary's combine apply on it and writes the result to `applied`,
++        # which is this boundary's hyper input and the tensor the next combine
++        # reads back. Nothing else re-reads the row in between.
++        prev_block_output, prev_partials = apply_inputs
++        prev_splits = prev_partials.shape[1]
++        applied = torch.empty_like(hyper_input)
++    else:
++        prev_block_output = prev_partials = hyper_input
++        prev_splits = 1
++        applied = None
++    if apply_inputs is not None and not fuse_apply:
++        # The caller must have checked `hc_apply_norm_mix2_supported`; running
++        # the mix on the un-applied row would be silently wrong.
++        raise RuntimeError("hc_norm_mix2: this config cannot absorb the apply")
++    x_for_mix = applied if fuse_apply else hyper_input
+     fuse_gate = (
+         inject_weight is not None
+         and not redundant_stats
+@@ -516,6 +591,7 @@ def hc_norm_mix2(
+         if fuse_gate
+         else None
+     )
++    normed = torch.empty_like(hyper_input)
+     if redundant_stats:
+         # No K0 to fold the clear into, so the graph carries a 20 KB memset.
+         t_raw = torch.zeros((rows_pad, lowrank), dtype=torch.float32, device=device)
+@@ -526,13 +602,16 @@ def hc_norm_mix2(
+         num_tasks = rows * hc
+         zero_span = rows * lowrank
+         _hc_branch_stats_kernel[(num_tasks,)](
+-            hyper_input,
++            x_for_mix,
+             norm_w,
+             inv_rms,
+             normed,
+             t_raw,
+             inject_weight if fuse_gate else normed,
+             gate_partials if fuse_gate else t_raw,
++            hyper_input,
++            prev_block_output,
++            prev_partials,
+             num_tasks,
+             zero_span,
+             k,
+@@ -544,13 +623,15 @@ def hc_norm_mix2(
+             WRITE_NORMED=read_normed,
+             SINGLE_TILE=single_tile,
+             FUSE_GATE=fuse_gate,
++            FUSE_APPLY=fuse_apply,
++            PREV_SPLITS=prev_splits,
+             num_warps=config.stats_warps,
+         )
+ 
+     _hc_down_kernel[
+         (k // (config.block_k * config.block_g), triton.cdiv(lowrank, config.block_n))
+     ](
+-        hyper_input,
++        x_for_mix,
+         norm_w,
+         w_down,
+         inv_rms,
+@@ -594,6 +675,8 @@ def hc_norm_mix2(
+         W_FP8=w_fp8,
+         num_warps=config.up_warps,
+     )
++    if apply_inputs is not None:
++        return mixed, normed, gate_partials, applied
+     if inject_weight is not None:
+         return mixed, normed, gate_partials
+     return mixed, normed
+diff --git a/python/sglang/srt/layers/hyperconnection.py b/python/sglang/srt/layers/hyperconnection.py
+index 4a066f2436..2e0b7fecbd 100644
+--- a/python/sglang/srt/layers/hyperconnection.py
++++ b/python/sglang/srt/layers/hyperconnection.py
+@@ -25,6 +25,13 @@ _HC_MIX2_FP8_DROP_BF16 = os.environ.get("SGLANG_HC_MIX2_FP8_DROP_BF16", "0") ==
+ _HC_MIX_FP8 = os.environ.get("SGLANG_HC_MIX_FP8", "0") == "1"
+ 
+ 
++def _hc_apply_mix_fused() -> bool:
++    """R7: fold the combine apply into the next boundary's HC mix K0."""
++    from sglang.srt.environ import envs
++
++    return bool(envs.SGLANG_HC_APPLY_MIX_FUSED.get())
++
++
+ def _hc_gate_early_mode() -> int:
+     """R1: where the combine gate runs. See `HCGateEarly` in `srt.environ`.
+ 
+@@ -279,6 +286,7 @@ class GatedResidual(HyperConnectionBase):
+             self._gate_early = (
+                 _hc_gate_early_mode() if self._split_combine_ok else 0
+             )
++            self._apply_mix_fused = bool(self._gate_early) and _hc_apply_mix_fused()
+             if self._gate_early:
+                 self._early_partials_buf = torch.empty(
+                     (32, 8, self.hc_count),
+@@ -770,7 +778,52 @@ class GatedResidual(HyperConnectionBase):
+     ):
+         """Combine this boundary and norm/mix the next one in one launch."""
+         hyper_input, hyper_input_normed = residuals[0], residuals[1]
++        gate_partials = residuals[2] if len(residuals) > 2 else None
+         inject_w = self.block_inject_weight.weight
++        if gate_partials is not None and getattr(self, "_apply_mix_fused", False):
++            from sglang.srt.layers.hc_mix2_triton import (
++                hc_apply_norm_mix2_supported,
++                hc_norm_mix2,
++            )
++
++            w_down, w_up, s_down, s_up = next_hc._mix2_weights()
++            if (
++                next_hc._mix2_supported(hyper_input)
++                and next_hc._gate_early_ok(hyper_input)
++                and self.hc_count == next_hc.hc_count
++                and self.hidden_size == next_hc.hidden_size
++                and hc_apply_norm_mix2_supported(self.hidden_size, w_down)
++                and block_output.shape == (hyper_input.shape[0], self.hidden_size)
++                and block_output.dtype == hyper_input.dtype
++                and block_output.is_cuda
++                and block_output.is_contiguous()
++            ):
++                # R7: this boundary's apply is the next K0's prologue -- the
++                # branch CTA that norms the row is the one that would have
++                # written it, so the apply launch and the residual round trip
++                # both go away.
++                mixed, normed, next_partials, applied = hc_norm_mix2(
++                    hyper_input,
++                    next_hc.hc_norm.weight,
++                    next_hc.hc_norm.variance_epsilon,
++                    w_down,
++                    w_up,
++                    next_hc.hc_count,
++                    next_hc.hidden_size,
++                    None,
++                    s_down,
++                    s_up,
++                    inject_weight=(
++                        next_hc.block_inject_weight.weight.data
++                        if next_hc._gate_early == 1
++                        else None
++                    ),
++                    apply_inputs=(block_output, gate_partials),
++                )
++                assert applied is not None
++                if next_partials is None:
++                    return mixed, next_hc._early_gate(applied, normed)
++                return mixed, (applied, normed, next_partials)
+         if (
+             next_hc._fused_mix_supported(hyper_input)
+             and self.hc_count == next_hc.hc_count
+diff --git a/python/sglang/srt/models/qwen4_exp.py b/python/sglang/srt/models/qwen4_exp.py
+index 0bf1e90924..a4fa5a6824 100644
+--- a/python/sglang/srt/models/qwen4_exp.py
++++ b/python/sglang/srt/models/qwen4_exp.py
+@@ -1341,7 +1341,12 @@ class Qwen4ExpLayerExtensionMixin:
+         residual: Optional[torch.Tensor],
+         forward_batch: ForwardBatch,
+     ):
+-        if _HC_FUSED and get_parallel().attn_tp_size == 1:
++        if (
++            _HC_FUSED
++            or getattr(self.attn_hyper_connection, "_apply_mix_fused", False)
++        ) and get_parallel().attn_tp_size == 1:
++            # `combine_then_mix` falls back to combine + mix when neither
++            # fusion applies to this shape.
+             return self.attn_hyper_connection.combine_then_mix(
+                 hidden_states, residual, self.mlp_hyper_connection
+             )
+-- 
+2.43.0
+

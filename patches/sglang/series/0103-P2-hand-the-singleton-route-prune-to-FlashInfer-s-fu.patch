@@ -1,0 +1,128 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: aiueo52 <aiueo52@users.noreply.github.com>
+Date: Sun, 6 Sep 2026 21:19:17 +0900
+Subject: [PATCH 103/105] P2: hand the singleton-route prune to FlashInfer's
+ fused routing prologue
+
+SGLANG_MOE_PRUNE_IN_PROLOGUE=1 exports TAU/MIN_RANK/MIN_ROWS/MAX_ROWS to the
+FLASHINFER_MOE_PRUNE_* variables read by the patched csrc
+(bench/moe_smallm/patches/p2-prune-in-prologue.patch) and turns the P1 Triton
+kernel into a no-op, so the mask costs no launch and the prologue keeps its
+overlap.  prune_singleton_routes_() exposes the kernel without the env gating
+for the equivalence test.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+---
+ .../moe/moe_runner/flashinfer_cutlass.py      |  4 +-
+ .../sglang/srt/layers/moe/prune_singleton.py  | 51 +++++++++++++++++--
+ 2 files changed, 49 insertions(+), 6 deletions(-)
+
+diff --git a/python/sglang/srt/layers/moe/moe_runner/flashinfer_cutlass.py b/python/sglang/srt/layers/moe/moe_runner/flashinfer_cutlass.py
+index ae7c56ce02..f87e56aa8f 100644
+--- a/python/sglang/srt/layers/moe/moe_runner/flashinfer_cutlass.py
++++ b/python/sglang/srt/layers/moe/moe_runner/flashinfer_cutlass.py
+@@ -192,7 +192,9 @@ def _run_flashinfer_cutlass(
+     # P1: mask low-weight routes that are the only user of their expert, so the
+     # grouped GEMM reads fewer distinct expert weights.  No-op unless
+     # SGLANG_MOE_PRUNE_SINGLETON_TAU is set.  In place and CUDA-graph safe; see
+-    # sglang/srt/layers/moe/prune_singleton.py.
++    # sglang/srt/layers/moe/prune_singleton.py.  With SGLANG_MOE_PRUNE_IN_PROLOGUE=1
++    # (P2) this is a no-op and FlashInfer's patched routing prologue applies the
++    # same mask in-kernel.
+     maybe_prune_singleton_routes(topk_ids, topk_weights)
+     x, x_sf, output_dtype, output_col = _prepare_input(
+         dispatch_output, quant_info, runner_config
+diff --git a/python/sglang/srt/layers/moe/prune_singleton.py b/python/sglang/srt/layers/moe/prune_singleton.py
+index 2a4948b3f0..74cfa21048 100644
+--- a/python/sglang/srt/layers/moe/prune_singleton.py
++++ b/python/sglang/srt/layers/moe/prune_singleton.py
+@@ -46,6 +46,21 @@ Env:
+     SGLANG_MOE_PRUNE_PAIRWISE        O(N^2) reference path instead of the histogram (default 0)
+     SGLANG_MOE_PRUNE_WARPS           num_warps for the kernel (default 4)
+     SGLANG_MOE_PRUNE_NUM_EXPERTS     histogram width; must exceed every expert id (default 512)
++    SGLANG_MOE_PRUNE_IN_PROLOGUE     P2: hand the mask to FlashInfer's fused routing prologue
++                                     (patched csrc, ``FLASHINFER_MOE_PRUNE_SINGLETON_TAU``) and
++                                     skip this kernel entirely (default 0)
++
++P2 (``SGLANG_MOE_PRUNE_IN_PROLOGUE=1``): the same rule evaluated inside FlashInfer's
++``fusedBuildExpertMapsSortFirstTokenAndStridesKernel`` (private csrc patch
++``p2-prune-in-prologue.patch``), which already reads the top-k ids, so the prune
++costs no launch and -- the point -- does not cost the prologue the ~54 % of its
++time that is otherwise hidden behind the preceding kernels (``specs/P1_LOG.md``
++step 6/7).  ``TAU``/``MIN_RANK``/``MIN_ROWS``/``MAX_ROWS`` are exported to the
++``FLASHINFER_MOE_PRUNE_*`` variables the csrc reads (an explicitly set
++``FLASHINFER_`` value wins), and this module's kernel becomes a no-op.  The csrc
++writes the dropped routes back as id -1 / weight 0, the same convention as here.
++If the fused prologue declines a call (batch > 32 rows, unsupported quant path,
++``FLASHINFER_MOE_FUSED_PROLOGUE=0`` ...), that call is simply not pruned.
+ """
+ 
+ from __future__ import annotations
+@@ -92,7 +107,21 @@ NUM_WARPS = _i("SGLANG_MOE_PRUNE_WARPS", "4")
+ # Upper bound on expert ids, i.e. the histogram width.  512 for this model;
+ # raised via the env if a wider router ever uses this path.
+ NUM_EXPERT_SLOTS = _i("SGLANG_MOE_PRUNE_NUM_EXPERTS", "512")
+-ENABLED = TAU > 0.0
++IN_PROLOGUE = _b("SGLANG_MOE_PRUNE_IN_PROLOGUE", "0")
++# P2: the C++ side reads its knobs once, on the first MoE call, via getenv; os.environ
++# writes reach it through putenv, and this module is imported long before that call.
++if TAU > 0.0 and IN_PROLOGUE:
++    for _k, _v in (
++        ("FLASHINFER_MOE_PRUNE_SINGLETON_TAU", repr(TAU)),
++        ("FLASHINFER_MOE_PRUNE_MIN_RANK", str(MIN_RANK)),
++        ("FLASHINFER_MOE_PRUNE_MIN_ROWS", str(MIN_ROWS)),
++        ("FLASHINFER_MOE_PRUNE_MAX_ROWS", str(MAX_ROWS)),
++    ):
++        os.environ.setdefault(_k, _v)
++    if RENORM or KEEP_IDS:
++        logger.warning("moe prune: RENORM/KEEP_IDS are not available in the in-prologue path")
++# The Triton kernel runs only when pruning is on *and* not delegated to FlashInfer.
++ENABLED = TAU > 0.0 and not IN_PROLOGUE
+ 
+ _warned: set = set()
+ # Per-device [NUM_EXPERT_SLOTS] int32 histogram scratch, allocated eagerly on the
+@@ -186,10 +215,22 @@ def maybe_prune_singleton_routes(topk_ids: torch.Tensor, topk_weights: torch.Ten
+     """In-place mask of low-weight singleton routes.  No-op unless enabled."""
+     if not ENABLED:
+         return
++    prune_singleton_routes_(topk_ids, topk_weights, TAU, MIN_RANK, MIN_ROWS, MAX_ROWS)
++
++
++def prune_singleton_routes_(
++    topk_ids: torch.Tensor,
++    topk_weights: torch.Tensor,
++    tau: float,
++    min_rank: int = 1,
++    min_rows: int = 2,
++    max_rows: int = 64,
++) -> None:
++    """The kernel itself, independent of the env gating (used by the P2 equivalence test)."""
+     if topk_ids.dim() != 2 or topk_weights.shape != topk_ids.shape:
+         return _skip(f"shape {tuple(topk_ids.shape)}/{tuple(topk_weights.shape)}")
+     M, K = topk_ids.shape
+-    if M < MIN_ROWS or M > MAX_ROWS:
++    if M < min_rows or M > max_rows:
+         return
+     if not (topk_ids.is_contiguous() and topk_weights.is_contiguous()):
+         return _skip("non-contiguous top-k tensors")
+@@ -212,8 +253,8 @@ def maybe_prune_singleton_routes(topk_ids: torch.Tensor, topk_weights: torch.Ten
+         topk_weights,
+         cnt if cnt is not None else topk_ids,   # unused when PAIRWISE_
+         M,
+-        TAU,
+-        MIN_RANK,
++        tau,
++        min_rank,
+         K=K,
+         MP=MP,
+         KP=KP,
+@@ -234,5 +275,5 @@ def describe() -> str:
+     return (
+         f"tau={TAU} min_rank={MIN_RANK} rows=[{MIN_ROWS},{MAX_ROWS}] "
+         f"renorm={RENORM} keep_ids={KEEP_IDS} pairwise={PAIRWISE} "
+-        f"warps={NUM_WARPS}"
++        f"warps={NUM_WARPS} in_prologue={IN_PROLOGUE}"
+     )
+-- 
+2.43.0
+

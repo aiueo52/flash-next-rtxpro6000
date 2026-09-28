@@ -1,0 +1,930 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: aiueo52 <aiueo52@users.noreply.github.com>
+Date: Sun, 6 Sep 2026 12:13:41 +0900
+Subject: [PATCH 082/105] C1 step 1: make the draft's real top-1 probability
+ available
+
+For topk=1 drafting neither producer of a draft token computed its
+probability: draft_topk1_postprocess stored a constant 1.0 into topk_p
+("chain probabilities are unused downstream") and _draft_extend_for_decode
+used torch.argmax + ones_like.  The adaptive controller therefore had only
+the historical acceptance EMA to decide chain length with.
+
+- topk1.py: the split argmax already reads every logit, so each split now
+  optionally also stores sum(exp(v - m_split)); the finalize kernel combines
+  those into p_top1 = 1/sum_j s_j*exp(m_j - M) and writes it to a caller-owned
+  (bs, steps) buffer column.  Gated by a tl.constexpr, so with chain_probs=None
+  the kernels specialise back to the original code.  topk_p is deliberately
+  left at 1.0 so every existing consumer is bit-identical.
+- _draft_extend_for_decode computes the position-0 probability eagerly
+  (logsumexp + amax over the hot vocab).  This is the only chain position
+  whose confidence exists *before* the next step's state swap, because the
+  draft loop itself is one captured CUDA graph.
+- ConfidenceChannel stages both to pinned host memory on the current stream
+  with per-slot events; nothing synchronises the producing stream.
+- ConfidenceStepSlot decides by throughput, not by threshold: it inverts the
+  observed mean accepted count into a per-position acceptance rate r (which,
+  unlike the mean, is comparable across step counts), tracks r per position-0
+  confidence bucket, and picks argmax_S (1 + E[accept|r,S]) / step_time(S).
+- SGLANG_ADAPTIVE_POLICY=confidence selects it; default "ema" is unchanged.
+  SGLANG_ADAPTIVE_TRACE=<path> dumps (steps, bs, chain probs, accepted) per
+  step for offline simulation.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+---
+ .../sglang/kernels/ops/speculative/topk1.py   |  52 ++
+ python/sglang/srt/environ.py                  |  10 +
+ .../srt/speculative/adaptive_confidence.py    | 446 ++++++++++++++++++
+ .../srt/speculative/adaptive_runtime_state.py |   4 +
+ .../srt/speculative/adaptive_spec_params.py   |  24 +-
+ .../srt/speculative/base_spec_worker.py       |  33 ++
+ .../sglang/srt/speculative/eagle_worker_v2.py |  80 +++-
+ 7 files changed, 646 insertions(+), 3 deletions(-)
+ create mode 100644 python/sglang/srt/speculative/adaptive_confidence.py
+
+diff --git a/python/sglang/kernels/ops/speculative/topk1.py b/python/sglang/kernels/ops/speculative/topk1.py
+index 3f6d8aba9e..9d4e1e219c 100644
+--- a/python/sglang/kernels/ops/speculative/topk1.py
++++ b/python/sglang/kernels/ops/speculative/topk1.py
+@@ -14,9 +14,11 @@ def _draft_topk1_partial_argmax_kernel(
+     logits,
+     partial_vals,
+     partial_indices,
++    partial_sums,
+     logits_row_stride,
+     vocab_size: tl.constexpr,
+     num_splits: tl.constexpr,
++    WRITE_PROB: tl.constexpr,
+     BLOCK: tl.constexpr,
+ ):
+     # int64 row base: row * stride overflows int32 once bs * vocab reaches 2^31.
+@@ -37,12 +39,17 @@ def _draft_topk1_partial_argmax_kernel(
+     out_offset = row * num_splits + split
+     tl.store(partial_vals + out_offset, max_val)
+     tl.store(partial_indices + out_offset, split * BLOCK + local_index)
++    if WRITE_PROB:
++        # Online-softmax partial: sum over this split of exp(v - m_split).
++        # Masked lanes hold -inf (-> exp 0) so they contribute nothing.
++        tl.store(partial_sums + out_offset, tl.sum(tl.exp(vals - max_val), axis=0))
+ 
+ 
+ @triton.jit
+ def _draft_topk1_finalize_kernel(
+     partial_vals,
+     partial_indices,
++    partial_sums,
+     topk_p,
+     topk_index,
+     positions,
+@@ -50,9 +57,12 @@ def _draft_topk1_finalize_kernel(
+     draft_tokens,
+     draft_tokens_stride,
+     draft_token_column,
++    chain_probs,
++    chain_probs_stride,
+     num_splits: tl.constexpr,
+     HAS_TOKEN_MAP: tl.constexpr,
+     WRITE_DRAFT_TOKEN: tl.constexpr,
++    WRITE_PROB: tl.constexpr,
+     BLOCK: tl.constexpr,
+ ):
+     row = tl.program_id(0)
+@@ -65,6 +75,17 @@ def _draft_topk1_finalize_kernel(
+     )
+ 
+     split = tl.argmax(vals, axis=0)
++    if WRITE_PROB:
++        # p_top1 = exp(M - logsumexp) = 1 / sum_j s_j * exp(m_j - M), with
++        # M = max_j m_j the global max (== the top-1 logit).
++        m = tl.max(vals, axis=0)
++        sums = tl.load(
++            partial_sums + row * num_splits + offsets, mask=mask, other=0.0
++        )
++        denom = tl.sum(sums * tl.exp(vals - m), axis=0)
++        tl.store(
++            chain_probs + row * chain_probs_stride + draft_token_column, 1.0 / denom
++        )
+     index = tl.load(partial_indices + row * num_splits + split).to(tl.int64)
+     token = tl.load(hot_token_id + index) if HAS_TOKEN_MAP else index
+     tl.store(topk_index + row, token)
+@@ -82,6 +103,7 @@ def draft_topk1_postprocess(
+     draft_tokens: torch.Tensor | None = None,
+     draft_token_column: int = 0,
+     hot_token_id: Optional[torch.Tensor] = None,
++    chain_probs: torch.Tensor | None = None,
+ ):
+     """Argmax draft logits for topk=1 and advance positions.
+ 
+@@ -94,6 +116,17 @@ def draft_topk1_postprocess(
+     is also stored into ``draft_tokens[:, draft_token_column]``, mutating the
+     caller-owned buffer in place. ``topk_p`` is returned as constant 1.0:
+     topk=1 drafting is greedy and the chain probabilities are unused downstream.
++
++    If ``chain_probs`` is given, the softmax probability of the selected token
++    is *additionally* written to ``chain_probs[:, draft_token_column]``.  It is
++    obtained from the same single pass over the vocabulary that the argmax
++    already makes (online softmax: each split stores ``sum(exp(v - m_split))``
++    alongside its max, and the finalize kernel combines them), so it costs one
++    extra fp32 store per split and no extra global traffic.  ``topk_p`` is left
++    at 1.0 so that every existing consumer is bit-identical; the confidence is
++    a side channel for the adaptive speculative controller.  When
++    ``chain_probs`` is ``None`` the kernels specialize back to the original
++    code (``WRITE_PROB`` is a ``tl.constexpr``).
+     """
+     assert next_token_logits.ndim == 2
+     assert next_token_logits.stride(1) == 1
+@@ -108,6 +141,14 @@ def draft_topk1_postprocess(
+         assert hot_token_id.is_contiguous()
+         assert hot_token_id.device == next_token_logits.device
+         assert hot_token_id.shape[0] == next_token_logits.shape[1]
++    write_prob = chain_probs is not None
++    if write_prob:
++        assert chain_probs.ndim == 2
++        assert chain_probs.dtype == torch.float32
++        assert chain_probs.device == next_token_logits.device
++        assert chain_probs.shape[0] >= next_token_logits.shape[0]
++        assert chain_probs.stride(1) == 1
++        assert 0 <= draft_token_column < chain_probs.shape[1]
+     write_draft_token = draft_tokens is not None
+     if write_draft_token:
+         assert draft_tokens.ndim == 2
+@@ -133,14 +174,21 @@ def draft_topk1_postprocess(
+     partial_indices = torch.empty(
+         (bs, num_splits), dtype=torch.int32, device=next_token_logits.device
+     )
++    partial_sums = (
++        torch.empty((bs, num_splits), dtype=torch.float32, device=next_token_logits.device)
++        if write_prob
++        else partial_vals
++    )
+ 
+     _draft_topk1_partial_argmax_kernel[(bs, num_splits)](
+         next_token_logits,
+         partial_vals,
+         partial_indices,
++        partial_sums,
+         next_token_logits.stride(0),
+         vocab_size,
+         num_splits,
++        WRITE_PROB=write_prob,
+         BLOCK=block,
+         num_warps=8,
+     )
+@@ -150,6 +198,7 @@ def draft_topk1_postprocess(
+     _draft_topk1_finalize_kernel[(bs,)](
+         partial_vals,
+         partial_indices,
++        partial_sums,
+         topk_p,
+         topk_index,
+         positions,
+@@ -157,9 +206,12 @@ def draft_topk1_postprocess(
+         draft_tokens if write_draft_token else topk_index,
+         draft_tokens.stride(0) if write_draft_token else 0,
+         draft_token_column,
++        chain_probs if write_prob else topk_p,
++        chain_probs.stride(0) if write_prob else 0,
+         num_splits,
+         HAS_TOKEN_MAP=has_token_map,
+         WRITE_DRAFT_TOKEN=write_draft_token,
++        WRITE_PROB=write_prob,
+         BLOCK=triton.next_power_of_2(num_splits),
+         num_warps=1,
+     )
+diff --git a/python/sglang/srt/environ.py b/python/sglang/srt/environ.py
+index 124145248e..5101bb25c3 100644
+--- a/python/sglang/srt/environ.py
++++ b/python/sglang/srt/environ.py
+@@ -1209,6 +1209,16 @@ class Envs:
+     # Saves the per-step draft forward, but the draft KV goes stale: an upshift
+     # back to steps>0 starts from a cold draft state (low accept until it recovers).
+     SGLANG_SPEC_SKIP_ZERO_STEP_DRAFT_EXTEND = EnvBool(False)
++    # C1: adaptive speculative step choice driven by the draft's own top-1
++    # probability instead of (only) the historical acceptance EMA.
++    #   "ema"        -- shipped behaviour, no confidence machinery at all
++    #   "confidence" -- confidence-gated policy (see adaptive_confidence.py)
++    # Any value other than "ema" turns on the draft confidence side channel.
++    SGLANG_ADAPTIVE_POLICY = EnvStr("ema")
++    # Dump one line per decode step -- (steps, bs, chain top-1 probs, accepted
++    # drafts) -- to this path.  Also turns the confidence side channel on.
++    # Offline-analysis only; never set in production.
++    SGLANG_ADAPTIVE_TRACE = EnvStr("")
+     # Kill-switch for the draft-extend cuda graph. Draft extend then always runs
+     # eager. Escape hatch for setups where the capture's memory pool costs more
+     # than the graph saves (e.g. DeepEP MoE workspace captured at full dispatch
+diff --git a/python/sglang/srt/speculative/adaptive_confidence.py b/python/sglang/srt/speculative/adaptive_confidence.py
+new file mode 100644
+index 0000000000..d4dc7a4361
+--- /dev/null
++++ b/python/sglang/srt/speculative/adaptive_confidence.py
+@@ -0,0 +1,446 @@
++"""Draft-confidence side channel and the confidence/throughput step policy (C1).
++
++Why a side channel
++------------------
++The shipped adaptive controller (``adaptive_spec_params.AdaptiveStepSlot``)
++picks the chain length from one number: an EMA of ``accept_lens - 1``.  That
++statistic is (a) purely historical and (b) not on the same scale as the
++quantity the decision actually needs, which is *throughput*:
++
++    tokens/s(S) = (1 + E[accepted | S]) / step_time(S)
++
++This module supplies the two missing ingredients.
++
++1. ``ConfidenceChannel`` makes the draft model's own top-1 probability
++   available on the host.  For topk=1 drafting neither producer computed it
++   (both wrote a constant 1.0), so this is new information, not a new
++   smoothing of the old information.  The probability of chain position 0 --
++   the token ``_draft_extend_for_decode`` selected at the end of the previous
++   iteration -- is the only confidence available *before* the step-count
++   decision is taken, because the whole draft loop runs inside one captured
++   CUDA graph (see specs/C1_LOG.md section 1).
++
++2. ``ConfidenceStepSlot`` turns observations into a throughput comparison
++   instead of a threshold test.  Modelling per-position acceptance as flat after
++   position 2 (a modelling assumption), a chain of length S behaves
++   like S iid Bernoulli(r) trials in series:
++
++       E[accepted | S] = sum_{k=1..S} r^k = r (1 - r^S) / (1 - r)
++
++   A *single* per-position acceptance rate ``r`` therefore explains the
++   observed mean at whichever S is currently live, and -- crucially --
++   predicts the mean at the S that is *not* live.  The EMA has no such
++   transfer: it measures a quantity whose scale changes with every switch,
++   which is why the shipped config needs the asymmetric "re-seed on step-down
++   only" hack.  Checked against the 2026-09-05 fixed-profile measurements:
++
++       workload    E@15   -> r     -> predicted E@3   measured E@3
++       code-edit    9.87    0.930      2.60            2.86
++       agent-loop   3.82    0.797      1.95            2.29
++       prose-en     1.83    0.645      1.33            1.51
++       prose-ja     1.55    0.605      1.21            1.31
++
++   (systematically ~15% low, because acceptance is *not* iid at positions 0-1;
++   ``position_bias`` absorbs that.)
++
++``r`` is tracked per confidence bucket, so a request whose next token the
++draft is sure about is allowed a long chain even while the running average
++says otherwise -- which is exactly the code-edit failure mode: its accept
++distribution at S=15 is bimodal (full chains interleaved with 0/1), so the
++*mean* dips under a fixed threshold even though most steps still want 15.
++"""
++
++from __future__ import annotations
++
++import collections
++import logging
++import math
++import os
++from typing import TYPE_CHECKING, Optional
++
++import torch
++
++if TYPE_CHECKING:
++    pass
++
++logger = logging.getLogger(__name__)
++
++
++def _env_policy() -> str:
++    return os.environ.get("SGLANG_ADAPTIVE_POLICY", "ema") or "ema"
++
++
++def _env_trace() -> str:
++    return os.environ.get("SGLANG_ADAPTIVE_TRACE", "")
++
++
++def confidence_policy_enabled() -> bool:
++    """The runtime policy needs the position-0 probability (eager, cheap)."""
++    return _env_policy() == "confidence"
++
++
++def chain_trace_enabled() -> bool:
++    """Offline analysis needs every chain position (writes inside the draft graph)."""
++    return bool(_env_trace())
++
++
++def confidence_enabled() -> bool:
++    return confidence_policy_enabled() or chain_trace_enabled()
++
++
++def top1_prob(logits: torch.Tensor) -> torch.Tensor:
++    """softmax(logits).max(-1) without materialising the softmax.
++
++    ``logsumexp`` + ``amax`` are two reductions over the draft's hot vocabulary
++    (49152 wide); at the batch sizes this server runs they cost a few
++    microseconds against a 12-20 ms step.
++    """
++    f = logits.float()
++    return (f.amax(dim=-1) - torch.logsumexp(f, dim=-1)).exp()
++
++
++class ConfidenceChannel:
++    """Async device->host staging for draft confidences.
++
++    Two producers, both optional:
++      * ``record_position0`` -- eager, at draft-extend, one value per request.
++        This is what the policy reads, and it is ready a whole iteration before
++        it is needed.
++      * ``record_chain`` -- the full ``(bs, steps)`` matrix the Triton
++        postprocess kernel filled during the draft.  Trace-only.
++
++    Copies go out non-blocking on the current stream into a ring of pinned
++    buffers; each slot carries an event so a reader never has to guess.  Nothing
++    here ever synchronises the producing stream.
++    """
++
++    RING = 16
++
++    def __init__(self, device: str, max_bs: int, max_steps: int):
++        self.device = device
++        self.max_bs = max_bs
++        self.max_steps = max_steps
++        self._p0_host = [
++            torch.empty(max_bs, dtype=torch.float32, pin_memory=True)
++            for _ in range(self.RING)
++        ]
++        self._p0_event = [torch.cuda.Event() for _ in range(self.RING)]
++        self._p0_bs = [0] * self.RING
++        self._p0_write = 0
++        self._p0_read = -1  # index of the newest slot with a copy in flight
++
++        self._chain_host = None
++        self._chain_event = None
++        self._chain_write = 0
++        self._chain_pending: collections.deque = collections.deque()
++        if chain_trace_enabled():
++            self._chain_host = [
++                torch.empty((max_bs, max_steps), dtype=torch.float32, pin_memory=True)
++                for _ in range(self.RING)
++            ]
++            self._chain_event = [torch.cuda.Event() for _ in range(self.RING)]
++
++    # -- producers ---------------------------------------------------------
++    def record_position0(self, p0: torch.Tensor) -> None:
++        bs = p0.shape[0]
++        if bs == 0 or bs > self.max_bs:
++            return
++        slot = self._p0_write
++        self._p0_host[slot][:bs].copy_(p0.view(-1), non_blocking=True)
++        self._p0_event[slot].record()
++        self._p0_bs[slot] = bs
++        self._p0_read = slot
++        self._p0_write = (slot + 1) % self.RING
++
++    def record_chain(self, chain: torch.Tensor, bs: int, steps: int) -> None:
++        if self._chain_host is None or bs == 0 or bs > self.max_bs:
++            return
++        slot = self._chain_write
++        self._chain_host[slot][:bs, :steps].copy_(
++            chain[:bs, :steps], non_blocking=True
++        )
++        self._chain_event[slot].record()
++        self._chain_write = (slot + 1) % self.RING
++        self._chain_pending.append((slot, bs, steps))
++
++    # -- consumers ---------------------------------------------------------
++    def latest_position0(self) -> Optional[list[float]]:
++        """Newest position-0 confidences, or None if nothing was recorded yet.
++
++        Synchronises on that slot's event.  In the steady state the copy was
++        issued during the previous iteration's draft-extend, so this is a
++        completed event and the wait returns immediately.
++        """
++        slot = self._p0_read
++        if slot < 0:
++            return None
++        self._p0_event[slot].synchronize()
++        return self._p0_host[slot][: self._p0_bs[slot]].tolist()
++
++    def pop_chain(self) -> Optional[tuple[list[list[float]], int]]:
++        """Oldest recorded chain, paired FIFO with the verify results."""
++        if not self._chain_pending:
++            return None
++        slot, bs, steps = self._chain_pending.popleft()
++        self._chain_event[slot].synchronize()
++        return self._chain_host[slot][:bs, :steps].tolist(), steps
++
++
++class ChainTracer:
++    """One line per verified decode step: the input to the offline simulator."""
++
++    def __init__(self, path: str):
++        self._f = open(path, "a", buffering=1 << 16)
++        self._n = 0
++
++    def write(self, steps: int, bs: int, chain, accepted: list[int]) -> None:
++        import json
++
++        self._f.write(
++            json.dumps(
++                {
++                    "i": self._n,
++                    "steps": steps,
++                    "bs": bs,
++                    "p": [[round(x, 5) for x in row] for row in chain]
++                    if chain is not None
++                    else None,
++                    "a": accepted,
++                }
++            )
++            + "\n"
++        )
++        self._n += 1
++
++    def close(self) -> None:
++        try:
++            self._f.close()
++        except Exception:
++            pass
++
++
++# ---------------------------------------------------------------------------
++# Policy
++# ---------------------------------------------------------------------------
++
++# ms/iteration = STEP_A + STEP_B * S.  Fitted to the 2026-09-05 fnbench
++# end-to-end step times (tokens/acc), which is the quantity being maximised:
++#   W4  (S=3):  11.7-12.2 ms      W16 (S=15): 19.9-21.9 ms
++# The pure-decode profiler numbers quoted in the C1 brief (10.2 / 17.3 ms at
++# T=4 / T=16) have the same slope but a smaller intercept; they omit the
++# scheduler/detokenizer overhead that fnbench throughput does contain.  Both
++# put the S=15 step at ~1.7x the S=3 step, which is all the decision uses.
++STEP_A = float(os.environ.get("SGLANG_ADAPTIVE_STEP_A", "9.74"))
++STEP_B = float(os.environ.get("SGLANG_ADAPTIVE_STEP_B", "0.70"))
++
++
++def step_time_ms(steps: int) -> float:
++    return STEP_A + STEP_B * steps
++
++
++def expected_accept(r: float, steps: int) -> float:
++    """E[accepted drafts] for a length-*steps* chain at per-position rate *r*."""
++    if steps <= 0:
++        return 0.0
++    r = min(max(r, 1e-4), 0.999999)
++    return r * (1.0 - r**steps) / (1.0 - r)
++
++
++def invert_accept(mean_accept: float, steps: int) -> float:
++    """The *r* whose length-*steps* chain accepts *mean_accept* drafts.
++
++    Monotone in r, so a fixed-count bisection is exact enough and has no
++    convergence branch to get wrong in a hot path (30 iterations of bisection
++    on [0,1) is ~1e-9).
++    """
++    if steps <= 0 or mean_accept <= 0.0:
++        return 0.0
++    if mean_accept >= steps - 1e-6:
++        return 0.999999
++    lo, hi = 0.0, 0.999999
++    for _ in range(30):
++        mid = 0.5 * (lo + hi)
++        if expected_accept(mid, steps) < mean_accept:
++            lo = mid
++        else:
++            hi = mid
++    return 0.5 * (lo + hi)
++
++
++class ConfidenceStepSlot:
++    """Throughput-maximising step choice from a confidence-conditioned rate.
++
++    Drop-in for ``AdaptiveStepSlot``: same ``current_steps`` / ``candidate_steps``
++    / ``update()`` contract, plus ``observe_confidence()``.
++
++    Per decision it:
++      1. converts the batch's mean accepted-draft count into a per-position
++         acceptance ``r`` (which is comparable across step counts, unlike the
++         raw mean),
++      2. folds it into the EMA of the confidence bucket the *producing* chain
++         started from,
++      3. reads the bucket the *next* chain will start from (position-0
++         probability, already on the host), and
++      4. picks the candidate with the highest ``(1 + E[accepted]) / step_time``.
++
++    ``switch_margin`` is the only hysteresis: a candidate must beat the
++    incumbent by that relative margin to displace it, which both damps
++    oscillation and encodes the un-modelled cost of a switch (the draft state
++    is cold for a batch or two afterwards).
++    """
++
++    # Position-0 confidence bucket edges.  Coarse on purpose: each bucket has
++    # to accumulate its own rate estimate, and a decode server sees a few
++    # thousand steps per workload.
++    BUCKETS = (0.5, 0.8, 0.95, 0.995)
++
++    def __init__(self, initial_steps: int, cfg: dict):
++        candidates = sorted(set(cfg["candidate_steps"]))
++        assert candidates, "candidate_steps must have at least 1 value"
++        self.candidate_steps = candidates
++        self.current_steps = (
++            initial_steps
++            if initial_steps in candidates
++            else candidates[len(candidates) // 2]
++        )
++
++        self.rate_alpha = float(cfg.get("rate_alpha", 0.15))
++        self.update_interval = int(cfg.get("update_interval", 4))
++        self.warmup_batches = int(cfg.get("warmup_batches", 15))
++        self.switch_grace_batches = int(cfg.get("switch_grace_batches", 20))
++        self.switch_margin = float(cfg.get("switch_margin", 0.04))
++        # E[accepted] from an iid model is biased low because positions 0-1
++        # accept better than the tail; one multiplicative correction, measured
++        # at 1.15 across all four workloads (see module docstring).
++        self.position_bias = float(cfg.get("position_bias", 1.15))
++        # Weight of the confidence-conditioned rate against the pooled rate.
++        # 0 reproduces a pure "better statistic" policy (option 3); 1 trusts
++        # the buckets outright.  Buckets are blended in proportion to their
++        # own sample count either way, so this only sets the ceiling.
++        self.confidence_weight = float(cfg.get("confidence_weight", 1.0))
++        self.min_bucket_samples = int(cfg.get("min_bucket_samples", 12))
++
++        nb = len(self.BUCKETS) + 1
++        self._rate = [0.0] * nb
++        self._rate_n = [0] * nb
++        self._pooled_rate = 0.0
++        self._pooled_n = 0
++        self._batch_count = 0
++        self._grace_until = 0
++        self._next_bucket = nb // 2  # until the first confidence arrives
++        self._last_conf: Optional[float] = None
++        # Bucket the chain currently being verified started from, so the
++        # measurement lands in the right bucket when it comes back.
++        self._inflight_bucket: collections.deque = collections.deque(maxlen=8)
++        self._dbg = os.environ.get("SGLANG_ADAPTIVE_DEBUG", "") == "1"
++
++    # -- inputs ------------------------------------------------------------
++    def _bucket(self, conf: float) -> int:
++        i = 0
++        for edge in self.BUCKETS:
++            if conf < edge:
++                return i
++            i += 1
++        return i
++
++    def observe_confidence(self, confidences: list[float]) -> None:
++        """Position-0 top-1 probability for the chain about to be drafted."""
++        if not confidences:
++            return
++        # Batch-level statistic: the whole batch shares one chain length, and
++        # the *weakest* request bounds how far the shared verify is useful.
++        conf = sum(confidences) / len(confidences)
++        self._last_conf = conf
++        self._next_bucket = self._bucket(conf)
++        self._inflight_bucket.append(self._next_bucket)
++
++    def update(self, num_correct_drafts_per_req: list[int]) -> bool:
++        if not num_correct_drafts_per_req:
++            return False
++        steps = self.current_steps
++        if steps > 0:
++            # Same staleness guard as the EMA slot: a sample longer than the
++            # live chain was produced by the previous, longer state.
++            fresh = [n for n in num_correct_drafts_per_req if n <= steps]
++            if fresh:
++                mean = sum(fresh) / len(fresh)
++                r = invert_accept(mean / self.position_bias, steps)
++                b = (
++                    self._inflight_bucket.popleft()
++                    if self._inflight_bucket
++                    else self._next_bucket
++                )
++                a = self.rate_alpha
++                self._rate[b] = (
++                    r if self._rate_n[b] == 0 else (1 - a) * self._rate[b] + a * r
++                )
++                self._rate_n[b] += 1
++                self._pooled_rate = (
++                    r if self._pooled_n == 0 else (1 - a) * self._pooled_rate + a * r
++                )
++                self._pooled_n += 1
++
++        self._batch_count += 1
++        if self._batch_count <= self.warmup_batches:
++            return False
++        if self._batch_count < self._grace_until:
++            return False
++        if (self._batch_count - self.warmup_batches) % self.update_interval != 0:
++            return False
++        return self._recompute()
++
++    # -- decision ----------------------------------------------------------
++    def _rate_for_next(self) -> float:
++        b = self._next_bucket
++        n = self._rate_n[b]
++        if n == 0 or self.confidence_weight <= 0.0:
++            return self._pooled_rate
++        # Shrink towards the pooled rate until the bucket has seen enough.
++        w = self.confidence_weight * min(1.0, n / max(1, self.min_bucket_samples))
++        return w * self._rate[b] + (1 - w) * self._pooled_rate
++
++    def best_steps(self, r: float) -> tuple[int, float]:
++        best, best_tps = self.current_steps, -1.0
++        for s in self.candidate_steps:
++            tps = (1.0 + self.position_bias * expected_accept(r, s)) / step_time_ms(s)
++            if s == self.current_steps:
++                tps *= 1.0 + self.switch_margin
++            if tps > best_tps:
++                best, best_tps = s, tps
++        return best, best_tps
++
++    def _recompute(self) -> bool:
++        if self._pooled_n == 0:
++            return False
++        r = self._rate_for_next()
++        target, _ = self.best_steps(r)
++        if self._dbg:
++            logger.info(
++                "[adaptive-conf] steps=%d batch=%d conf=%s bucket=%d r=%.4f "
++                "n=%s -> %d",
++                self.current_steps,
++                self._batch_count,
++                f"{self._last_conf:.3f}" if self._last_conf is not None else "-",
++                self._next_bucket,
++                r,
++                self._rate_n,
++                target,
++            )
++        if target == self.current_steps:
++            return False
++        old = self.current_steps
++        self.current_steps = target
++        self._grace_until = self._batch_count + self.switch_grace_batches
++        logger.info(
++            "Adaptive spec params updated (confidence): steps %d -> %d "
++            "(r=%.3f, conf=%s, E@%d=%.2f, E@%d=%.2f)",
++            old,
++            target,
++            r,
++            f"{self._last_conf:.3f}" if self._last_conf is not None else "-",
++            old,
++            self.position_bias * expected_accept(r, old),
++            target,
++            self.position_bias * expected_accept(r, target),
++        )
++        return True
+diff --git a/python/sglang/srt/speculative/adaptive_runtime_state.py b/python/sglang/srt/speculative/adaptive_runtime_state.py
+index 0acc6f261a..62f9d1fd0a 100644
+--- a/python/sglang/srt/speculative/adaptive_runtime_state.py
++++ b/python/sglang/srt/speculative/adaptive_runtime_state.py
+@@ -195,6 +195,10 @@ class AdaptiveController:
+                 "smaller ones as candidates."
+             )
+ 
++    def observe_confidence(self, confidences: list[float], batch_size: int) -> None:
++        """Draft confidence for the chain that is about to be drafted."""
++        self.params.observe_confidence(confidences, batch_size)
++
+     def activate_step_by_batch(self, batch_size: int) -> None:
+         target = (
+             self._pending_steps
+diff --git a/python/sglang/srt/speculative/adaptive_spec_params.py b/python/sglang/srt/speculative/adaptive_spec_params.py
+index 0aef671d33..ee20420579 100644
+--- a/python/sglang/srt/speculative/adaptive_spec_params.py
++++ b/python/sglang/srt/speculative/adaptive_spec_params.py
+@@ -368,8 +368,21 @@ class AdaptiveSpeculativeParams:
+         self._slots: dict[int, AdaptiveStepSlot] = {}
+         self._cuda_graph_bs: list[int] | None = None
+ 
++        # SGLANG_ADAPTIVE_POLICY=confidence swaps the decision rule (not the
++        # state machinery) for the throughput/confidence slot.  Default "ema"
++        # is the shipped behaviour, byte for byte.
++        from sglang.srt.speculative.adaptive_confidence import (
++            ConfidenceStepSlot,
++            confidence_policy_enabled,
++        )
++
++        slot_cls = (
++            ConfidenceStepSlot if confidence_policy_enabled() else AdaptiveStepSlot
++        )
++        self._confidence = slot_cls is ConfidenceStepSlot
++
+         for bs, entry in sorted(bs_entries.items()):
+-            self._slots[bs] = AdaptiveStepSlot(
++            self._slots[bs] = slot_cls(
+                 initial_steps=initial_steps,
+                 cfg={**cfg, **entry},
+             )
+@@ -393,6 +406,15 @@ class AdaptiveSpeculativeParams:
+     def get_steps_for_batch(self, batch_size: int) -> int:
+         return self._route(batch_size).current_steps
+ 
++    def observe_confidence(self, confidences: list[float], batch_size: int) -> None:
++        """Feed the draft's position-0 top-1 probabilities to the live slot.
++
++        No-op for the EMA policy, which has nowhere to put them.
++        """
++        if not self._confidence:
++            return
++        self._route(batch_size).observe_confidence(confidences)
++
+     def on_verify_complete(
+         self, num_correct_drafts_per_req: list[int], batch_size: int
+     ) -> int | None:
+diff --git a/python/sglang/srt/speculative/base_spec_worker.py b/python/sglang/srt/speculative/base_spec_worker.py
+index ba0ffd616e..8ba5c0d554 100644
+--- a/python/sglang/srt/speculative/base_spec_worker.py
++++ b/python/sglang/srt/speculative/base_spec_worker.py
+@@ -1,5 +1,6 @@
+ from __future__ import annotations
+ 
++import logging
+ from abc import ABC, abstractmethod
+ from dataclasses import dataclass
+ from enum import Enum
+@@ -13,6 +14,8 @@ from sglang.srt.model_executor.graph_memory_usage import (
+ )
+ from sglang.srt.runtime_context import get_disagg, get_exec, get_memory, get_schedule
+ 
++logger = logging.getLogger(__name__)
++
+ if TYPE_CHECKING:
+     from sglang.srt.managers.io_struct import (
+         UpdateWeightFromDiskReqInput,
+@@ -58,6 +61,12 @@ class EagleDraftWorkerBase(ABC):
+     # topk=1 chain constants for draft_forward's fast path; None when topk > 1.
+     _topk1_parents_prealloc: Optional[torch.Tensor] = None
+     _topk1_score_indices_prealloc: Optional[torch.Tensor] = None
++    # C1 draft-confidence side channel (topk=1 only). Allocated once, at the
++    # launch step count -- which adaptive guarantees is the largest candidate
++    # -- and never rebuilt, so a state switch cannot free a buffer that an
++    # already-captured draft graph writes into.
++    _chain_conf_buf: Optional[torch.Tensor] = None
++    _conf_channel = None
+ 
+     def __init__(self) -> None:
+         self._specialized_graph_memory_usage: dict[str, float] = {}
+@@ -142,6 +151,30 @@ class EagleDraftWorkerBase(ABC):
+         self._topk1_score_indices_prealloc = torch.arange(
+             num_steps, dtype=torch.long, device=self.device
+         ).repeat(max_bs, 1)
++        self._init_confidence_channel(max_bs, num_steps)
++
++    def _init_confidence_channel(self, max_bs: int, num_steps: int) -> None:
++        from sglang.srt.speculative.adaptive_confidence import (
++            ConfidenceChannel,
++            chain_trace_enabled,
++            confidence_enabled,
++        )
++
++        if not confidence_enabled() or self._conf_channel is not None:
++            return
++        if chain_trace_enabled():
++            self._chain_conf_buf = torch.zeros(
++                (max_bs, max(num_steps, 1)), dtype=torch.float32, device=self.device
++            )
++        self._conf_channel = ConfidenceChannel(
++            device=self.device, max_bs=max_bs, max_steps=max(num_steps, 1)
++        )
++        logger.info(
++            "C1 draft-confidence channel enabled (max_bs=%d, steps=%d, chain_trace=%s)",
++            max_bs,
++            num_steps,
++            chain_trace_enabled(),
++        )
+ 
+ 
+ class BaseSpecWorker(ABC):
+diff --git a/python/sglang/srt/speculative/eagle_worker_v2.py b/python/sglang/srt/speculative/eagle_worker_v2.py
+index c7335cc1d0..c4a3b86aaf 100644
+--- a/python/sglang/srt/speculative/eagle_worker_v2.py
++++ b/python/sglang/srt/speculative/eagle_worker_v2.py
+@@ -57,6 +57,11 @@ from sglang.srt.runtime_context import (
+     get_spec,
+ )
+ from sglang.srt.server_args import ServerArgs
++from sglang.srt.speculative.adaptive_confidence import (
++    ChainTracer,
++    chain_trace_enabled,
++    top1_prob,
++)
+ from sglang.srt.speculative.adaptive_runtime_state import (
+     AdaptiveController,
+     SpecRuntimeState,
+@@ -671,6 +676,18 @@ class EagleDraftWorker(EagleDraftWorkerBase):
+                     self.draft_forward(forward_batch)
+                 )
+ 
++        if (
++            self._conf_channel is not None
++            and self._chain_conf_buf is not None
++            and not forward_batch.forward_mode.is_idle()
++        ):
++            # Copy before draft-extend overwrites column 0 for the next chain.
++            self._conf_channel.record_chain(
++                self._chain_conf_buf,
++                bs=batch.seq_lens.shape[0],
++                steps=self.speculative_num_steps,
++            )
++
+         return build_eagle_verify_input(
+             batch,
+             draft_input,
+@@ -738,6 +755,20 @@ class EagleDraftWorker(EagleDraftWorkerBase):
+             )
+             draft_tokens_topk1[:, :1].copy_(topk_index)
+ 
++        # C1: per-position draft confidence (trace only; None in production).
++        # Column 0 was written by the previous iteration's draft-extend, which
++        # is where this chain's first token came from.
++        chain_conf_buf = (
++            self._chain_conf_buf
++            if (
++                draft_tokens_topk1 is not None
++                and self._chain_conf_buf is not None
++                and topk_index.shape[0] <= self._chain_conf_buf.shape[0]
++                and self.speculative_num_steps <= self._chain_conf_buf.shape[1]
++            )
++            else None
++        )
++
+         # Forward multiple steps
+         scores = None
+         with IndexTopKShareState.mtp_iteration(
+@@ -811,6 +842,12 @@ class EagleDraftWorker(EagleDraftWorkerBase):
+                                 if draft_tokens_topk1 is not None
+                                 else None
+                             ),
++                            # C1 trace only: the kernel's argmax pass already
++                            # reads every logit, so the top-1 probability of
++                            # chain position i+1 comes out of the same
++                            # reduction.  ``None`` in production, and the
++                            # kernel specialises WRITE_PROB away.
++                            chain_probs=chain_conf_buf,
+                         )
+                     else:
+                         topk_index = torch.argmax(
+@@ -1154,6 +1191,17 @@ class EagleDraftWorker(EagleDraftWorkerBase):
+             )
+             ret_topk_p = torch.ones_like(ret_topk_index, dtype=torch.float32)
+             ret_draft_probs = None
++            if self._conf_channel is not None:
++                # C1: the confidence the adaptive controller decides on.  This
++                # is the only chain position whose probability exists before
++                # the next step's state swap, because the draft loop itself is
++                # one captured CUDA graph.  ret_topk_p stays 1.0 so every
++                # existing consumer is unchanged.
++                p0 = top1_prob(draft_logits_output.next_token_logits)
++                self._conf_channel.record_position0(p0)
++                if self._chain_conf_buf is not None:
++                    n = min(p0.shape[0], self._chain_conf_buf.shape[0])
++                    self._chain_conf_buf[:n, 0].copy_(p0[:n])
+         else:
+             probs = renorm_draft_probs(
+                 draft_logits_output.next_token_logits,
+@@ -1224,6 +1272,16 @@ class EAGLEWorkerV2(BaseSpecWorker):
+             target_worker,
+         )
+ 
++        # C1 offline trace (SGLANG_ADAPTIVE_TRACE=<path>), debug only.
++        self._chain_tracer: Optional[ChainTracer] = None
++        if chain_trace_enabled():
++            import os as _os
++
++            self._chain_tracer = ChainTracer(
++                _os.environ["SGLANG_ADAPTIVE_TRACE"]
++                + f".rank{getattr(self, 'tp_rank', 0)}"
++            )
++
+         # Adaptive speculative
+         self.adaptive_controller: Optional[AdaptiveController] = None
+         if get_spec().speculative_adaptive:
+@@ -1484,14 +1542,32 @@ class EAGLEWorkerV2(BaseSpecWorker):
+     def on_verify_complete_cpu(
+         self, num_correct_drafts_per_req: list[int], batch_size: int = 0
+     ) -> None:
++        if self._chain_tracer is not None:
++            channel = self.draft_worker._conf_channel
++            popped = channel.pop_chain() if channel is not None else None
++            chain, steps = popped if popped is not None else (None, 0)
++            self._chain_tracer.write(
++                steps=steps,
++                bs=batch_size,
++                chain=chain,
++                accepted=num_correct_drafts_per_req,
++            )
+         if self.adaptive_controller is not None:
+             self.adaptive_controller.on_verify_complete(
+                 num_correct_drafts_per_req, batch_size=batch_size
+             )
+ 
+     def activate_step_by_batch(self, batch_size: int) -> None:
+-        if self.adaptive_controller is not None:
+-            self.adaptive_controller.activate_step_by_batch(batch_size)
++        if self.adaptive_controller is None:
++            return
++        # The confidence of the chain about to be drafted was staged during the
++        # previous iteration's draft-extend, so this event is already complete.
++        channel = self.draft_worker._conf_channel
++        if channel is not None:
++            confidences = channel.latest_position0()
++            if confidences:
++                self.adaptive_controller.observe_confidence(confidences, batch_size)
++        self.adaptive_controller.activate_step_by_batch(batch_size)
+ 
+     # -- Adaptive speculative decoding protocol --
+ 
+-- 
+2.43.0
+

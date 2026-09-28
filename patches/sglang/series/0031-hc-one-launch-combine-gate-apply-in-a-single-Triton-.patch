@@ -1,0 +1,622 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: aiueo52 <aiueo52@users.noreply.github.com>
+Date: Thu, 3 Sep 2026 20:45:34 +0900
+Subject: [PATCH 031/105] hc: one-launch combine (gate + apply in a single
+ Triton kernel), SGLANG_HC_COMBINE_FUSED=1
+
+GatedResidual.combine currently launches the sgl-kernel pair hc_combine_gate +
+hc_combine_apply.  At 96 boundaries per decode step that is 192 launches; the W16
+trace puts the pair at ~3.5 us for 16 rows and ~3.1 us for 1 row while the row only
+moves ~1 MB, i.e. it is launch- and parallelism-bound, not bandwidth-bound.
+
+hc_combine_fused_triton does both phases in one launch.  The row is cut into NPROG
+contiguous power-of-two chunks and program (m, p) owns chunk p for both phases:
+phase 1 accumulates that chunk's contribution to all HC gate dots into a persistent
+fp32 partials buffer, a grid barrier publishes them, phase 2 reduces per branch,
+forms the gates and streams the chunk out.  Reading the normed row once for all HC
+branches (the reference gate kernel reads it once per branch) also drops ~1 MB of L2
+traffic per verify-width call.
+
+NPROG is chosen per row count so rows*NPROG stays under the SM count, which is what
+makes the grid barrier safe: every CTA is resident before the barrier, a graph replay
+serialises the stream, and PDL only releases a successor once this grid is fully
+launched.  The wrapper refuses (and combine() falls back to the two-kernel path)
+whenever no chunking fits.  The last CTA out restores both counters to 0 so a graph
+replay starts clean.
+
+Numerics: fp32 throughout with a bf16 round at the store, as in the CUDA pair, but
+the gate dot is reduced in a different order, so the contract is "within 1 bf16 ulp"
+rather than bit-identical -- the fp32 gate moves by ~1e-7 relative and that only
+flips an output bit when the fp32 result sits that close to a bf16 rounding boundary.
+test/srt/layers/test_hc_combine_fused.py asserts max ulp <= 1 across rows 1..16,
+prints the measured differing-element fraction, checks the result against an fp64
+reference so a systematic error cannot hide in the allowance, and covers the counter
+reset and a CUDA-graph replay.
+
+Default off; bench/glue_e/bench_hc_combine.py compares the two under CUPTI.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+---
+ bench/glue_e/bench_hc_combine.py              |  91 +++++++
+ .../srt/layers/hc_combine_fused_triton.py     | 233 ++++++++++++++++++
+ python/sglang/srt/layers/hyperconnection.py   |  25 ++
+ test/srt/layers/test_hc_combine_fused.py      | 179 ++++++++++++++
+ 4 files changed, 528 insertions(+)
+ create mode 100644 bench/glue_e/bench_hc_combine.py
+ create mode 100644 python/sglang/srt/layers/hc_combine_fused_triton.py
+ create mode 100644 test/srt/layers/test_hc_combine_fused.py
+
+diff --git a/bench/glue_e/bench_hc_combine.py b/bench/glue_e/bench_hc_combine.py
+new file mode 100644
+index 0000000000..4707d6e433
+--- /dev/null
++++ b/bench/glue_e/bench_hc_combine.py
+@@ -0,0 +1,91 @@
++#!/usr/bin/env python3
++"""glue-E item 2: fused HC combine (1 launch) vs. hc_combine_gate + hc_combine_apply.
++
++    python bench/glue_e/bench_hc_combine.py            # rows 1 and 16
++    python bench/glue_e/bench_hc_combine.py 1 2 4 8 16
++
++Metric: CUPTI kernel duration over CUDA-graph replay (bench/w8a16v2/harness.py),
++which is what the in-server torch profile reports. The rotating working set is a
++ring of distinct (block_output, residual, normed, out) quadruples several times the
++128 MB L2, so the numbers reflect real memory traffic rather than an L2-resident
++micro-benchmark.
++"""
++
++from __future__ import annotations
++
++import sys
++
++import torch
++
++sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent))
++from _harness import clocks_note, cupti_by_kernel, report  # noqa: E402
++
++HC = 4
++HS = 2560
++ROW = HC * HS
++L2 = 128 << 20
++
++
++def build(rows: int):
++    """A working set of >= 4x L2 of distinct residual/normed/out triples."""
++    per_call = rows * (2 * ROW + HS + ROW) * 2  # r + n + y read, out written
++    n = max(8, min(96, -(-4 * L2 // max(per_call, 1))))
++    g = torch.Generator(device="cuda").manual_seed(0)
++    w = (
++        torch.randn(HC, ROW, dtype=torch.float32, device="cuda", generator=g)
++        .mul_(0.02)
++        .to(torch.bfloat16)
++    )
++    args = []
++    for _ in range(n):
++        y = torch.randn(rows, HS, dtype=torch.bfloat16, device="cuda", generator=g)
++        r = torch.randn(rows, ROW, dtype=torch.bfloat16, device="cuda", generator=g)
++        nn = torch.randn(rows, ROW, dtype=torch.bfloat16, device="cuda", generator=g)
++        out = torch.empty_like(r)
++        args.append((y, r, nn, out))
++    return w, args
++
++
++def main(rows_list):
++    from sglang.kernels.ops.elementwise.hc_combine import hc_combine_split
++    from sglang.srt.layers.hc_combine_fused_triton import (
++        hc_combine_fused,
++        hc_combine_fused_supported,
++    )
++
++    print(clocks_note())
++    for rows in rows_list:
++        w, args = build(rows)
++        print(f"\n=== rows={rows}  hc={HC} hidden={HS}  working set x{len(args)}")
++        if not hc_combine_fused_supported(args[0][0], args[0][1], HC, HS):
++            print("  fused path unsupported at this row count")
++            continue
++
++        def split(a):
++            y, r, n, out = a
++            hc_combine_split(y, r, n, w, HC, HS, out=out)
++
++        def fused(a):
++            y, r, n, out = a
++            hc_combine_fused(y, r, n, w, HC, HS, out=out)
++
++        # correctness first, so a broken variant never reports a time
++        y, r, n, out = args[0]
++        ref = hc_combine_split(y, r, n, w, HC, HS)
++        got = hc_combine_fused(y, r, n, w, HC, HS)
++        d = (ref.float() - got.float()).abs().max().item()
++        print(f"  max |split - fused| = {d:.3e}")
++
++        res_s, tot_s = cupti_by_kernel(split, args)
++        report("split (gate + apply)", res_s, tot_s)
++        res_f, tot_f = cupti_by_kernel(fused, args)
++        report("fused (one Triton launch)", res_f, tot_f)
++        print(
++            f"  delta = {tot_f - tot_s:+.2f} us/call   "
++            f"-> {(tot_f - tot_s) * 96:+.0f} us/step at 96 combines"
++        )
++
++
++if __name__ == "__main__":
++    rows = [int(a) for a in sys.argv[1:]] or [1, 16]
++    main(rows)
+diff --git a/python/sglang/srt/layers/hc_combine_fused_triton.py b/python/sglang/srt/layers/hc_combine_fused_triton.py
+new file mode 100644
+index 0000000000..ad5163092b
+--- /dev/null
++++ b/python/sglang/srt/layers/hc_combine_fused_triton.py
+@@ -0,0 +1,233 @@
++"""Single-launch HyperConnection combine (gate + apply in one Triton kernel).
++
++``GatedResidual.combine`` currently runs the sgl-kernel split pair
++``hc_combine_gate`` + ``hc_combine_apply`` (``jit/csrc/elementwise/hc_combine.cuh``).
++At the decode/verify widths of Qwen3.8-Flash-Next that is 2 launches x 96
++boundaries per step, and each launch costs ~1 us of fixed time on top of a kernel
++that only moves ~1 MB.  This module does the same math in one launch:
++
++    a[m, c] = 2 * sigmoid(dot(normed_residual[m, :], inject_weight[c, :]) / HC)
++    out[m, c*HS + i] = residual[m, c*HS + i] + a[m, c] * block_output[m, i]
++
++Geometry.  The row (HC*HS = 10240 elements for hc_count 4 / hidden 2560) is cut
++into ``NPROG`` contiguous power-of-two chunks; program ``(m, p)`` owns chunk ``p``
++of row ``m`` for both phases.  Phase 1 accumulates that chunk's contribution to all
++HC gate dots into a persistent fp32 ``partials`` buffer, a grid barrier publishes
++them, phase 2 reduces the NPROG partials per branch, forms the gates and writes the
++chunk of the output row.  A chunk may straddle a branch boundary, so the gate is
++selected per element rather than per CTA.
++
++Grid barrier safety.  ``rows * NPROG`` is kept <= the SM count, so every CTA of the
++launch is resident before the barrier is reached (a CUDA-graph replay serialises the
++stream, and PDL only lets a successor start once this grid is fully launched).  The
++wrapper falls back to the two-kernel path whenever that does not hold.  The two
++counters are restored to 0 by the last CTA out, so a graph replay starts clean.
++
++Numerics.  Everything is fp32 with a bf16 round at the store, exactly as the CUDA
++pair does, but the fp32 dot is reduced in a different order (per-chunk tl.sum tree
++plus a sequential fold over the chunks, vs. the reference's per-thread sequential
++sum, warp butterfly and sequential fold over its 8 splits).  The gate therefore
++differs by a few fp32 ulp, i.e. ~1e-7 relative; the bf16 output only moves when the
++fp32 result sits within that of a bf16 rounding boundary, and then by exactly one
++bf16 ulp.  See ``test/srt/layers/test_hc_combine_fused.py`` for the measured rate.
++
++Enable with ``SGLANG_HC_COMBINE_FUSED=1``.
++"""
++
++from __future__ import annotations
++
++import os
++from typing import Optional
++
++import torch
++import triton
++import triton.language as tl
++
++try:  # __nv_expf, matching the reference's math::exp -> expf
++    from triton.language.extra.libdevice import exp as _exp_f32
++except Exception:  # pragma: no cover - older Triton
++    _exp_f32 = tl.exp
++
++# Chunk counts tried from the most parallel down; the first one whose grid fits the
++# machine wins. ROW // NPROG must be a power of two >= 256 for a clean 16 B access.
++_NPROG_CANDIDATES = (40, 20, 10, 5)
++_MAX_ROWS = 32
++_MAX_CTAS = 256  # partials/counters are sized for this many programs
++
++
++def _env_int(name: str, default: int) -> int:
++    try:
++        return int(os.environ.get(name, str(default)))
++    except ValueError:
++        return default
++
++
++# Bench hooks: pin the chunk count / warp count instead of letting _plan choose.
++_FORCE_NPROG = _env_int("SGLANG_HC_COMBINE_FUSED_NPROG", 0)
++_FORCE_WARPS = _env_int("SGLANG_HC_COMBINE_FUSED_WARPS", 0)
++
++
++@triton.jit
++def _hc_combine_fused_kernel(
++    y_ptr,  # block_output      [M, HS]      bf16/fp16
++    r_ptr,  # residual          [M, HC*HS]
++    n_ptr,  # normed_residual   [M, HC*HS]
++    w_ptr,  # inject_weight     [HC, HC*HS]
++    o_ptr,  # out               [M, HC*HS]
++    part_ptr,  # fp32           [>= M*NPROG, HC]
++    cnt_ptr,  # int32           [2]
++    num_ctas,
++    HC: tl.constexpr,
++    HS: tl.constexpr,
++    NPROG: tl.constexpr,
++    BLK: tl.constexpr,
++):
++    ROW: tl.constexpr = HC * HS
++    pid = tl.program_id(0)
++    m = pid // NPROG
++    p = pid % NPROG
++
++    offs = p * BLK + tl.arange(0, BLK)
++    n = tl.load(n_ptr + m * ROW + offs).to(tl.float32)
++
++    # ---- phase 1: this chunk's contribution to each branch's gate dot ----
++    for c in tl.static_range(HC):
++        w = tl.load(w_ptr + c * ROW + offs).to(tl.float32)
++        tl.store(
++            part_ptr + pid * HC + c,
++            tl.sum(n * w, axis=0),
++            cache_modifier=".cg",
++        )
++
++    # ---- grid barrier ----
++    tl.debug_barrier()
++    tl.atomic_add(cnt_ptr, 1, sem="acq_rel", scope="gpu")
++    while tl.atomic_add(cnt_ptr, 0, sem="acq_rel", scope="gpu") < num_ctas:
++        pass
++
++    # ---- phase 2: reduce the gate dots and stream the chunk ----
++    branch = offs // HS
++    col = offs - branch * HS
++    r = tl.load(r_ptr + m * ROW + offs).to(tl.float32)
++    yv = tl.load(y_ptr + m * HS + col).to(tl.float32)
++
++    a_vec = tl.zeros([BLK], tl.float32)
++    base = m * NPROG
++    for c in tl.static_range(HC):
++        total = tl.load(part_ptr + base * HC + c, cache_modifier=".cg")
++        for s in tl.static_range(1, NPROG):
++            total += tl.load(part_ptr + (base + s) * HC + c, cache_modifier=".cg")
++        # 2 * sigmoid(dot / HC), the reference's `2.0f / (1.0f + expf(-total / HC))`.
++        a_c = 2.0 / (1.0 + _exp_f32(-total / HC))
++        a_vec = tl.where(branch == c, a_c, a_vec)
++
++    tl.store(o_ptr + m * ROW + offs, (r + a_vec * yv).to(o_ptr.dtype.element_ty))
++
++    # ---- restore the counters for the next launch / graph replay ----
++    ticket = tl.atomic_add(cnt_ptr + 1, 1, sem="acq_rel", scope="gpu")
++    if ticket == num_ctas - 1:
++        tl.store(cnt_ptr, 0)
++        tl.store(cnt_ptr + 1, 0)
++
++
++_STATE: dict = {}
++
++
++def _num_sms(device) -> int:
++    return torch.cuda.get_device_properties(device).multi_processor_count
++
++
++def _state(device, hc_count: int):
++    key = (str(device), hc_count)
++    st = _STATE.get(key)
++    if st is None:
++        # Outside inference_mode: the kernel mutates both buffers in place and
++        # CUDA-graph capture rejects in-place writes to inference tensors.
++        with torch.inference_mode(False):
++            partials = torch.zeros(
++                (_MAX_CTAS, hc_count), dtype=torch.float32, device=device
++            )
++            counters = torch.zeros(2, dtype=torch.int32, device=device)
++        st = (partials, counters)
++        _STATE[key] = st
++    return st
++
++
++def _plan(rows: int, row_size: int, sms: int):
++    """(NPROG, BLK, num_warps) or None when no chunking fits the grid barrier."""
++    for nprog in _NPROG_CANDIDATES:
++        if _FORCE_NPROG and nprog != _FORCE_NPROG:
++            continue
++        if row_size % nprog:
++            continue
++        blk = row_size // nprog
++        if blk < 256 or (blk & (blk - 1)):  # power of two, >= 8 elems/thread
++            continue
++        if rows * nprog > sms:
++            continue
++        warps = _FORCE_WARPS or max(1, min(8, blk // 256))
++        return nprog, blk, warps
++    return None
++
++
++def hc_combine_fused_supported(
++    block_output: torch.Tensor,
++    residual: torch.Tensor,
++    hc_count: int,
++    hidden_size: int,
++) -> bool:
++    if not (block_output.is_cuda and residual.is_cuda):
++        return False
++    if residual.dtype not in (torch.bfloat16, torch.float16):
++        return False
++    rows = residual.numel() // (hc_count * hidden_size)
++    if rows < 1 or rows > _MAX_ROWS:
++        return False
++    if not (block_output.is_contiguous() and residual.is_contiguous()):
++        return False
++    return _plan(rows, hc_count * hidden_size, _num_sms(residual.device)) is not None
++
++
++def hc_combine_fused(
++    block_output: torch.Tensor,
++    residual: torch.Tensor,
++    normed_residual: torch.Tensor,
++    inject_weight: torch.Tensor,
++    hc_count: int,
++    hidden_size: int,
++    out: Optional[torch.Tensor] = None,
++) -> torch.Tensor:
++    """One-launch equivalent of ``hc_combine`` / ``hc_combine_split``."""
++    row_size = hc_count * hidden_size
++    y = block_output.reshape(-1, hidden_size)
++    r = residual.reshape(-1, row_size)
++    n = normed_residual.reshape(-1, row_size)
++    o = torch.empty_like(r) if out is None else out.reshape(-1, row_size)
++    rows = r.shape[0]
++
++    plan = _plan(rows, row_size, _num_sms(r.device))
++    if plan is None:
++        raise ValueError(
++            f"hc_combine_fused: no chunking fits rows={rows} row_size={row_size}"
++        )
++    nprog, blk, warps = plan
++    num_ctas = rows * nprog
++    partials, counters = _state(r.device, hc_count)
++
++    _hc_combine_fused_kernel[(num_ctas,)](
++        y,
++        r,
++        n,
++        inject_weight,
++        o,
++        partials,
++        counters,
++        num_ctas,
++        HC=hc_count,
++        HS=hidden_size,
++        NPROG=nprog,
++        BLK=blk,
++        num_warps=warps,
++        num_stages=1,
++    )
++    return o.reshape(residual.shape)
+diff --git a/python/sglang/srt/layers/hyperconnection.py b/python/sglang/srt/layers/hyperconnection.py
+index ba64c675ed..c7964a332d 100644
+--- a/python/sglang/srt/layers/hyperconnection.py
++++ b/python/sglang/srt/layers/hyperconnection.py
+@@ -12,6 +12,10 @@ from sglang.srt.layers.hc_mix_triton import fused_hc_mix, fused_hc_mix_supported
+ from sglang.srt.layers.linear import ReplicatedLinear
+ 
+ _HC_FUSED = os.environ.get("SGLANG_HC_FUSED", "0") == "1"
++# Single-launch combine (gate + apply in one Triton kernel), see
++# sglang.srt.layers.hc_combine_fused_triton. Replaces the sgl-kernel
++# hc_combine_gate + hc_combine_apply pair (2 launches x 96 boundaries per step).
++_HC_COMBINE_FUSED = os.environ.get("SGLANG_HC_COMBINE_FUSED", "0") == "1"
+ _HC_MIX2 = os.environ.get("SGLANG_HC_MIX2", "0") == "1"
+ _HC_MIX_FP8 = os.environ.get("SGLANG_HC_MIX_FP8", "0") == "1"
+ 
+@@ -228,6 +232,10 @@ class GatedResidual(HyperConnectionBase):
+                 and vecs % (8 * 160) == 0
+                 and (self.hidden_size // 8) % (vecs // 8) == 0
+             )
++            # The one-launch Triton combine only needs a chunking of the row that
++            # fits its grid barrier; the per-call row count decides that, so the
++            # rest of the check lives in hc_combine_fused_supported.
++            self._fused_combine_ok = _HC_COMBINE_FUSED and torch.cuda.is_available()
+ 
+         def _mix_compute(
+             hyper_input_normed: torch.Tensor,
+@@ -467,6 +475,23 @@ class GatedResidual(HyperConnectionBase):
+             and hyper_input_normed.dtype == block_output.dtype
+             and self.block_inject_weight.weight.dtype == block_output.dtype
+         ):
++            if self._fused_combine_ok:
++                from sglang.srt.layers.hc_combine_fused_triton import (
++                    hc_combine_fused,
++                    hc_combine_fused_supported,
++                )
++
++                if hc_combine_fused_supported(
++                    block_output, hyper_input, self.hc_count, self.hidden_size
++                ):
++                    return hc_combine_fused(
++                        block_output,
++                        hyper_input,
++                        hyper_input_normed,
++                        self.block_inject_weight.weight.data,
++                        self.hc_count,
++                        self.hidden_size,
++                    )
+             if self._split_combine_ok and block_output.shape[0] <= 32:
+                 from sglang.kernels.ops.elementwise.hc_combine import (
+                     hc_combine_split,
+diff --git a/test/srt/layers/test_hc_combine_fused.py b/test/srt/layers/test_hc_combine_fused.py
+new file mode 100644
+index 0000000000..bdc7a6e88b
+--- /dev/null
++++ b/test/srt/layers/test_hc_combine_fused.py
+@@ -0,0 +1,179 @@
++"""One-launch HyperConnection combine vs. the sgl-kernel gate+apply pair.
++
++Reference: ``sglang.kernels.ops.elementwise.hc_combine.hc_combine_split`` (the two
++kernels ``combine()`` launches today) and ``hc_combine`` (the single-CTA-per-row
++kernel it is bit-identical to).
++
++The fused kernel reduces the fp32 gate dot in a different order, so the contract is
++"within 1 bf16 ulp" rather than bit-identical; this test measures the actual gap and
++also checks the result against an fp64 reference so a systematic error cannot hide
++inside the 1-ulp allowance.
++
++Run:  python test/srt/layers/test_hc_combine_fused.py
++"""
++
++from __future__ import annotations
++
++import unittest
++
++import torch
++
++HC = 4
++HS = 2560
++ROW = HC * HS
++
++
++def _mono(x: torch.Tensor) -> torch.Tensor:
++    """bf16 bit patterns mapped to a monotonically increasing integer key."""
++    u = x.view(torch.int16).to(torch.int64) & 0xFFFF
++    return torch.where(u >= 0x8000, 0x10000 - u, u + 0x8000)
++
++
++def bf16_ulp_diff(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
++    return (_mono(a) - _mono(b)).abs()
++
++
++def ref_fp64(y, r, n, w, hc=HC, hs=HS):
++    """The documented semantics, in fp64."""
++    a = 2.0 / (1.0 + torch.exp(-(n.double() @ w.double().T) / hc))  # [M, HC]
++    out = r.double().unflatten(-1, (hc, hs)) + a[:, :, None] * y.double()[:, None, :]
++    return out.flatten(1)
++
++
++def make(rows: int, seed: int = 0, device="cuda"):
++    g = torch.Generator(device=device).manual_seed(seed)
++    y = torch.randn(rows, HS, dtype=torch.bfloat16, device=device, generator=g)
++    r = torch.randn(rows, ROW, dtype=torch.bfloat16, device=device, generator=g)
++    n = torch.randn(rows, ROW, dtype=torch.bfloat16, device=device, generator=g)
++    # inject_weight rows are small so the gate lands in sigmoid's steep region,
++    # where the gate error has the best chance of moving a bf16 output bit.
++    w = (
++        torch.randn(HC, ROW, dtype=torch.float32, device=device, generator=g)
++        .mul_(0.02)
++        .to(torch.bfloat16)
++    )
++    return y, r, n, w
++
++
++class TestHcCombineFusedPlan(unittest.TestCase):
++    """CPU-side: the grid-barrier chunking rule."""
++
++    def test_plan_fits_the_sm_count(self):
++        from sglang.srt.layers.hc_combine_fused_triton import _plan
++
++        for rows in range(1, 33):
++            plan = _plan(rows, ROW, 188)
++            if plan is None:
++                continue
++            nprog, blk, warps = plan
++            self.assertEqual(nprog * blk, ROW)
++            self.assertEqual(blk & (blk - 1), 0, "chunk must be a power of two")
++            self.assertGreaterEqual(blk, 256)
++            self.assertLessEqual(rows * nprog, 188, "grid barrier would not be resident")
++            self.assertEqual(blk // (32 * warps), 8, "want 8 elements per thread")
++
++    def test_plan_rejects_grids_that_cannot_barrier(self):
++        from sglang.srt.layers.hc_combine_fused_triton import _plan
++
++        # 5 chunks is the coarsest option, so a machine with < 5*rows SMs has none.
++        self.assertIsNone(_plan(rows=16, row_size=ROW, sms=8))
++
++
++@unittest.skipUnless(torch.cuda.is_available(), "needs CUDA")
++class TestHcCombineFused(unittest.TestCase):
++    def _run_all(self, rows, seed=0):
++        from sglang.kernels.ops.elementwise.hc_combine import (
++            hc_combine,
++            hc_combine_split,
++        )
++        from sglang.srt.layers.hc_combine_fused_triton import (
++            hc_combine_fused,
++            hc_combine_fused_supported,
++        )
++
++        y, r, n, w = make(rows, seed)
++        self.assertTrue(hc_combine_fused_supported(y, r, HC, HS))
++        single = hc_combine(y, r, n, w, HC, HS)
++        split = hc_combine_split(y, r, n, w, HC, HS)
++        fused = hc_combine_fused(y, r, n, w, HC, HS)
++        return (y, r, n, w), single, split, fused
++
++    def test_split_matches_single(self):
++        """The documented bit-identity the fused kernel is measured against."""
++        for rows in (1, 16):
++            _, single, split, _ = self._run_all(rows)
++            self.assertTrue(torch.equal(single, split), f"rows={rows}")
++
++    def test_fused_within_one_bf16_ulp(self):
++        worst = 0
++        worst_frac = 0.0
++        for rows in (1, 2, 3, 4, 8, 16):
++            for seed in (0, 1, 2):
++                _, _, split, fused = self._run_all(rows, seed)
++                ulp = bf16_ulp_diff(split, fused)
++                mx = int(ulp.max().item())
++                frac = float((ulp > 0).float().mean().item())
++                worst = max(worst, mx)
++                worst_frac = max(worst_frac, frac)
++                self.assertLessEqual(
++                    mx, 1, f"rows={rows} seed={seed}: max ulp {mx} > 1"
++                )
++        print(
++            f"\n[hc_combine_fused] max bf16 ulp vs hc_combine_split = {worst}, "
++            f"worst differing-element fraction = {worst_frac:.3e}"
++        )
++
++    def test_fused_matches_fp64_reference(self):
++        for rows in (1, 16):
++            (y, r, n, w), _, split, fused = self._run_all(rows)
++            exact = ref_fp64(y, r, n, w)
++            e_split = (split.double() - exact).abs().max().item()
++            e_fused = (fused.double() - exact).abs().max().item()
++            scale = exact.abs().max().item()
++            # The fused kernel must not be measurably worse than the reference.
++            self.assertLess(e_fused, max(4 * e_split, 1e-2 * scale), f"rows={rows}")
++
++    def test_out_argument(self):
++        from sglang.srt.layers.hc_combine_fused_triton import hc_combine_fused
++
++        y, r, n, w = make(16)
++        buf = torch.empty_like(r)
++        got = hc_combine_fused(y, r, n, w, HC, HS, out=buf)
++        self.assertEqual(got.data_ptr(), buf.data_ptr())
++        self.assertTrue(torch.equal(got, hc_combine_fused(y, r, n, w, HC, HS)))
++
++    def test_counters_are_restored(self):
++        """A stuck barrier counter would deadlock the next launch / graph replay."""
++        from sglang.srt.layers.hc_combine_fused_triton import _state, hc_combine_fused
++
++        y, r, n, w = make(16)
++        hc_combine_fused(y, r, n, w, HC, HS)
++        torch.cuda.synchronize()
++        _, counters = _state(r.device, HC)
++        self.assertEqual(counters.tolist(), [0, 0])
++
++    def test_cuda_graph_replay(self):
++        from sglang.kernels.ops.elementwise.hc_combine import hc_combine_split
++        from sglang.srt.layers.hc_combine_fused_triton import hc_combine_fused
++
++        y, r, n, w = make(16)
++        out = torch.empty_like(r)
++        s = torch.cuda.Stream()
++        s.wait_stream(torch.cuda.current_stream())
++        with torch.cuda.stream(s):
++            for _ in range(3):
++                hc_combine_fused(y, r, n, w, HC, HS, out=out)
++        torch.cuda.current_stream().wait_stream(s)
++        torch.cuda.synchronize()
++        g = torch.cuda.CUDAGraph()
++        with torch.cuda.graph(g):
++            hc_combine_fused(y, r, n, w, HC, HS, out=out)
++        for _ in range(5):
++            g.replay()
++        torch.cuda.synchronize()
++        ulp = bf16_ulp_diff(hc_combine_split(y, r, n, w, HC, HS), out)
++        self.assertLessEqual(int(ulp.max().item()), 1)
++
++
++if __name__ == "__main__":
++    unittest.main(verbosity=2)
+-- 
+2.43.0
+

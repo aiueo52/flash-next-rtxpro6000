@@ -1,0 +1,1736 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: aiueo52 <aiueo52@users.noreply.github.com>
+Date: Thu, 3 Sep 2026 19:43:42 +0900
+Subject: [PATCH 027/105] w8a16 gemv: retune for the [N, K] weight layout the
+ server actually passes
+
+Fp8LinearMethod keeps the [N, K]-contiguous quantized weight, stores its [K, N]
+transposed view on the layer, and transposes it back at the call site, so
+w8a16_gemv always receives stride (K, 1). `_BY_SHAPE` assumed the opposite and
+keyed every fp8 row contig_n=True, which no call matches: the server has been
+running _plan's fallback tile ([32, 128], planner split count, 4 warps) for all
+seven fp8 shapes. Only the two bf16 rows were keyed correctly and live.
+
+Re-key the table to the true layout and add M-bucket overrides. M == 1 takes
+the USE_DOT=False broadcast path on every shape measured (M_PAD drops 16 -> 1,
+so both the accumulator and the split-K partials shrink 16-fold), and _plan's
+fallback now emits a [128, 256] tile with 8 warps for shapes whose N alone
+fills the machine.
+
+bench/w8a16v2 is retooled to match and committed with it: shapes.py builds the
+weights in the true layout and carries the in-server medians, the metric is now
+the CUPTI kernel-duration median (what the serving torch profile reports) and
+not graph-replay wall time, repro_w8a16v2.py gates the harness against the
+in-server numbers before any tuning (worst fp8 row 21.7% low, every launch grid
+identical), tune_v3.py runs the two-phase sweep, and verify_v3.py checks each
+chosen config against an fp32 reference plus a bit-identical graph replay.
+
+CUPTI medians over a >= 4x L2 working set, pre-v3 plan -> tuned:
+
+  GDN in_proj_ba    96x2560 bf16  M=16   5.86 -> 2.62 us  2.23x
+  draft lm_head  32768x2560 fp8   M=1   62.14 -> 52.93 us 1.17x
+  shared gate_up  1280x2560 fp8   M=1    5.09 -> 4.13 us  1.23x
+  shared down     2560x640 fp8    M=1    3.68 -> 3.07 us  1.20x
+  MoE router       512x2560 bf16  M=1    4.16 -> 3.62 us  1.15x
+  MTP fc          2560x2560 bf16  M=1   10.82 -> 10.21 us 1.06x
+  attn qkv       13312x2560 fp8   M=16  24.83 -> 23.62 us 1.05x
+  GDN in_proj_qkvz 16384x2560 fp8 M=16  29.66 -> 28.48 us 1.04x
+  lm_head       248320x2560 fp8   M=16 407.10 -> 400.72 us 1.02x
+
+Per decode step over the profiled call counts, primary shapes only:
+W16 4.611 -> 4.223 ms (-8.4%), W4 3.325 -> 3.138 ms (-5.6%). No (shape, M)
+row regresses.
+
+The in_proj_ba entry contradicts the note it replaces ("split-K measured slower
+in the server, 14.8 vs 9.4us"): here split-K is 2.2x faster and the ranking is
+unchanged from a 1.9x-L2 to a 15x-L2 working set. Worth re-checking in a
+serving profile.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+---
+ bench/w8a16v2/baseline_v1.py                  |  76 +++++
+ bench/w8a16v2/bench_w8a16v2.py                | 250 ++++++++++++++++
+ bench/w8a16v2/env.sh                          |   5 +
+ bench/w8a16v2/final_v3.py                     | 115 ++++++++
+ bench/w8a16v2/harness.py                      | 194 +++++++++++++
+ bench/w8a16v2/repro_w8a16v2.py                | 120 ++++++++
+ bench/w8a16v2/shapes.py                       | 169 +++++++++++
+ bench/w8a16v2/tune_v3.py                      | 274 ++++++++++++++++++
+ bench/w8a16v2/tune_w8a16v2.py                 | 125 ++++++++
+ bench/w8a16v2/verify_v3.py                    |  92 ++++++
+ .../srt/layers/quantization/w8a16_gemv.py     | 125 +++++---
+ 11 files changed, 1504 insertions(+), 41 deletions(-)
+ create mode 100644 bench/w8a16v2/baseline_v1.py
+ create mode 100644 bench/w8a16v2/bench_w8a16v2.py
+ create mode 100644 bench/w8a16v2/env.sh
+ create mode 100644 bench/w8a16v2/final_v3.py
+ create mode 100644 bench/w8a16v2/harness.py
+ create mode 100644 bench/w8a16v2/repro_w8a16v2.py
+ create mode 100644 bench/w8a16v2/shapes.py
+ create mode 100644 bench/w8a16v2/tune_v3.py
+ create mode 100644 bench/w8a16v2/tune_w8a16v2.py
+ create mode 100644 bench/w8a16v2/verify_v3.py
+
+diff --git a/bench/w8a16v2/baseline_v1.py b/bench/w8a16v2/baseline_v1.py
+new file mode 100644
+index 0000000000..7c67992be8
+--- /dev/null
++++ b/bench/w8a16v2/baseline_v1.py
+@@ -0,0 +1,76 @@
++"""Frozen copy of the pre-optimization kernel (commit 65192006d4) -- the "before" column.
++
++Do not edit: it exists so bench_w8a16v2.py measures the exact configuration the serving
++profile was taken with (BLOCK_N=32, BLOCK_K=256/512, num_warps=4, Triton default
++num_stages=3, [BLOCK_N, BLOCK_K] weight tile + tl.trans).
++
++Original docstring:
++Triton W8A16 skinny GEMM: y[M,N] = x[M,K](bf16) @ W[N,K](fp8 e4m3)^T * scale[N] (fp32).
++Targets decode/verify shapes (M <= 16). Weight-only FP8: no activation quantization.
++"""
++import torch, triton, triton.language as tl
++
++@triton.jit
++def _v1_kernel(x_ptr, w_ptr, s_ptr, y_ptr, M, N, K,
++                       stride_xm, stride_xk, stride_wn, stride_wk, stride_ym, stride_yn,
++                       PER_CHANNEL: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr, M_PAD: tl.constexpr):
++    pid = tl.program_id(0)
++    offs_n = pid * BLOCK_N + tl.arange(0, BLOCK_N)
++    offs_m = tl.arange(0, M_PAD)
++    offs_k = tl.arange(0, BLOCK_K)
++    n_mask = offs_n < N
++    m_mask = offs_m < M
++    acc = tl.zeros((M_PAD, BLOCK_N), dtype=tl.float32)
++    for k0 in range(0, K, BLOCK_K):
++        kk = k0 + offs_k
++        k_mask = kk < K
++        w = tl.load(w_ptr + offs_n[:, None] * stride_wn + kk[None, :] * stride_wk,
++                    mask=n_mask[:, None] & k_mask[None, :], other=0.0)          # [BLOCK_N, BLOCK_K] fp8
++        x = tl.load(x_ptr + offs_m[:, None] * stride_xm + kk[None, :] * stride_xk,
++                    mask=m_mask[:, None] & k_mask[None, :], other=0.0)          # [M_PAD, BLOCK_K] bf16
++        acc += tl.dot(x, tl.trans(w.to(tl.bfloat16)), out_dtype=tl.float32)
++    if PER_CHANNEL:
++        s = tl.load(s_ptr + offs_n, mask=n_mask, other=0.0)
++        acc = acc * s[None, :]
++    else:
++        s = tl.load(s_ptr)
++        acc = acc * s
++    y_ptrs = y_ptr + offs_m[:, None] * stride_ym + offs_n[None, :] * stride_yn
++    tl.store(y_ptrs, acc.to(tl.bfloat16), mask=m_mask[:, None] & n_mask[None, :])
++
++
++def w8a16_gemv(x: torch.Tensor, w: torch.Tensor, scale: torch.Tensor, block_n=32, block_k=256, num_warps=4):
++    """x: [M,K] bf16; w: [N,K] fp8_e4m3 (any strides); scale: [N] or [N,1] or scalar fp32."""
++    M, K = x.shape
++    N = w.shape[0]
++    assert w.shape[1] == K and M <= 16
++    y = torch.empty((M, N), dtype=torch.bfloat16, device=x.device)
++    per_channel = scale.numel() > 1
++    s = scale.reshape(-1).contiguous().float()
++    grid = (triton.cdiv(N, block_n),)
++    _v1_kernel[grid](x, w, s, y, M, N, K,
++                             x.stride(0), x.stride(1), w.stride(0), w.stride(1), y.stride(0), y.stride(1),
++                             PER_CHANNEL=per_channel, BLOCK_N=block_n, BLOCK_K=block_k, M_PAD=16, num_warps=num_warps)
++    return y
++
++
++_ONES = {}
++
++
++def bf16_gemv(x: torch.Tensor, w: torch.Tensor, block_n=32, block_k=512, num_warps=4):
++    """Skinny BF16 GEMM y = x @ w^T for tiny-N linears where cuBLAS picks a poor kernel.
++    x: [M,K] bf16 (M<=16); w: [N,K] bf16."""
++    M, K = x.shape
++    N = w.shape[0]
++    assert w.shape[1] == K and M <= 16
++    y = torch.empty((M, N), dtype=torch.bfloat16, device=x.device)
++    one = _ONES.get(x.device)
++    if one is None:
++        one = torch.ones(1, dtype=torch.float32, device=x.device)
++        _ONES[x.device] = one
++    grid = (triton.cdiv(N, block_n),)
++    _v1_kernel[grid](x, w, one, y, M, N, K,
++                             x.stride(0), x.stride(1), w.stride(0), w.stride(1), y.stride(0), y.stride(1),
++                             PER_CHANNEL=False, BLOCK_N=block_n, BLOCK_K=block_k, M_PAD=16, num_warps=num_warps)
++    return y
++
+diff --git a/bench/w8a16v2/bench_w8a16v2.py b/bench/w8a16v2/bench_w8a16v2.py
+new file mode 100644
+index 0000000000..d4ff34ada5
+--- /dev/null
++++ b/bench/w8a16v2/bench_w8a16v2.py
+@@ -0,0 +1,250 @@
++"""A/B benchmark for the W8A16 skinny GEMV: frozen pre-optimization kernel vs. current.
++
++  bench_w8a16v2.py --before            # "before" table only, vs. the serving profile
++  bench_w8a16v2.py                     # before/after table + ms/step model
++  bench_w8a16v2.py --selftest          # split-K correctness / graph-replay / counter checks
++  bench_w8a16v2.py --shapes o_proj,shared_gate_up --m 16
++
++Every row is a CUDA-graph replay over >= 24 distinct weight copies (working set several
++times the 128 MB L2), replayed for >= --secs of continuous load after a spin-up, so the
++SMs are at their boost clock; --clocks prints the sampled SM clock per row.
++"""
++
++import argparse
++import math
++import os
++import sys
++
++sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
++sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../python"))
++
++import torch
++
++import baseline_v1 as base
++from harness import make_copies, n_copies, require_idle_gpu, time_graph
++from shapes import DEFAULT_MS, GROUND_TRUTH, MODES, SHAPE_MS, SHAPES, make_weight
++
++from sglang.srt.layers.quantization import w8a16_gemv as new
++
++
++def _fn(mod, tag, x, scale):
++    if tag == "fp8":
++        return lambda a: mod.w8a16_gemv(x, a, scale)
++    return lambda a: mod.bf16_gemv(x, a)
++
++
++def bench_one(name, N, K, tag, Ms, args, which):
++    dev = "cuda"
++    w, scale, wref = make_weight(N, K, tag, dev)
++    wbytes = N * K * (1 if tag == "fp8" else 2)
++    copies = make_copies(w, n_copies(wbytes))
++    rows = []
++    for M in Ms:
++        x = (torch.randn(M, K, device=dev) * 0.5).to(torch.bfloat16)
++        ref = x.float() @ wref.t()
++        d = {"ncopies": len(copies)}
++        for label, mod in (("before", base), ("after", new)):
++            if label not in which:
++                continue
++            fn = _fn(mod, tag, x, scale)
++            y = fn(copies[0])
++            d[label + "_err"] = (y.float() - ref).abs().max().item()
++            d[label], d[label + "_clk"] = time_graph(
++                fn, copies, min_seconds=args.secs, clocks=args.clocks)
++            # Draft steps re-read one MTP layer's weights 3-14x per decode step, so
++            # those calls run L2-warm in the server; same graph shape, one weight.
++            d[label + "_warm"], _ = time_graph(
++                fn, [copies[0]] * len(copies), min_seconds=args.secs)
++        cfg = new._plan(M, N, K, w.stride(0) == 1, w.element_size(),
++                        new._num_sms(dev)) if "after" in which else None
++        rows.append((name, N, K, tag, M, wbytes, d, cfg))
++        del x, ref
++    del copies, w, wref
++    torch.cuda.empty_cache()
++    return rows
++
++
++def fmt_before(rows, clocks):
++    hdr = (f"{'shape':<18}{'N':>7}{'K':>7}{'M':>3}{'grid':>6}{'MB':>8}{'cp':>4}"
++           f"{'us':>9}{'TB/s':>7}{'warm us':>9}{'profile':>9}{'ratio':>7}"
++           + ("   sm MHz" if clocks else ""))
++    print(hdr)
++    print("-" * len(hdr))
++    for name, N, K, tag, M, wbytes, d, _ in rows:
++        gt = GROUND_TRUTH.get((name, M))
++        t = d["before"]
++        ratio = f"{t * 1e6 / gt:>6.2f}x" if gt else "     -"
++        clk = f"   {d['before_clk'][0]}-{d['before_clk'][1]}" if clocks else ""
++        print(f"{name:<18}{N:>7}{K:>7}{M:>3}{-(-N // 32):>6}{wbytes / 1e6:>8.1f}"
++              f"{d['ncopies']:>4}{t * 1e6:>9.2f}{wbytes / t / 1e12:>7.2f}"
++              f"{d['before_warm'] * 1e6:>9.2f}{(f'{gt:>9.1f}' if gt else '        -')}"
++              f"{ratio}{clk}")
++
++
++def fmt_ab(rows):
++    hdr = (f"{'shape':<18}{'N':>7}{'K':>7}{'M':>3}{'before':>9}{'after':>9}{'gain':>7}"
++           f"{'TB/s b':>8}{'TB/s a':>8}{'warm a':>8}{'err b':>10}{'err a':>10}  config")
++    print(hdr)
++    print("-" * len(hdr))
++    for name, N, K, tag, M, wbytes, d, cfg in rows:
++        b, a = d["before"], d["after"]
++        print(f"{name:<18}{N:>7}{K:>7}{M:>3}{b * 1e6:>9.2f}{a * 1e6:>9.2f}{b / a:>6.2f}x"
++              f"{wbytes / b / 1e12:>8.2f}{wbytes / a / 1e12:>8.2f}"
++              f"{d['after_warm'] * 1e6:>8.2f}{d['before_err']:>10.2e}{d['after_err']:>10.2e}"
++              f"  {cfg}")
++
++
++def savings(rows):
++    """ms/step from the call model in shapes.py; "mixed" runs the draft calls L2-warm."""
++    by = {(r[0], r[4]): r[6] for r in rows}
++    print()
++    for mode, (spec_w, n_draft) in MODES.items():
++        for how, dk in (("cold ", ""), ("mixed", "_warm")):
++            tb = ta = 0.0
++            calls = 0
++            for name, nv, nd in ((s[0], s[4], s[5]) for s in SHAPES):
++                for M, c, key in ((spec_w, nv, ""), (1, nd * n_draft, dk)):
++                    d = by.get((name, M))
++                    if c == 0 or d is None or "after" not in d:
++                        continue
++                    tb += d["before" + key] * c
++                    ta += d["after" + key] * c
++                    calls += c
++            if calls:
++                print(f"{mode} {how}: spec_width={spec_w} draft_steps={n_draft} "
++                      f"calls={calls}  before {tb * 1e3:.3f} -> after {ta * 1e3:.3f} ms/step "
++                      f"(saved {(tb - ta) * 1e3:.3f}, {100 * (tb - ta) / tb:.1f}%)")
++
++
++def selftest():
++    """Split-K numerics, CUDA-graph capture/replay with changing inputs, counter reset."""
++    dev = "cuda"
++    ok = True
++
++    # 1. Triton scalar atomic_add must fire exactly once per CTA and broadcast the old
++    #    value to every thread; the whole fixup depends on it.
++    import triton
++    import triton.language as tl
++
++    @triton.jit
++    def _probe(cnt, out, BLOCK: tl.constexpr):
++        pid = tl.program_id(0)
++        old = tl.atomic_add(cnt + 0, 1, sem="acq_rel", scope="gpu")
++        tl.store(out + pid * BLOCK + tl.arange(0, BLOCK), tl.zeros((BLOCK,), tl.int32) + old)
++
++    cnt = torch.zeros(1, dtype=torch.int32, device=dev)
++    out = torch.zeros(64 * 256, dtype=torch.int32, device=dev)
++    _probe[(64,)](cnt, out, BLOCK=256, num_warps=4)
++    torch.cuda.synchronize()
++    per_cta = out.view(64, 256)
++    uniform = bool((per_cta == per_cta[:, :1]).all())
++    print(f"  scalar atomic: counter={cnt.item()} (want 64)  broadcast_uniform={uniform}  "
++          f"distinct_old={len(set(per_cta[:, 0].tolist()))} (want 64)")
++    ok &= cnt.item() == 64 and uniform and len(set(per_cta[:, 0].tolist())) == 64
++
++    for name, N, K, tag, _, _ in SHAPES:
++        w, scale, wref = make_weight(N, K, tag, dev)
++        for M in sorted(set(SHAPE_MS.get(name, DEFAULT_MS)) | {1, 4, 16}):
++            x = (torch.randn(M, K, device=dev) * 0.5).to(torch.bfloat16)
++            ref = x.float() @ wref.t()
++            fn = _fn(new, tag, x, scale)
++            fb = _fn(base, tag, x, scale)
++            ya, yb = fn(w), fb(w)
++            ea = (ya.float() - ref).abs().max().item()
++            eb = (yb.float() - ref).abs().max().item()
++            # One bf16 ulp at the output magnitude (7 explicit mantissa bits).
++            mx = ref.abs().max().item()
++            ulp = 2.0 ** (math.floor(math.log2(mx)) - 7) if mx > 0 else 0.0
++            cfg = new._plan(M, N, K, w.stride(0) == 1, w.element_size(), new._num_sms(dev))
++            good = ea <= eb + 2 * ulp
++            ok &= good
++
++            # Graph capture + replay with changing inputs, then counters back to zero.
++            xs = torch.empty_like(x)
++            xs.copy_(x)
++            gfn = _fn(new, tag, xs, scale)
++            g = torch.cuda.CUDAGraph()
++            s = torch.cuda.Stream()
++            s.wait_stream(torch.cuda.current_stream())
++            with torch.cuda.stream(s):
++                for _ in range(3):
++                    gfn(w)
++            torch.cuda.current_stream().wait_stream(s)
++            torch.cuda.synchronize()
++            with torch.cuda.graph(g):
++                yg = gfn(w)
++            replay_ok = True
++            for seed in range(3):
++                x2 = (torch.randn(M, K, device=dev, generator=torch.Generator(
++                    device=dev).manual_seed(seed)) * 0.5).to(torch.bfloat16)
++                xs.copy_(x2)
++                g.replay()
++                torch.cuda.synchronize()
++                r2 = x2.float() @ wref.t()
++                e2 = (yg.float() - r2).abs().max().item()
++                m2 = r2.abs().max().item()
++                u2 = 2.0 ** (math.floor(math.log2(m2)) - 7) if m2 > 0 else 0.0
++                replay_ok &= e2 <= max(eb, 2 * u2) + 2 * u2
++            cnt_zero = int(new._workspace(x.device)[1].abs().sum().item()) == 0
++            # Stress the split-K fixup: many back-to-back launches sharing one scratch,
++            # which is where a missing fence or a leaked counter would show up.
++            stress_ok = True
++            if cfg[2] > 1:
++                gs = torch.cuda.CUDAGraph()
++                with torch.cuda.graph(gs):
++                    ys = [gfn(w) for _ in range(32)]
++                for _ in range(50):
++                    gs.replay()
++                torch.cuda.synchronize()
++                r3 = xs.float() @ wref.t()
++                m3 = r3.abs().max().item()
++                u3 = 2.0 ** (math.floor(math.log2(m3)) - 7) if m3 > 0 else 0.0
++                stress_ok = all((t.float() - r3).abs().max().item() <= max(eb, 2 * u3) + 2 * u3
++                                for t in ys)
++                stress_ok &= int(new._workspace(x.device)[1].abs().sum().item()) == 0
++                del gs, ys
++            ok &= replay_ok and cnt_zero and stress_ok
++            del g
++            flag = "ok " if (good and replay_ok and cnt_zero and stress_ok) else "FAIL"
++            print(f"  {flag} {name:<18} M={M:<3} err_after={ea:.3e} err_before={eb:.3e} "
++                  f"2ulp={2*ulp:.2e} replay={replay_ok} counters_zero={cnt_zero} "
++                  f"stress={stress_ok} cfg={cfg}")
++        del w, wref
++        torch.cuda.empty_cache()
++    print("SELFTEST", "PASS" if ok else "FAIL")
++    return ok
++
++
++if __name__ == "__main__":
++    ap = argparse.ArgumentParser()
++    ap.add_argument("--shapes", default="")
++    ap.add_argument("--m", default="")
++    ap.add_argument("--secs", type=float, default=0.6)
++    ap.add_argument("--before", action="store_true")
++    ap.add_argument("--after", action="store_true")
++    ap.add_argument("--clocks", action="store_true")
++    ap.add_argument("--selftest", action="store_true")
++    a = ap.parse_args()
++    require_idle_gpu()
++    torch.manual_seed(0)
++    p = torch.cuda.get_device_properties(0)
++    print(f"device: {p.name}  SMs={p.multi_processor_count}  "
++          f"L2={p.L2_cache_size / 1e6:.0f} MB  vram={p.total_memory / 1e9:.0f} GB")
++    if a.selftest:
++        sys.exit(0 if selftest() else 1)
++    which = {"before"} if a.before else ({"after"} if a.after else {"before", "after"})
++    want = set(a.shapes.split(",")) if a.shapes else None
++    forced = [int(v) for v in a.m.split(",")] if a.m else None
++    rows = []
++    for name, N, K, tag, _, _ in SHAPES:
++        if want and name not in want:
++            continue
++        rows += bench_one(name, N, K, tag, forced or list(SHAPE_MS.get(name, DEFAULT_MS)),
++                          a, which)
++    print()
++    if which == {"before"}:
++        fmt_before(rows, a.clocks)
++    else:
++        fmt_ab(rows)
++        if not want and not forced:
++            savings(rows)
+diff --git a/bench/w8a16v2/env.sh b/bench/w8a16v2/env.sh
+new file mode 100644
+index 0000000000..c6bf13b522
+--- /dev/null
++++ b/bench/w8a16v2/env.sh
+@@ -0,0 +1,5 @@
++# source this before running the benches: `. bench/w8a16v2/env.sh`
++export CUDA_HOME=/home/user/tools/mamba/envs/cuda13
++export PATH=/home/user/tools/sglang-rtxpro6000/.venv/bin:$CUDA_HOME/bin:$PATH
++export TRITON_CACHE_DIR=/home/user/tools/sglang-rtxpro6000/.cache/triton
++export PYTHONPATH=/home/user/tools/sglang-qsa-ring/python
+diff --git a/bench/w8a16v2/final_v3.py b/bench/w8a16v2/final_v3.py
+new file mode 100644
+index 0000000000..b1689d23c9
+--- /dev/null
++++ b/bench/w8a16v2/final_v3.py
+@@ -0,0 +1,115 @@
++"""Before/after table for the v3 tuning, in CUPTI kernel-duration medians.
++
++"before" is the config the server runs today at 1eb2831e5c: `_plan`'s *fallback*
++for the true [N, K] layout (the tuned table's keys assumed the wrong layout, so
++every fp8 entry in it was dead). "after" is whatever `_plan` returns now.
++
++  final_v3.py                 # full table + per-decode-step model
++  final_v3.py --shapes o_proj,attn_qkv --ms 1,16
++"""
++
++import argparse
++import os
++import sys
++
++sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
++sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../python"))
++
++import torch
++
++import baseline_v1 as base
++from harness import cupti_kernel_us, make_copies, n_copies, require_idle_gpu
++from shapes import GROUND_TRUTH, MODES, SECONDARY, SHAPES, make_weight, pre_v3_plan
++
++from sglang.srt.layers.quantization import w8a16_gemv as new
++
++def main():
++    ap = argparse.ArgumentParser()
++    ap.add_argument("--shapes", default="")
++    ap.add_argument("--ms", default="1,4,16")
++    ap.add_argument("--secs", type=float, default=0.3)
++    ap.add_argument("--events", type=int, default=2000)
++    ap.add_argument("--v1", action="store_true", help="also time the pre-v2 kernel")
++    a = ap.parse_args()
++    require_idle_gpu()
++    torch.manual_seed(0)
++    dev = "cuda"
++    sms = new._num_sms(dev)
++    p = torch.cuda.get_device_properties(0)
++    print(f"device: {p.name}  SMs={sms}  L2={p.L2_cache_size / 1e6:.0f} MB\n")
++
++    by = {s[0]: s for s in SHAPES}
++    want = a.shapes.split(",") if a.shapes else [s[0] for s in SHAPES]
++    Ms = [int(v) for v in a.ms.split(",") if v]
++    rows = []
++    for name in want:
++        _, N, K, tag, nv, nd = by[name]
++        w, scale, wref = make_weight(N, K, tag, dev)
++        wbytes = N * K * (1 if tag == "fp8" else 2)
++        copies = make_copies(w, n_copies(wbytes))
++        for M in Ms:
++            x = (torch.randn(M, K, device=dev) * 0.5).to(torch.bfloat16)
++            ref = x.float() @ wref.t()
++            refmax = ref.abs().max().item()
++            if tag == "fp8":
++                run = lambda arr, cfg: new.w8a16_gemv(x, arr, scale, cfg=cfg)
++                v1 = lambda arr: base.w8a16_gemv(x, arr, scale)
++            else:
++                run = lambda arr, cfg: new.bf16_gemv(x, arr, cfg=cfg)
++                v1 = lambda arr: base.bf16_gemv(x, arr)
++            fb = pre_v3_plan(M, N, K, 1 if tag == "fp8" else 2, sms)
++            tuned = new._plan(M, N, K, w.stride(0) == 1, w.element_size(), sms)
++            kw = dict(min_seconds=a.secs, max_events=a.events)
++            tb, _ = cupti_kernel_us(lambda arr: run(arr, fb), copies, **kw)
++            ta, _ = cupti_kernel_us(lambda arr: run(arr, tuned), copies, **kw)
++            t1 = None
++            if a.v1:
++                t1, _ = cupti_kernel_us(v1, copies, **kw)
++            rel = (run(copies[0], tuned).float() - ref).abs().max().item() / refmax
++            torch.cuda.synchronize()
++            rows.append((name, N, K, tag, M, wbytes, nv, nd, fb, tuned, tb, ta, t1, rel))
++            del x, ref
++        del copies, w, wref
++        torch.cuda.empty_cache()
++
++    hdr = (f"{'shape':<18}{'N':>7}{'K':>6}{'M':>3}{'MB':>7}{'before':>9}{'after':>9}"
++           f"{'gain':>7}{'TB/s':>7}{'server':>8}{'relerr':>10}  after cfg")
++    print(hdr)
++    print("-" * len(hdr))
++    for (name, N, K, tag, M, wb, nv, nd, fb, tn, tb, ta, t1, rel) in rows:
++        g = GROUND_TRUTH.get((name, M))
++        print(f"{name:<18}{N:>7}{K:>6}{M:>3}{wb/1e6:>7.1f}{tb*1e6:>9.2f}{ta*1e6:>9.2f}"
++              f"{tb/ta:>6.2f}x{wb/ta/1e12:>7.2f}"
++              f"{(f'{g:>8.1f}' if g else '       -')}{rel:>10.2e}  {tn}")
++    if a.v1:
++        print("\nv1 (pre-v2 kernel, BLOCK_K=256/512, no split-K) for reference:")
++        for (name, N, K, tag, M, wb, nv, nd, fb, tn, tb, ta, t1, rel) in rows:
++            print(f"  {name:<18} M={M:<3} v1 {t1*1e6:8.2f}us   today {tb*1e6:8.2f}us"
++                  f"   tuned {ta*1e6:8.2f}us")
++
++    by_key = {(r[0], r[4]): r for r in rows}
++    print()
++    for mode, (spec_w, n_draft) in MODES.items():
++        for label, only in (("all shapes  ", None), ("primary only", SECONDARY)):
++            tb = ta = 0.0
++            calls = 0
++            for name, N, K, tag, nv, nd in SHAPES:
++                if only and name in only:
++                    continue
++                for M, c in ((spec_w, nv), (1, nd * (n_draft + 1))):
++                    r = by_key.get((name, M))
++                    if c == 0 or r is None:
++                        continue
++                    tb += r[10] * c
++                    ta += r[11] * c
++                    calls += c
++                if calls and (name, spec_w) not in by_key and nv:
++                    print(f"    (missing {name} M={spec_w})")
++            if calls:
++                print(f"{mode} {label}: spec_width={spec_w} draft_steps={n_draft} "
++                      f"calls={calls}  before {tb*1e3:.3f} -> after {ta*1e3:.3f} ms/step "
++                      f"(saved {(tb-ta)*1e3:.3f} ms, {100*(tb-ta)/tb:.1f}%)")
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/bench/w8a16v2/harness.py b/bench/w8a16v2/harness.py
+new file mode 100644
+index 0000000000..76592927ed
+--- /dev/null
++++ b/bench/w8a16v2/harness.py
+@@ -0,0 +1,194 @@
++"""CUDA-graph replay timing for the W8A16 skinny GEMV.
++
++Two things the previous harness got wrong and this one checks:
++
++- Working set. Every measurement rotates over >= 24 distinct weight copies, enough of
++  them that the set is ~4x the 128 MB L2, so the number reflects HBM traffic. (A weight
++  already larger than 4x L2 by itself still gets the 24-copy minimum.)
++- Clocks. A few hundred microseconds of replay leaves the SMs at their idle clock and
++  reports 2-3x the in-server time. Each measurement spins the GPU up first and then
++  replays for at least `min_seconds`, and the achieved SM clock is sampled during the
++  timed region and reported, so an idle-clock run is visible instead of silent.
++"""
++
++import subprocess
++import threading
++import time
++
++import torch
++
++L2_BYTES = 128 << 20
++WORKING_SET_TARGET = 4 * L2_BYTES
++MEM_BUDGET = 24 << 30
++MIN_COPIES = 24
++
++
++def n_copies(weight_bytes: int, hi: int = 512) -> int:
++    n = max(MIN_COPIES, -(-WORKING_SET_TARGET // weight_bytes))
++    return int(min(n, hi, max(2, MEM_BUDGET // weight_bytes)))
++
++
++def make_copies(w, n):
++    """n distinct byte-identical copies of w, preserving its stride layout."""
++    out = [w]
++    for _ in range(n - 1):
++        c = torch.empty_strided(w.shape, w.stride(), dtype=w.dtype, device=w.device)
++        c.copy_(w)
++        out.append(c)
++    return out
++
++
++class ClockSampler(threading.Thread):
++    """Poll clocks.sm while a measurement runs; nvidia-smi costs ~40 ms per sample."""
++
++    def __init__(self, period=0.15):
++        super().__init__(daemon=True)
++        self.period = period
++        self.samples = []
++        self._ev = threading.Event()
++
++    def run(self):
++        while not self._ev.is_set():
++            try:
++                out = subprocess.run(
++                    ["nvidia-smi", "--query-gpu=clocks.sm", "--format=csv,noheader,nounits"],
++                    capture_output=True, text=True, timeout=5).stdout.strip()
++                self.samples.append(int(out.splitlines()[0]))
++            except Exception:
++                pass
++            self._ev.wait(self.period)
++
++    def stop(self):
++        self._ev.set()
++        self.join(timeout=5)
++        return (min(self.samples), max(self.samples)) if self.samples else (0, 0)
++
++
++def capture(call, args_list, warmup=3):
++    s = torch.cuda.Stream()
++    s.wait_stream(torch.cuda.current_stream())
++    with torch.cuda.stream(s):
++        for _ in range(warmup):
++            for a in args_list:
++                call(a)
++    torch.cuda.current_stream().wait_stream(s)
++    torch.cuda.synchronize()
++    g = torch.cuda.CUDAGraph()
++    with torch.cuda.graph(g):
++        for a in args_list:
++            call(a)
++    torch.cuda.synchronize()
++    g.replay()
++    torch.cuda.synchronize()
++    return g
++
++
++def time_graph(call, args_list, min_seconds=0.6, spin_seconds=0.25, clocks=False):
++    """Seconds per call. Replays a graph of len(args_list) calls under load.
++
++    Returns (seconds_per_call, (sm_clock_min, sm_clock_max)); the clock pair is (0, 0)
++    unless `clocks` is set, since each sample forks nvidia-smi.
++    """
++    g = capture(call, args_list)
++
++    start, end = torch.cuda.Event(True), torch.cuda.Event(True)
++    start.record()
++    g.replay()
++    end.record()
++    torch.cuda.synchronize()
++    per_replay = max(start.elapsed_time(end) / 1e3, 1e-6)
++
++    spin = max(1, int(spin_seconds / per_replay))
++    for _ in range(spin):
++        g.replay()
++    torch.cuda.synchronize()
++
++    iters = max(5, int(min_seconds / per_replay))
++    sampler = ClockSampler() if clocks else None
++    if sampler is not None:
++        sampler.start()
++    start.record()
++    for _ in range(iters):
++        g.replay()
++    end.record()
++    torch.cuda.synchronize()
++    span = start.elapsed_time(end) / 1e3
++    clk = sampler.stop() if sampler is not None else (0, 0)
++    del g
++    return span / (iters * len(args_list)), clk
++
++
++def require_idle_gpu():
++    """Refuse to benchmark unless the GPU is idle (and any handover marker is present).
++
++    Set W8A16_BENCH_MARKER to a path that must exist for the run to proceed; that is
++    how an agent session hands the exclusive GPU over without a second run sneaking in.
++    """
++    import os
++
++    out = subprocess.run(
++        ["nvidia-smi", "--query-compute-apps=pid", "--format=csv,noheader"],
++        capture_output=True, text=True).stdout.strip()
++    if out:
++        raise SystemExit(f"GPU busy (compute pids: {out.splitlines()}); refusing to benchmark.")
++    marker = os.environ.get("W8A16_BENCH_MARKER")
++    if marker and not os.path.exists(marker):
++        raise SystemExit(f"GPU handover marker missing: {marker}")
++
++
++def now():
++    return time.perf_counter()
++
++
++def cupti_kernel_us(call, args_list, min_seconds=0.2, spin_seconds=0.25,
++                    max_events=1500, name_sub=None, target_events=None):
++    """(median CUPTI kernel duration in seconds, n_events) over CUDA-graph replays.
++
++    This is the metric the in-server torch profile reports, so it is what the
++    reproduction gate and the tuner compare against. The working set is whatever
++    `args_list` rotates over, exactly as in `time_graph`: the graph is replayed
++    under continuous load for at least `min_seconds` (so the SMs stay at boost),
++    capped at `max_events` recorded kernels to keep the trace small.
++    """
++    import statistics
++
++    from torch.autograd import DeviceType
++    from torch.profiler import ProfilerActivity, profile
++
++    g = capture(call, args_list)
++    start, end = torch.cuda.Event(True), torch.cuda.Event(True)
++    start.record()
++    g.replay()
++    end.record()
++    torch.cuda.synchronize()
++    per_replay = max(start.elapsed_time(end) / 1e3, 1e-6)
++    for _ in range(max(1, int(spin_seconds / per_replay))):
++        g.replay()
++    torch.cuda.synchronize()
++
++    if target_events is not None:  # legacy call form
++        reps = max(1, -(-target_events // len(args_list)))
++    else:
++        reps = max(1, int(min_seconds / per_replay))
++        if reps * len(args_list) > max_events:
++            reps = max(1, max_events // len(args_list))
++    with profile(activities=[ProfilerActivity.CUDA]) as prof:
++        for _ in range(reps):
++            g.replay()
++        torch.cuda.synchronize()
++    durs = [
++        e.device_time
++        for e in prof.events()
++        if e.device_type == DeviceType.CUDA
++        and (name_sub is None or name_sub in e.key)
++    ]
++    del g
++    if not durs:
++        raise RuntimeError("no CUDA kernel events recorded")
++    return statistics.median(durs) / 1e6, len(durs)
++
++
++def launch_grid(N, cfg):
++    import triton
++
++    return (triton.cdiv(N, cfg[0]), cfg[2])
+diff --git a/bench/w8a16v2/repro_w8a16v2.py b/bench/w8a16v2/repro_w8a16v2.py
+new file mode 100644
+index 0000000000..5c9e02a21c
+--- /dev/null
++++ b/bench/w8a16v2/repro_w8a16v2.py
+@@ -0,0 +1,120 @@
++"""Reproduction gate: does the harness reproduce the in-server kernel medians?
++
++Runs every ground-truth row with `shapes.pre_v3_plan`, the config the server was
++actually running when the profile was taken, and reports the CUPTI kernel-duration
++median (the metric the serving torch profile reports) next to the CUDA-event replay
++median. Pass --tuned to measure what `_plan` picks now instead.
++
++  repro_w8a16v2.py                 # W16 ground truth
++  repro_w8a16v2.py --w4            # W4 ground truth (M=4 rows)
++  repro_w8a16v2.py --clocks        # also sample clocks.sm during each row
++"""
++
++import argparse
++import os
++import sys
++
++sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
++sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../python"))
++
++import torch
++import triton
++
++from harness import (
++    cupti_kernel_us,
++    make_copies,
++    n_copies,
++    require_idle_gpu,
++    time_graph,
++)
++from shapes import (
++    GROUND_TRUTH,
++    GROUND_TRUTH_GRID,
++    GROUND_TRUTH_W4,
++    SHAPES,
++    make_weight,
++    pre_v3_plan,
++)
++
++from sglang.srt.layers.quantization import w8a16_gemv as new
++
++
++def main():
++    ap = argparse.ArgumentParser()
++    ap.add_argument("--w4", action="store_true")
++    ap.add_argument("--clocks", action="store_true")
++    ap.add_argument("--secs", type=float, default=0.6)
++    ap.add_argument("--events", type=int, default=600)
++    ap.add_argument("--tuned", action="store_true",
++                    help="measure _plan's current choice instead of the pre-v3 plan")
++    a = ap.parse_args()
++    require_idle_gpu()
++    torch.manual_seed(0)
++    dev = "cuda"
++    p = torch.cuda.get_device_properties(0)
++    print(f"device: {p.name}  SMs={p.multi_processor_count}  "
++          f"L2={p.L2_cache_size / 1e6:.0f} MB  vram={p.total_memory / 1e9:.0f} GB")
++
++    gt = GROUND_TRUTH_W4 if a.w4 else GROUND_TRUTH
++    by_name = {s[0]: s for s in SHAPES}
++    rows = []
++    for name in [s[0] for s in SHAPES]:
++        Ms = sorted({m for (n, m) in gt if n == name})
++        if not Ms:
++            continue
++        _, N, K, tag, _, _ = by_name[name]
++        w, scale, wref = make_weight(N, K, tag, dev)
++        wbytes = N * K * (1 if tag == "fp8" else 2)
++        copies = make_copies(w, n_copies(wbytes))
++        for M in Ms:
++            x = (torch.randn(M, K, device=dev) * 0.5).to(torch.bfloat16)
++            if a.tuned:
++                cfg = new._plan(M, N, K, w.stride(0) == 1, w.element_size(),
++                                new._num_sms(dev))
++            else:
++                cfg = pre_v3_plan(M, N, K, w.element_size(), new._num_sms(dev))
++            if tag == "fp8":
++                fn = lambda arr: new.w8a16_gemv(x, arr, scale, cfg=cfg)
++            else:
++                fn = lambda arr: new.bf16_gemv(x, arr, cfg=cfg)
++            grid = (triton.cdiv(N, cfg[0]), cfg[2])
++            ev, clk = time_graph(fn, copies, min_seconds=a.secs, clocks=a.clocks)
++            cu, nev = cupti_kernel_us(fn, copies, target_events=a.events)
++            rows.append((name, N, K, tag, M, wbytes, len(copies), grid, cfg,
++                         ev, cu, nev, clk, gt[(name, M)]))
++            del x
++        del copies, w, wref
++        torch.cuda.empty_cache()
++
++    hdr = (f"{'shape':<18}{'N':>7}{'K':>6}{'M':>3}{'cp':>4}{'MB':>7}"
++           f"{'grid':>11}{'cupti us':>10}{'event us':>10}{'TB/s':>7}"
++           f"{'server':>9}{'ratio':>8}" + ("   sm MHz" if a.clocks else ""))
++    print()
++    print(hdr)
++    print("-" * len(hdr))
++    worst = 0.0
++    for (name, N, K, tag, M, wb, ncp, grid, cfg, ev, cu, nev, clk, g) in rows:
++        r = cu * 1e6 / g
++        if tag == "fp8":
++            worst = max(worst, abs(r - 1.0))
++        c = f"   {clk[0]}-{clk[1]}" if a.clocks else ""
++        gs = GROUND_TRUTH_GRID.get(name)
++        mark = "" if gs is None or tuple(grid) == gs else "  !grid"
++        print(f"{name:<18}{N:>7}{K:>6}{M:>3}{ncp:>4}{wb / 1e6:>7.1f}"
++              f"{str(grid):>11}{cu * 1e6:>10.2f}{ev * 1e6:>10.2f}{wb / cu / 1e12:>7.2f}"
++              f"{g:>9.1f}{r:>7.2f}x{c}{mark}")
++    print()
++    print("configs (BLOCK_N, BLOCK_K, SPLITS, USE_DOT, W_KN, warps, stages):")
++    seen = set()
++    for (name, N, K, tag, M, wb, ncp, grid, cfg, *_r) in rows:
++        if (name, M) in seen:
++            continue
++        seen.add((name, M))
++        print(f"  {name:<18} M={M:<3} {cfg}")
++    print(f"\nworst fp8 deviation from server: {worst * 100:.1f}% "
++          f"({'PASS' if worst <= 0.25 else 'FAIL'}, gate is +-25%)")
++    return 0 if worst <= 0.25 else 1
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+diff --git a/bench/w8a16v2/shapes.py b/bench/w8a16v2/shapes.py
+new file mode 100644
+index 0000000000..22ba524c92
+--- /dev/null
++++ b/bench/w8a16v2/shapes.py
+@@ -0,0 +1,169 @@
++"""Decode-time skinny-GEMM shapes of Qwen3.8-Flash-Next (qwen4_exp), single GPU, TP=1.
++
++Weight layout matters for the kernel and is reproduced exactly:
++
++  fp8  Fp8LinearMethod.process_weights_after_loading does
++         layer.weight = Parameter(weight.t())
++       on the [N, K]-CONTIGUOUS quantized weight, and apply() then calls
++         w8a16_gemv(x, layer.weight.t(), layer.weight_scale)
++       so the kernel receives an [N, K] view of [N, K]-contiguous storage,
++       stride (K, 1).  N is *not* the contiguous axis: w.stride(0) == K, hence
++       _plan()'s `contig_n` is False and W_KN is False for every server fp8 call.
++       (An earlier version of this file claimed "storage is [K, N] contiguous";
++       that was wrong and every (1, True, ...) tuning entry it produced was dead
++       code in the server.  See git history / the v3 tuning notes.)
++  bf16 bf16_gemv passes ``linear.weight``: [N, K] contiguous, stride (K, 1) --
++       same layout, so contig_n is False there too.
++
++Scales are [N, 1] fp32 per output channel, as Fp8LinearMethod stores them.
++
++`grid_n` is cdiv(N, 32), the N extent of the launch grid the server actually uses
++(the fallback plan is BLOCK_N=32), so the rows line up with the per-launch-grid
++medians recorded by torch.profiler in the serving profile.
++"""
++
++import torch
++
++HIDDEN = 2560
++KEY_DIM = 16 * 128
++VALUE_DIM = 48 * 128
++QKV_OUT = (24 * 2) * 256 + 2 * 2 * 256
++SHARED_INTER = 640
++VOCAB = 248320
++
++# name, N, K, dtype tag, calls per verify pass (M = spec width), calls per draft step
++#
++# Call counts are read off the serving torch profile (W16 decode, 20 steps): the
++# verify count is the number of M=spec_width calls in one decode step, the draft
++# count is the number of M=1 calls per draft step (the MTP layer runs once per
++# draft step plus once inside the verify pass, i.e. draft_steps + 1 times).
++SHAPES = [
++    # --- primary fp8 targets (w8a16_gemv) --------------------------------------
++    # GDN out_proj (36 layers) + attn o_proj (12 layers) + MTP o_proj: one shape.
++    ("o_proj", HIDDEN, VALUE_DIM, "fp8", 48, 1),
++    ("shared_down", HIDDEN, SHARED_INTER, "fp8", 48, 1),
++    ("shared_gate_up", 2 * SHARED_INTER, HIDDEN, "fp8", 48, 1),
++    ("attn_qkv", QKV_OUT, HIDDEN, "fp8", 12, 1),
++    ("gdn_in_proj_qkvz", 2 * KEY_DIM + 2 * VALUE_DIM, HIDDEN, "fp8", 36, 0),
++    ("draft_head", 32768, HIDDEN, "fp8", 0, 1),
++    ("lm_head", VOCAB, HIDDEN, "fp8", 1, 0),
++    # --- primary bf16 target (bf16_gemv) ---------------------------------------
++    ("gdn_in_proj_ba", 2 * 48, HIDDEN, "bf16", 36, 0),
++    # --- secondary bf16 targets ------------------------------------------------
++    # MoE router gate: currently cuBLAS in the server (~4.8 us) unless the
++    # router-gemv flag is on; 48 MoE layers per verify pass + 1 in the MTP layer.
++    ("moe_router_gate", 512, HIDDEN, "bf16", 48, 1),
++    # MTP fc_embedding / fc_hidden: two calls per draft step, M=1 (or M=hc_count).
++    ("mtp_fc", HIDDEN, HIDDEN, "bf16", 0, 2),
++]
++
++SECONDARY = {"moe_router_gate", "mtp_fc"}
++
++# Ground truth: in-server medians of the CUPTI kernel durations (torch.profiler,
++# CUDA-graph decode, 20 steps), microseconds.  Keyed (shape, M).  Every one of
++# these ran the *fallback* plan (BLOCK_N=32, BLOCK_K=128, SPLITS=planner,
++# USE_DOT=True, W_KN=False, 4 warps, 3 stages) because the tuned table's keys
++# assumed the wrong layout.
++#
++# W16 profile (spec width 16, 14 draft steps).
++GROUND_TRUTH = {
++    ("gdn_in_proj_qkvz", 16): 32.4,
++    ("draft_head", 1): 65.4,
++    ("o_proj", 16): 13.1,
++    ("o_proj", 1): 13.1,
++    ("attn_qkv", 16): 25.6,
++    ("attn_qkv", 1): 25.6,
++    ("shared_gate_up", 16): 6.5,
++    ("shared_gate_up", 1): 6.5,
++    ("lm_head", 16): 407.0,
++    ("gdn_in_proj_ba", 16): 7.9,
++    ("shared_down", 16): 4.1,
++    ("shared_down", 1): 4.1,
++}
++# W4 profile (spec width 4, 3 draft steps); the M=16 rows become M=4 there.
++GROUND_TRUTH_W4 = {
++    ("gdn_in_proj_qkvz", 4): 29.3,
++    ("draft_head", 1): 64.9,
++    ("o_proj", 4): 13.1,
++    ("attn_qkv", 4): 26.2,
++    ("shared_gate_up", 4): 6.5,
++    ("lm_head", 4): 396.0,
++    ("gdn_in_proj_ba", 4): 5.5,
++    ("shared_down", 4): 4.0,
++}
++# The launch grid the profile recorded, for cross-checking the reproduction.
++GROUND_TRUTH_GRID = {
++    "gdn_in_proj_qkvz": (512, 1),
++    "draft_head": (1024, 1),
++    "o_proj": (80, 6),
++    "attn_qkv": (416, 1),
++    "shared_gate_up": (40, 10),
++    "lm_head": (7760, 1),
++    "gdn_in_proj_ba": (3, 1),
++    "shared_down": (80, 5),
++}
++
++SHAPE_MS = {
++    "lm_head": (16,),
++    "draft_head": (1,),
++    "gdn_in_proj_qkvz": (16,),
++    "gdn_in_proj_ba": (16,),
++    "mtp_fc": (1,),
++}
++DEFAULT_MS = (16, 1)
++MODES = {"W16": (16, 14), "W4": (4, 3)}
++
++
++def make_weight(N, K, tag, device="cuda", seed=0):
++    """(w_view[N,K], scale[N,1], ref_w_fp32[N,K]) in the exact layout the server hands over.
++
++    fp8: the server quantizes an [N, K] weight, keeps that [N, K]-contiguous
++    storage, stores the [K, N] transposed *view* on the layer, and transposes it
++    back before the call -- so what arrives is [N, K] with stride (K, 1).
++    """
++    g = torch.Generator(device=device).manual_seed(seed)
++    if tag == "bf16":
++        w = (torch.randn(N, K, device=device, generator=g) * 0.02).to(torch.bfloat16)
++        return w, torch.ones(1, dtype=torch.float32, device=device), w.float()
++    wb = (torch.randn(N, K, device=device, generator=g) * 0.02).float()
++    scale = (wb.abs().amax(dim=1).clamp(min=1e-8) / 448.0).contiguous()
++    q = (wb / scale[:, None]).clamp(-448, 448).to(torch.float8_e4m3fn).contiguous()
++    # Server: qweight is [N, K] contiguous; layer.weight = qweight.t() ([K, N]
++    # view); apply() passes layer.weight.t(), i.e. back to this [N, K] view.
++    w = q.t().t()
++    assert w.shape == (N, K) and w.stride() == (K, 1)
++    return w, scale.reshape(N, 1), (w.float() * scale[:, None])
++
++
++# The plan the server ran before the v3 retune (commit 1eb2831e5c): _BY_SHAPE's fp8
++# keys were contig_n=True, which no call matches, so every fp8 shape fell through to
++# _plan's fallback tile of [32, 128] with the planner's split count, 4 warps, 3 stages.
++# The two bf16 keys were already contig_n=False, so those entries really were live.
++PRE_V3_TUNED = {
++    (2, 96, 2560): (32, 512, 1, True, None, 4, 3),
++    (2, 512, 2560): (16, 128, 8, True, None, 4, 3),
++}
++
++
++def pre_v3_plan(M, N, K, w_bytes, sms=188):
++    """The (BLOCK_N, BLOCK_K, SPLITS, USE_DOT, W_KN, warps, stages) the server used."""
++    import triton
++
++    from sglang.srt.layers.quantization import w8a16_gemv as k
++
++    pinned = PRE_V3_TUNED.get((w_bytes, N, K))
++    if pinned is not None:
++        return pinned
++    block_n, block_k, warps, stages = 32, 128, 4, 3
++    n_blocks = triton.cdiv(N, block_n)
++    if n_blocks >= sms:
++        return (block_n, block_k, 1, True, None, warps, stages)
++    want = min(k._MAX_SPLITS, max(1, (2 * sms) // n_blocks))
++    block_k = min(block_k, max(64, k._prev_pow2(max(1, K // want))))
++    n_kb = triton.cdiv(K, block_k)
++    splits = min(want, n_kb)
++    for cand in range(min(n_kb, splits + 2), max(1, splits - 3), -1):
++        if n_kb % cand == 0 and cand <= k._MAX_SPLITS:
++            splits = cand
++            break
++    return k._fit(M, N, (block_n, block_k, splits, True, None, warps, stages))
+diff --git a/bench/w8a16v2/tune_v3.py b/bench/w8a16v2/tune_v3.py
+new file mode 100644
+index 0000000000..974020d79a
+--- /dev/null
++++ b/bench/w8a16v2/tune_v3.py
+@@ -0,0 +1,274 @@
++"""Per-(shape, M-bucket) config sweep for the W8A16 / BF16 skinny GEMV, v3.
++
++v3 differences from tune_w8a16v2.py:
++  * the weight layout is the true server one ([N, K] contiguous, see shapes.py);
++  * the metric is the CUPTI kernel-duration median, the same number the serving
++    torch profile reports, not the CUDA-event wall time of a graph replay
++    (which is ~25% higher because it includes the inter-kernel gaps);
++  * correctness is checked against an fp32 reference (max|dy| / max|ref| <= 2e-2)
++    and by requiring two consecutive graph replays to be bit-identical, which is
++    what proves the in-launch split-K counters self-reset.
++
++  tune_v3.py --shapes o_proj,shared_down --ms 1,16
++  tune_v3.py --all --out /path/results.json
++
++Sweep is two-phase to keep the compile bill bounded:
++  A. (BLOCK_N, BLOCK_K, SPLITS) at warps=4 stages=3 (plus USE_DOT=False variants
++     when M == 1), <= ~60 configs;
++  B. the best few from A x num_warps {2,4,8} x num_stages {2,3,4}.
++"""
++
++import argparse
++import json
++import math
++import os
++import sys
++
++sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
++sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../python"))
++
++import torch
++import triton
++
++from harness import cupti_kernel_us, make_copies, n_copies, require_idle_gpu
++from shapes import SHAPES, make_weight
++
++from sglang.srt.layers.quantization import w8a16_gemv as new
++
++SPLITS_ALL = (1, 2, 3, 4, 5, 6, 8, 10, 12, 16, 20, 32)
++BN_ALL = (16, 32, 64, 128)
++BK_ALL = (64, 128, 256, 512)
++MAX_TILE = 32768  # fp8 elements per weight tile; 128x512 spills on 4 warps
++
++
++def _fit(M, N, cfg):
++    """new._fit, but the M=1/USE_DOT=False M_PAD is honoured (new._fit already does)."""
++    return new._fit(M, N, cfg)
++
++
++def phase_a(N, K, M, sms):
++    """(BLOCK_N, BLOCK_K, SPLITS, USE_DOT, W_KN, 4, 3) candidates."""
++    out = []
++    for bn in BN_ALL:
++        nb = triton.cdiv(N, bn)
++        for bk in BK_ALL:
++            if bn * bk > MAX_TILE:
++                continue
++            n_kb = triton.cdiv(K, bk)
++            divisors = [s for s in SPLITS_ALL if s <= n_kb and n_kb % s == 0]
++            others = [s for s in SPLITS_ALL if s <= n_kb and n_kb % s != 0]
++            picks = {1}
++            # the split count landing closest to ~2x and ~5x SM occupancy
++            for target in (2 * sms, 5 * sms):
++                pool = divisors or others
++                best = min(pool, key=lambda s: abs(nb * s - target)) if pool else 1
++                picks.add(best)
++            # if every divisor still leaves the GPU under-occupied, take the
++            # largest one that fits rather than nothing
++            if nb * max(picks) < sms and divisors:
++                picks.add(max(divisors))
++            for sp in sorted(picks):
++                out.append((bn, bk, sp, True, False, 4, 3))
++    if M == 1:
++        # broadcast-multiply path: M_PAD=1, so the split-K scratch is 16x smaller
++        # and much deeper splits fit. Sweep it on a reduced (bn, bk) grid.
++        for bn in (16, 32, 64, 128):
++            nb = triton.cdiv(N, bn)
++            for bk in (128, 256):
++                if bn * bk > MAX_TILE:
++                    continue
++                n_kb = triton.cdiv(K, bk)
++                divisors = [s for s in SPLITS_ALL if s <= n_kb and n_kb % s == 0]
++                picks = {1}
++                for target in (2 * sms, 5 * sms):
++                    if divisors:
++                        picks.add(min(divisors, key=lambda s: abs(nb * s - target)))
++                for sp in sorted(picks):
++                    out.append((bn, bk, sp, False, False, 4, 3))
++    # dedupe after _fit, which may collapse a too-large split plan to SPLITS=1
++    seen, uniq = set(), []
++    for cfg in out:
++        c = _fit(M, N, cfg)
++        if c not in seen:
++            seen.add(c)
++            uniq.append(c)
++    return uniq
++
++
++def phase_b(best, M, N, top=4):
++    out, seen = [], set()
++    for _, cfg, _ in best[:top]:
++        bn, bk, sp, ud, wk, _, _ = cfg
++        for nw in (2, 4, 8):
++            if bn * bk // (32 * nw) < 4:  # < 4 elements per lane: pointless
++                continue
++            for ns in (2, 3, 4):
++                c = _fit(M, N, (bn, bk, sp, ud, wk, nw, ns))
++                if c not in seen:
++                    seen.add(c)
++                    out.append(c)
++    return out
++
++
++def measure(run, copies, cfg, ref, refmax, secs, events):
++    y = run(copies[0], cfg)
++    torch.cuda.synchronize()
++    err = (y.float() - ref).abs().max().item() / refmax
++    if not math.isfinite(err) or err > 2e-2:
++        return None, err
++    t, _ = cupti_kernel_us(lambda a: run(a, cfg), copies,
++                           min_seconds=secs, spin_seconds=0.06, max_events=events)
++    return t, err
++
++
++def tune_one(name, N, K, tag, M, args, dev="cuda"):
++    sms = new._num_sms(dev)
++    w, scale, wref = make_weight(N, K, tag, dev)
++    wbytes = N * K * (1 if tag == "fp8" else 2)
++    copies = make_copies(w, n_copies(wbytes))
++    x = (torch.randn(M, K, device=dev) * 0.5).to(torch.bfloat16)
++    ref = x.float() @ wref.t()
++    refmax = ref.abs().max().item()
++    if tag == "fp8":
++        run = lambda a, cfg: new.w8a16_gemv(x, a, scale, cfg=cfg)
++    else:
++        run = lambda a, cfg: new.bf16_gemv(x, a, cfg=cfg)
++
++    fallback = new._plan(M, N, K, w.stride(0) == 1, w.element_size(), sms)
++    res, seen = [], set()
++
++    def sweep(cands, label):
++        for i, cfg in enumerate(cands):
++            if cfg in seen:
++                continue
++            seen.add(cfg)
++            try:
++                t, err = measure(run, copies, cfg, ref, refmax, args.secs, args.events)
++            except Exception as e:
++                print(f"  [{label} {i+1}/{len(cands)}] {cfg} {type(e).__name__}: "
++                      f"{str(e)[:80]}", flush=True)
++                continue
++            if t is None:
++                print(f"  [{label} {i+1}/{len(cands)}] {cfg} bad relerr {err:.2e}",
++                      flush=True)
++                continue
++            res.append((t, cfg, err))
++            if args.verbose:
++                print(f"  [{label} {i+1}/{len(cands)}] {t*1e6:8.2f}us {cfg}", flush=True)
++
++    cands_a = phase_a(N, K, M, sms)
++    if fallback not in cands_a:
++        cands_a.append(fallback)
++    print(f"{name} N={N} K={K} M={M} {tag} {wbytes/1e6:.1f} MB, {len(copies)} copies, "
++          f"phase A {len(cands_a)} cfgs, fallback={fallback}", flush=True)
++    sweep(cands_a, "A")
++    res.sort(key=lambda r: r[0])
++    cands_b = phase_b(res, M, N, top=args.top_b)
++    print(f"  phase B {len(cands_b)} cfgs from top {args.top_b}", flush=True)
++    sweep(cands_b, "B")
++    res.sort(key=lambda r: r[0])
++
++    fb = next((t for t, c, _ in res if c == fallback), None)
++    print(f"\n  {'us':>9}{'TB/s':>8}  cfg{' ' * 44}ctas   relerr   vs fallback")
++    for t, cfg, err in res[: args.top]:
++        sp = f"{fb/t:.2f}x" if fb else "-"
++        print(f"  {t*1e6:>9.2f}{wbytes/t/1e12:>8.2f}  {str(cfg):<47}"
++              f"{triton.cdiv(N, cfg[0]) * cfg[2]:>5}  {err:.2e}  {sp}")
++    print(flush=True)
++
++    out = {"name": name, "N": N, "K": K, "tag": tag, "M": M, "bytes": wbytes,
++           "fallback": list(fallback), "fallback_us": fb * 1e6 if fb else None,
++           "results": [[t * 1e6, list(c), e] for t, c, e in res[:20]]}
++    del x, ref, copies, w, wref
++    torch.cuda.empty_cache()
++    return out
++
++
++def confirm(name, N, K, tag, M, cands, args, dev="cuda"):
++    """Short sweep of an explicit candidate list (used for the M=4 bucket)."""
++    sms = new._num_sms(dev)
++    w, scale, wref = make_weight(N, K, tag, dev)
++    wbytes = N * K * (1 if tag == "fp8" else 2)
++    copies = make_copies(w, n_copies(wbytes))
++    x = (torch.randn(M, K, device=dev) * 0.5).to(torch.bfloat16)
++    ref = x.float() @ wref.t()
++    refmax = ref.abs().max().item()
++    if tag == "fp8":
++        run = lambda a, cfg: new.w8a16_gemv(x, a, scale, cfg=cfg)
++    else:
++        run = lambda a, cfg: new.bf16_gemv(x, a, cfg=cfg)
++    fallback = new._plan(M, N, K, w.stride(0) == 1, w.element_size(), sms)
++    res, seen = [], set()
++    for cfg in list(cands) + [fallback]:
++        cfg = _fit(M, N, tuple(cfg))
++        if M > 1:
++            cfg = (cfg[0], cfg[1], cfg[2], True, cfg[4], cfg[5], cfg[6])
++            cfg = _fit(M, N, cfg)
++        if cfg in seen:
++            continue
++        seen.add(cfg)
++        try:
++            t, err = measure(run, copies, cfg, ref, refmax, args.secs, args.events)
++        except Exception as e:
++            print(f"  {cfg} {type(e).__name__}: {str(e)[:80]}", flush=True)
++            continue
++        if t is None:
++            continue
++        res.append((t, cfg, err))
++    res.sort(key=lambda r: r[0])
++    fb = next((t for t, c, _ in res if c == fallback), None)
++    print(f"{name} M={M} confirm: fallback={fallback} {fb*1e6 if fb else -1:.2f}us")
++    for t, cfg, err in res[:6]:
++        print(f"  {t*1e6:>9.2f}  {str(cfg):<47} {(fb/t if fb else 0):.2f}x  {err:.2e}")
++    print(flush=True)
++    out = {"name": name, "N": N, "K": K, "tag": tag, "M": M, "bytes": wbytes,
++           "fallback": list(fallback), "fallback_us": fb * 1e6 if fb else None,
++           "results": [[t * 1e6, list(c), e] for t, c, e in res[:20]]}
++    del x, ref, copies, w, wref
++    torch.cuda.empty_cache()
++    return out
++
++
++def main():
++    ap = argparse.ArgumentParser()
++    ap.add_argument("--shapes", default="")
++    ap.add_argument("--ms", default="1,16")
++    ap.add_argument("--confirm4", default="")
++    ap.add_argument("--secs", type=float, default=0.12)
++    ap.add_argument("--events", type=int, default=1500)
++    ap.add_argument("--top", type=int, default=12)
++    ap.add_argument("--top-b", type=int, default=4)
++    ap.add_argument("--out", default="")
++    ap.add_argument("--verbose", action="store_true")
++    a = ap.parse_args()
++    require_idle_gpu()
++    torch.manual_seed(0)
++    p = torch.cuda.get_device_properties(0)
++    print(f"device: {p.name}  SMs={p.multi_processor_count}  "
++          f"L2={p.L2_cache_size / 1e6:.0f} MB\n", flush=True)
++
++    by = {s[0]: s for s in SHAPES}
++    want = a.shapes.split(",") if a.shapes else list(by)
++    out = []
++    for name in want:
++        _, N, K, tag, _, _ = by[name]
++        for M in [int(v) for v in a.ms.split(",") if v]:
++            out.append(tune_one(name, N, K, tag, M, a))
++    if a.confirm4:
++        prev = json.load(open(a.confirm4))
++        for name in want:
++            _, N, K, tag, _, _ = by[name]
++            cands = []
++            for r in prev:
++                if r["name"] == name:
++                    cands += [c for _, c, _ in r["results"][:6]]
++            if cands:
++                out.append(confirm(name, N, K, tag, 4, cands, a))
++    if a.out:
++        with open(a.out, "w") as f:
++            json.dump(out, f, indent=1)
++        print(f"wrote {a.out}")
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/bench/w8a16v2/tune_w8a16v2.py b/bench/w8a16v2/tune_w8a16v2.py
+new file mode 100644
+index 0000000000..2cfc874f27
+--- /dev/null
++++ b/bench/w8a16v2/tune_w8a16v2.py
+@@ -0,0 +1,125 @@
++"""Config sweep for one (shape, M) of the W8A16 skinny GEMV, event-timed.
++
++Superseded by tune_v3.py, which measures CUPTI kernel durations (what the serving
++profile reports) instead of the graph-replay wall time this script uses; kept for
++quick single-shape sweeps.
++
++  tune_w8a16v2.py o_proj --m 16
++  tune_w8a16v2.py gdn_in_proj_ba --m 16 --bn 16,32 --splits 1,8,16,20,32
++
++Timing is the same CUDA-graph-over-24-copies replay as bench_w8a16v2.py but with a
++shorter window per candidate; re-check the winner with bench_w8a16v2.py before pinning
++it in `_TUNED`. Configs whose max-abs error exceeds the baseline kernel's by more than
++2 bf16 ulps are dropped.
++"""
++
++import argparse
++import math
++import os
++import sys
++
++sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
++sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../python"))
++
++import torch
++import triton
++
++import baseline_v1 as base
++from harness import capture, make_copies, n_copies, require_idle_gpu, time_graph
++from shapes import SHAPES, make_weight
++
++from sglang.srt.layers.quantization import w8a16_gemv as new
++
++
++def ints(s):
++    return [int(v) for v in s.split(",") if v]
++
++
++def candidates(a, N, K, M, w_bytes):
++    n_blocks_of = lambda bn: triton.cdiv(N, bn)
++    out = []
++    for bn in ints(a.bn):
++        if bn < 16 and M > 1:
++            continue
++        for bk in ints(a.bk):
++            if bn * bk > 65536:
++                continue
++            n_kb = triton.cdiv(K, bk)
++            for sp in ints(a.splits):
++                if sp > n_kb or sp > new._MAX_SPLITS:
++                    continue
++                m_pad = 16 if M > 1 else 1
++                if sp > 1 and n_blocks_of(bn) * sp * m_pad * bn > new._WS_FLOATS:
++                    continue
++                for ud in ([True] if M > 1 else ints(a.dot)):
++                    for wk in ints(a.wkn):
++                        for nw in ints(a.warps):
++                            for ns in ints(a.stages):
++                                out.append((bn, bk, sp, bool(ud), bool(wk), nw, ns))
++    return out
++
++
++def main():
++    ap = argparse.ArgumentParser()
++    ap.add_argument("shape")
++    ap.add_argument("--m", type=int, default=16)
++    ap.add_argument("--bn", default="32,64,128")
++    ap.add_argument("--bk", default="64,128,256,512")
++    ap.add_argument("--splits", default="1,2,4,8,16")
++    ap.add_argument("--warps", default="4")
++    ap.add_argument("--stages", default="3")
++    ap.add_argument("--dot", default="1")
++    ap.add_argument("--wkn", default="")
++    ap.add_argument("--secs", type=float, default=0.15)
++    ap.add_argument("--spin", type=float, default=0.06)
++    ap.add_argument("--top", type=int, default=15)
++    a = ap.parse_args()
++    require_idle_gpu()
++
++    name, N, K, tag = next((s[0], s[1], s[2], s[3]) for s in SHAPES if s[0] == a.shape)
++    dev = "cuda"
++    w, scale, wref = make_weight(N, K, tag, dev)
++    if not a.wkn:
++        a.wkn = "1" if w.stride(0) == 1 else "0"
++    wbytes = N * K * (1 if tag == "fp8" else 2)
++    copies = make_copies(w, n_copies(wbytes))
++    M = a.m
++    x = (torch.randn(M, K, device=dev) * 0.5).to(torch.bfloat16)
++    ref = x.float() @ wref.t()
++    mx = ref.abs().max().item()
++    ulp = 2.0 ** (math.floor(math.log2(mx)) - 7)
++
++    if tag == "fp8":
++        run = lambda arr, cfg: new.w8a16_gemv(x, arr, scale, cfg=cfg)
++        eb = (base.w8a16_gemv(x, w, scale).float() - ref).abs().max().item()
++    else:
++        run = lambda arr, cfg: new.bf16_gemv(x, arr, cfg=cfg)
++        eb = (base.bf16_gemv(x, w).float() - ref).abs().max().item()
++
++    cands = candidates(a, N, K, M, 1 if tag == "fp8" else 2)
++    print(f"{name} N={N} K={K} M={M} {tag} {wbytes/1e6:.1f} MB, {len(copies)} copies, "
++          f"{len(cands)} candidates, baseline err {eb:.3e}, 2ulp {2*ulp:.3e}")
++    res = []
++    for i, cfg in enumerate(cands):
++        try:
++            y = run(copies[0], cfg)
++            torch.cuda.synchronize()
++            err = (y.float() - ref).abs().max().item()
++            if not math.isfinite(err) or err > eb + 2 * ulp:
++                print(f"  [{i+1}/{len(cands)}] {cfg} bad err {err:.3e}")
++                continue
++            t, _ = time_graph(lambda arr: run(arr, cfg), copies,
++                              min_seconds=a.secs, spin_seconds=a.spin)
++            res.append((t, cfg, err))
++        except Exception as e:
++            print(f"  [{i+1}/{len(cands)}] {cfg} {type(e).__name__}: {str(e)[:90]}")
++    res.sort()
++    print(f"\n{'us':>9}{'TB/s':>8}  (BLOCK_N, BLOCK_K, SPLITS, USE_DOT, W_KN, warps, stages)"
++          f"   ctas  err")
++    for t, cfg, err in res[: a.top]:
++        print(f"{t*1e6:>9.2f}{wbytes/t/1e12:>8.2f}  {cfg}   "
++              f"{triton.cdiv(N, cfg[0]) * cfg[2]:>5}  {err:.2e}")
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/bench/w8a16v2/verify_v3.py b/bench/w8a16v2/verify_v3.py
+new file mode 100644
+index 0000000000..fd3e72677f
+--- /dev/null
++++ b/bench/w8a16v2/verify_v3.py
+@@ -0,0 +1,92 @@
++"""Correctness gate for the configs `_plan` actually selects, in the true layout.
++
++For every (shape, M in {1, 4, 16}):
++  * max|y - ref_fp32| / max|ref_fp32| <= 2e-2 against an fp32 reference;
++  * two consecutive CUDA-graph replays with the same input are bit-identical
++    (this is what proves the in-launch split-K counters self-reset -- a leaked
++    counter makes the second replay read stale partials);
++  * a replay with a changed input still matches its own fp32 reference;
++  * the split-K counter array is all zero afterwards.
++"""
++
++import math
++import os
++import sys
++
++sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
++sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../python"))
++
++import torch
++
++from harness import require_idle_gpu
++from shapes import SHAPES, make_weight
++
++from sglang.srt.layers.quantization import w8a16_gemv as new
++
++REL_TOL = 2e-2
++
++
++def main():
++    require_idle_gpu()
++    torch.manual_seed(0)
++    dev = "cuda"
++    ok = True
++    for name, N, K, tag, _, _ in SHAPES:
++        w, scale, wref = make_weight(N, K, tag, dev)
++        for M in (1, 4, 16):
++            x = (torch.randn(M, K, device=dev) * 0.5).to(torch.bfloat16)
++            ref = x.float() @ wref.t()
++            refmax = ref.abs().max().item()
++            fn = ((lambda a: new.w8a16_gemv(x, a, scale)) if tag == "fp8"
++                  else (lambda a: new.bf16_gemv(x, a)))
++            cfg = new._plan(M, N, K, w.stride(0) == 1, w.element_size(), new._num_sms(dev))
++            rel = (fn(w).float() - ref).abs().max().item() / refmax
++            torch.cuda.synchronize()
++
++            # graph capture over a mutable input, then two identical replays
++            xs = torch.empty_like(x)
++            xs.copy_(x)
++            gfn = ((lambda a: new.w8a16_gemv(xs, a, scale)) if tag == "fp8"
++                   else (lambda a: new.bf16_gemv(xs, a)))
++            s = torch.cuda.Stream()
++            s.wait_stream(torch.cuda.current_stream())
++            with torch.cuda.stream(s):
++                for _ in range(3):
++                    gfn(w)
++            torch.cuda.current_stream().wait_stream(s)
++            torch.cuda.synchronize()
++            g = torch.cuda.CUDAGraph()
++            with torch.cuda.graph(g):
++                yg = gfn(w)
++            g.replay()
++            torch.cuda.synchronize()
++            y1 = yg.clone()
++            g.replay()
++            torch.cuda.synchronize()
++            y2 = yg.clone()
++            bitwise = bool(torch.equal(y1, y2))
++            rel_g = (y1.float() - ref).abs().max().item() / refmax
++
++            x2 = (torch.randn(M, K, device=dev) * 0.5).to(torch.bfloat16)
++            xs.copy_(x2)
++            g.replay()
++            torch.cuda.synchronize()
++            r2 = x2.float() @ wref.t()
++            rel2 = (yg.float() - r2).abs().max().item() / r2.abs().max().item()
++            counters = int(new._workspace(dev)[1].abs().sum().item())
++
++            good = (math.isfinite(rel) and rel <= REL_TOL and bitwise
++                    and rel_g <= REL_TOL and rel2 <= REL_TOL and counters == 0)
++            ok &= good
++            print(f"  {'ok ' if good else 'FAIL'} {name:<18} M={M:<3} "
++                  f"rel={rel:.2e} rel_graph={rel_g:.2e} rel_newinput={rel2:.2e} "
++                  f"bitwise_replay={bitwise} counters={counters} cfg={cfg}")
++            del g, x, ref
++        del w, wref
++        torch.cuda.empty_cache()
++    print("VERIFY", "PASS" if ok else "FAIL")
++    return 0 if ok else 1
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+diff --git a/python/sglang/srt/layers/quantization/w8a16_gemv.py b/python/sglang/srt/layers/quantization/w8a16_gemv.py
+index 0ef95d415d..1e00f56061 100644
+--- a/python/sglang/srt/layers/quantization/w8a16_gemv.py
++++ b/python/sglang/srt/layers/quantization/w8a16_gemv.py
+@@ -3,10 +3,12 @@ Targets decode/verify shapes (M <= 16). Weight-only FP8: no activation quantizat
+ 
+ Two properties of the decode shapes decide throughput here:
+ 
+-- Weight layout. Fp8LinearMethod stores the weight [K, N] and hands over the [N, K]
+-  transpose, so N is the contiguous axis and the natural tile is [BLOCK_K, BLOCK_N],
+-  which tl.dot takes as its B operand with no transpose. bf16_gemv passes an [N, K]
+-  contiguous weight, where [BLOCK_N, BLOCK_K] is natural and the transpose is needed.
++- Weight layout. Every caller hands over an [N, K]-CONTIGUOUS weight, stride (K, 1).
++  Fp8LinearMethod quantizes to [N, K], stores the [K, N] transposed view on the layer,
++  and transposes it back at the call site; bf16_gemv passes linear.weight directly.
++  So K is the contiguous axis, the natural weight tile is [BLOCK_N, BLOCK_K], and
++  tl.dot needs it transposed (W_KN False). The W_KN True path is for a genuinely
++  [K, N]-contiguous weight, which no caller produces today.
+ - Grid size. One CTA per N block owning the whole K reduction launches 3..80 CTAs for
+   the small-N linears (in_proj_ba, shared-expert gate_up/down, GDN out_proj, o_proj) on
+   a 188-SM part, so those calls run at a few hundred GB/s no matter how well the inner
+@@ -16,6 +18,10 @@ Two properties of the decode shapes decide throughput here:
+   counter is reset to 0 by that same CTA, so no memset is needed and the kernel is safe
+   to capture in a CUDA graph and replay.
+ 
++M == 1 additionally wants USE_DOT False on every shape measured (2-23% faster): the
++broadcast-multiply path keeps M_PAD at 1 instead of padding to a 16-row mma, which
++shrinks both the accumulator and the split-K partials 16-fold.
++
+ The split-K scratch is one buffer per device, so two split-K calls must not overlap;
+ that holds for the decode path, which issues every linear on one stream.
+ """
+@@ -64,8 +70,9 @@ def _w8a16_gemv_kernel(
+     for k0 in range(pid_k * BLOCK_K, K, SPLITS * BLOCK_K):
+         kk = k0 + offs_k
+         k_mask = kk < K
+-        # W_KN: the [N,K] view has stride (1, N), so the [BLOCK_K, BLOCK_N] tile is the
++        # W_KN: the weight is [K, N] contiguous, so the [BLOCK_K, BLOCK_N] tile is the
+         # contiguous one and tl.dot takes it directly instead of transposing in smem.
++        # Every current caller is [N, K] contiguous and takes the else branch.
+         if W_KN:
+             wp = w_ptr + kk[:, None] * stride_wk + offs_n[None, :] * stride_wn
+             if EVEN_K:
+@@ -166,35 +173,61 @@ def _m_bucket(M: int) -> int:
+ 
+ 
+ # Measured on RTX PRO 6000 Blackwell Max-Q (sm_120, 188 SMs) with
+-# bench/w8a16v2/tune_w8a16v2.py; re-run it after a kernel or hardware change.
+-# key:   (weight element bytes, N is the contiguous weight axis, M bucket, N, K)
++# bench/w8a16v2/tune_v3.py + the head-to-head re-check in bench/w8a16v2/final_v3.py;
++# the metric is the CUPTI kernel-duration median over a CUDA-graph replay whose
++# weight working set is several times the 128 MB L2, i.e. the number the serving
++# torch profile reports. Re-run it after a kernel or hardware change.
++#
++# key:   (weight element bytes, N is the contiguous weight axis, N, K)
+ # value: (BLOCK_N, BLOCK_K, SPLITS, USE_DOT, W_KN, num_warps, num_stages)
+-# W_KN None derives the tile orientation from the weight strides, which is what every
+-# real layout wants. These shapes are memory bound, so one entry serves every M bucket.
++# W_KN None derives the tile orientation from the weight strides.
++#
++# `N is the contiguous weight axis` is False on every row: both callers pass an
++# [N, K]-contiguous weight (see the module docstring). The pre-v3 table keyed the
++# fp8 rows True, which no call ever matched, so the server silently ran _plan's
++# fallback for all of them; the "vs" ratios below are against that fallback.
+ _BY_SHAPE = {
+-    # fp8 weight stored [K, N] (Fp8LinearMethod passes layer.weight.t())
+-    (1, True, 2560, 6144): (128, 64, 8, True, None, 8, 3),    # GDN out_proj, attn o_proj
+-    (1, True, 2560, 640): (32, 64, 4, True, None, 4, 3),      # shared-expert down
+-    (1, True, 1280, 2560): (64, 128, 5, True, None, 8, 3),    # shared-expert gate_up
+-    (1, True, 13312, 2560): (128, 128, 1, True, None, 8, 3),  # attention qkv + output gate
+-    (1, True, 16384, 2560): (128, 128, 1, True, None, 8, 3),  # GDN in_proj_qkvz
+-    # draft head: the wide-N tile measured slower in the server (64 vs 56us);
+-    # keep the original narrow config for it.
+-    (1, True, 32768, 2560): (32, 256, 1, True, False, 4, 3),
+-    (1, True, 248320, 2560): (128, 128, 1, True, None, 8, 3),  # lm_head
+-    # bf16 weight stored [N, K] (bf16_gemv passes linear.weight)
+-    # GDN in_proj_ba: split-K measured slower in the server (14.8 vs 9.4us);
+-    # keep the original single-launch config.
+-    (2, False, 96, 2560): (32, 512, 1, True, None, 4, 3),
+-    (2, False, 512, 2560): (16, 128, 8, True, None, 4, 3),    # MoE router gate
++    # fp8, w8a16_gemv
++    (1, False, 2560, 640): (32, 128, 1, True, None, 4, 4),  # shared-expert down, 1.16x
++    (1, False, 1280, 2560): (16, 128, 10, True, None, 2, 2),  # shared gate_up, 1.08x
++    (1, False, 32768, 2560): (128, 256, 1, True, None, 8, 3),  # draft lm_head, 1.14x
++    (1, False, 248320, 2560): (128, 256, 1, True, None, 8, 3),  # lm_head, 1.02x
++    # bf16, bf16_gemv
++    (2, False, 96, 2560): (16, 256, 10, True, None, 2, 4),  # GDN in_proj_ba, 2.0-2.2x
++    (2, False, 512, 2560): (16, 128, 10, True, None, 2, 4),  # MoE router gate, 1.04x
++    # The 2560x6144 out_proj/o_proj and the 13312x2560 attention qkv are absent at
++    # M > 1 because _plan's fallback already emits the fastest tile measured for them.
++}
++_BY_SHAPE_M16 = {
++    # The _BY_SHAPE gate_up tile loses 12% at M=16; the qkvz tile below loses 1% at M=4.
++    (1, False, 1280, 2560): (16, 64, 10, True, None, 4, 3),  # shared gate_up, 1.03x
++    (1, False, 16384, 2560): (64, 128, 1, True, None, 4, 3),  # GDN in_proj_qkvz, 1.04x
+ }
+-_TUNED = {
+-    (wb, cn, m, N, K): cfg
+-    for (wb, cn, N, K), cfg in _BY_SHAPE.items()
+-    for m in (1, 4, 16)
++_BY_SHAPE_M1 = {
++    # USE_DOT False (the broadcast path, M_PAD 1) is only legal at M == 1.
++    (1, False, 2560, 640): (16, 256, 3, False, None, 4, 3),  # shared-expert down, 1.20x
++    (1, False, 1280, 2560): (16, 128, 10, False, None, 2, 3),  # shared gate_up, 1.23x
++    (1, False, 2560, 6144): (16, 256, 6, False, None, 4, 3),  # out_proj/o_proj, 1.05x
++    (1, False, 13312, 2560): (32, 256, 1, False, None, 4, 3),  # attention qkv, 1.02x
++    (1, False, 32768, 2560): (32, 256, 1, False, None, 4, 3),  # draft lm_head, 1.17x
++    (2, False, 512, 2560): (16, 256, 10, False, None, 4, 3),  # MoE router gate, 1.15x
++    (2, False, 2560, 2560): (16, 256, 5, False, None, 4, 2),  # MTP fc_*, 1.06x
+ }
+ 
+ 
++def _expand(table, buckets):
++    return {
++        (wb, cn, m, N, K): cfg
++        for (wb, cn, N, K), cfg in table.items()
++        for m in buckets
++    }
++
++
++_TUNED = _expand(_BY_SHAPE, (1, 4, 16))
++_TUNED.update(_expand(_BY_SHAPE_M16, (16,)))
++_TUNED.update(_expand(_BY_SHAPE_M1, (1,)))
++
++
+ def _prev_pow2(v: int) -> int:
+     return 1 << max(0, v.bit_length() - 1)
+ 
+@@ -205,20 +238,30 @@ def _plan(M: int, N: int, K: int, contig_n: bool, w_bytes: int, sms: int):
+     tuned = _TUNED.get((w_bytes, contig_n, _m_bucket(M), N, K))
+     if tuned is not None:
+         return _fit(M, N, tuned)
+-    # A [K, N]-contiguous weight wants the widest N block it can keep the grid full
+-    # with: 32 fp8 columns is one 32 B sector per k, and going to 128 roughly doubles
+-    # the achieved bandwidth. A [N, K]-contiguous weight already reads BLOCK_K bytes
+-    # per row, so N stays narrow and the grid stays wide.
+     if contig_n:
++        # A [K, N]-contiguous weight wants the widest N block it can keep the grid
++        # full with, since 32 fp8 columns is only one 32 B sector per k. Untuned:
++        # no caller produces this layout.
+         block_n = 128 if N >= 2048 else (64 if N >= 512 else 32)
+-        block_k, warps = 128, 8
+-    else:
+-        block_n, block_k, warps = 32, 128, 4
+-    n_blocks = triton.cdiv(N, block_n)
+-    if n_blocks >= sms:
+-        return (block_n, block_k, 1, True, None, warps, 3)
+-    # Aim for ~2 CTAs per SM; shrink BLOCK_K if K does not hold enough blocks for that.
+-    want = min(_MAX_SPLITS, max(1, (2 * sms) // n_blocks))
++        return _fit(M, N, (block_n, 128, 1, True, None, 8, 3))
++    # [N, K] contiguous. When N alone fills the machine, a long BLOCK_K keeps more
++    # bytes in flight: 1.15x on the 32768x2560 draft head, 1.01-1.04x on the other
++    # three big shapes. The M == 4 bucket is the exception -- there the wide tile
++    # measured 1-2% slower than the [32, 128] one on both 2560-K shapes.
++    if triton.cdiv(N, 128) * 2 >= sms and _m_bucket(M) != 4:
++        if M == 1:
++            return (32, 256, 1, False, None, 4, 3)
++        # A [128, 256] bf16 tile needs 144 KB of smem, over the 99 KB sm_120 limit.
++        return (128 if w_bytes == 1 else 64, 256, 1, True, None, 8, 3)
++    use_dot = M > 1
++    block_n = 16 if M == 1 else 32
++    block_k, warps = 128, 4
++    if triton.cdiv(N, 32) >= sms:
++        return (block_n, block_k, 1, use_dot, None, warps, 3)
++    # Aim for ~2 CTAs per SM, ~5 at M == 1 where an M_PAD 1 partial is 16x cheaper;
++    # shrink BLOCK_K if K does not hold enough blocks for that.
++    per_sm = 5 if M == 1 else 2
++    want = min(_MAX_SPLITS, max(1, (per_sm * sms) // triton.cdiv(N, block_n)))
+     block_k = min(block_k, max(64, _prev_pow2(max(1, K // want))))
+     n_kb = triton.cdiv(K, block_k)
+     splits = min(want, n_kb)
+@@ -227,7 +270,7 @@ def _plan(M: int, N: int, K: int, contig_n: bool, w_bytes: int, sms: int):
+         if n_kb % cand == 0 and cand <= _MAX_SPLITS:
+             splits = cand
+             break
+-    return _fit(M, N, (block_n, block_k, splits, True, None, warps, 3))
++    return _fit(M, N, (block_n, block_k, splits, use_dot, None, warps, 3))
+ 
+ 
+ def _fit(M: int, N: int, cfg):
+-- 
+2.43.0
+

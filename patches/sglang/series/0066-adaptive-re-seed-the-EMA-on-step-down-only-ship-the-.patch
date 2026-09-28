@@ -1,0 +1,336 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: aiueo52 <aiueo52@users.noreply.github.com>
+Date: Sat, 5 Sep 2026 21:41:43 +0900
+Subject: [PATCH 066/105] adaptive: re-seed the EMA on step-down only; ship the
+ validated config
+
+The residual churn after the draft-extend fix (24 switches/run) was
+agent-loop oscillating at the step-up boundary: it measures 2.29 accepted
+drafts at steps=3 but arrives there carrying a steps=15 EMA of ~4.4, and a
+20-batch window is not long enough to forget it, so it steps straight back
+up. Re-seeding at the new neutral value fixes that -- but only downward:
+seeding at 14 on a step UP makes every workload look worth 15 steps for a
+window, which is what made v1 switch 489 times in 90 s.
+
+reset_ema_on_switch now takes false / true / "down". Shipped config: alpha
+0.07, interval 20, grace 40, step-down at EMA <= 5.0, step-up at > 2.5,
+down-only reseed. 24 -> 10 switches per benchmark.
+
+Validated 21:31-21:40, one window, repeats=2, needle PASS on all three:
+
+  workload     W4           W16          adaptive     vs better fixed
+  code-edit    3.88 / 318   11.55 / 528  8.98 / 463   -12%
+  prose-en     2.57 / 220    3.10 / 156  2.54 / 229    +4%
+  prose-ja     2.29 / 208    3.31 / 170  2.25 / 205    -1%
+  agent-loop   3.19 / 282    4.87 / 235  4.05 / 306    +9%
+
+One server now replaces the hand-picked profile: +46% over W4 on code-edit
+and +47/+21/+30% over W16 on prose-en/prose-ja/agent-loop; agent-loop beats
+both fixed profiles because the controller mixes them.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+---
+ adaptive_w16_3_15.json                        | 12 ++---
+ dbg/FINDINGS.txt                              | 53 ++++++++++++++-----
+ dbg/sim.py                                    | 13 +++--
+ dbg/w16_3_15.json                             | 12 ++---
+ .../srt/speculative/adaptive_spec_params.py   | 32 ++++++++---
+ .../test_adaptive_runtime_state_sizing.py     | 34 +++++++-----
+ 6 files changed, 108 insertions(+), 48 deletions(-)
+
+diff --git a/adaptive_w16_3_15.json b/adaptive_w16_3_15.json
+index 0724e7afa7..9850b0da4a 100644
+--- a/adaptive_w16_3_15.json
++++ b/adaptive_w16_3_15.json
+@@ -1,24 +1,24 @@
+ {
+   "1": {
+     "candidate_steps": [3, 15],
+-    "ema_alpha": 0.1,
++    "ema_alpha": 0.07,
+     "update_interval": 20,
+     "warmup_batches": 15,
+     "switch_grace_batches": 40,
+-    "down_hysteresis": 3.5,
++    "down_hysteresis": 2.5,
+     "up_hysteresis": 0.0,
+     "ceiling_coeff": 0,
+-    "reset_ema_on_switch": false
++    "reset_ema_on_switch": "down"
+   },
+   "2": {
+     "candidate_steps": [15],
+-    "ema_alpha": 0.1,
++    "ema_alpha": 0.07,
+     "update_interval": 20,
+     "warmup_batches": 15,
+     "switch_grace_batches": 40,
+-    "down_hysteresis": 3.5,
++    "down_hysteresis": 2.5,
+     "up_hysteresis": 0.0,
+     "ceiling_coeff": 0,
+-    "reset_ema_on_switch": false
++    "reset_ema_on_switch": "down"
+   }
+ }
+diff --git a/dbg/FINDINGS.txt b/dbg/FINDINGS.txt
+index c2274c4633..7ef7837ce3 100644
+--- a/dbg/FINDINGS.txt
++++ b/dbg/FINDINGS.txt
+@@ -65,17 +65,46 @@ no_target_graphs | no_gdn_recovery | shared_extend (restores the old aliasing
+ for A/B). SGLANG_ADAPTIVE_DEBUG=1 logs what the controller's EMA actually saw
+ per decision.
+ 
+-After the fix -- final validation, one measurement window 21:07-21:16,
+-fnbench greedy repeats=2, mem fraction 0.93, needle PASS on all three:
++After the fix -- final validation, one measurement window 21:31-21:40,
++fnbench greedy repeats=2, mem fraction 0.93, needle PASS on all three,
++shipped controller config (adaptive_w16_3_15.json):
+ 
+-  workload     W16 acc/tps    W4 acc/tps     adaptive acc/tps   vs better fixed
+-  code-edit    10.38 / 483    3.86 / 332     9.57 / 504         +4%
+-  prose-en      2.78 / 141    2.51 / 228     2.59 / 218         -4%
+-  prose-ja      2.51 / 128    2.31 / 212     2.23 / 200         -6%
+-  agent-loop    4.78 / 230    3.29 / 291     3.46 / 276         -5%
++  workload     W4 acc/tps    W16 acc/tps    adaptive acc/tps   vs better fixed
++  code-edit    3.88 / 318    11.55 / 528     8.98 / 463         -12%
++  prose-en     2.57 / 220     3.10 / 156     2.54 / 229          +4%
++  prose-ja     2.29 / 208     3.31 / 170     2.25 / 205          -1%
++  agent-loop   3.19 / 282     4.87 / 235     4.05 / 306          +9%
+ 
+-One server now lands within noise of the better hand-picked profile on every
+-workload, and above W16 on code-edit. 24 switches over the whole benchmark.
+-Free VRAM while serving: 4.12 GB (sglang) / 3.94 GiB (nvidia-smi) vs 4.87 /
+-4.68 for plain W16; the steps=3 state costs 0.67 GB with its graphs pruned to
+-bs=1 (config slot "2" pins bs>=2 to steps=15).
++One server, no hand-picked profile, 10 switches over the whole benchmark.
++Against the profile a user would have had to pick wrongly: +46% over W4 on
++code-edit, +47% / +21% / +30% over W16 on prose-en / prose-ja / agent-loop.
++agent-loop beats BOTH fixed profiles -- the controller mixes them.
++
++Controller tuning history (all measured, not simulated):
++  v1 alpha .2 / interval 5 / reseed both ways   489 switches, code 5.46/316
++  v2 alpha .1 / interval 20 / reseed both ways  163 switches, code 5.17/300
++  v3 + grace 40, no reseed                       38 switches, code 5.29/303
++  (the draft-extend fix lands here)
++  v3 after the fix                               24 switches, code 9.57/504
++  v4 + down-only reseed, alpha .07, thr 5.0/2.5  10 switches, code 8.98/463
++
++The v4 change is a directional asymmetry: stepping DOWN carries a long-chain
++EMA into a short chain where it reads as a near-perfect chain (agent-loop
++measures 2.29 accepted drafts at steps=3 but arrives carrying ~4.4), so the
++window must be re-seeded; stepping UP must NOT re-seed, because seeding at 14
++makes every workload look worth 15 steps for a window -- that was v1's 489
++switches.
++
++Free VRAM while serving, mem fraction 0.93: 4.12 GB (sglang) / 3.94 GiB
++(nvidia-smi) vs 4.87 / 4.68 for plain W16; the steps=3 state costs 0.67 GB
++with its graphs pruned to bs=1 (config slot "2" pins bs>=2 to steps=15).
++For a strict 4 GiB floor use W16_MEM_FRACTION=0.925 -> 4.61 GB / 4.40 GiB
++(measured; code-edit 430, prose-en 200, prose-ja 194, agent 272).
++
++Remaining gap: code-edit still spends roughly a quarter of its verifies at
++steps=3 (acc 8.98 vs 11.55 fixed). Its accepted-draft distribution at
++steps=15 is bimodal (full 15-chains interleaved with 0/1), so a 20-batch EMA
++window dips below the 5.0 step-down threshold now and then. The corridor is
++narrow -- agent-loop sits at 3.87 at steps=15 and genuinely wants to leave --
++so closing it needs a smarter statistic than a single EMA (a quantile, or
++per-candidate EMAs), not another threshold.
+diff --git a/dbg/sim.py b/dbg/sim.py
+index ea4a0a7c73..24e409171c 100644
+--- a/dbg/sim.py
++++ b/dbg/sim.py
+@@ -17,11 +17,13 @@ def pool(mean, steps, spread):  # noqa
+         return lambda r: hi if r.random() < p else lo
+     return lambda r: min(steps, max(0, round(r.gauss(mean, 0.9))))
+ 
++# Post-fix measured accepted drafts per verify (fnbench acc - 1), 2026-09-05
++# 21:07-21:27 fixed-profile runs.
+ WL = {  # name -> {steps: (mean, bimodal)}
+-    "code-edit": {15: (10.85, True), 3: (2.77, True)},
+-    "agent-loop": {15: (4.59, True), 3: (2.22, False)},
+-    "prose-en": {15: (1.99, False), 3: (1.50, False)},
+-    "prose-ja": {15: (1.64, False), 3: (1.46, False)},
++    "code-edit": {15: (9.87, True), 3: (2.86, True)},
++    "agent-loop": {15: (3.82, True), 3: (2.29, False)},
++    "prose-en": {15: (1.83, False), 3: (1.51, False)},
++    "prose-ja": {15: (1.55, False), 3: (1.31, False)},
+ }
+ # Cost model: ms/iteration = 9.74 + 0.70*S (prof/OVERHEAD_REPORT.md)
+ STEP_MS = lambda s: 9.74 + 0.70 * s
+@@ -68,6 +70,9 @@ cfgs = {
+   "v3 grace40/noreseed": {"candidate_steps":[3,15],"ema_alpha":0.1,"update_interval":20,
+                        "warmup_batches":15,"switch_grace_batches":40,"down_hysteresis":3.5,
+                        "up_hysteresis":0.0,"reset_ema_on_switch":False},
++  "v4 shipped (down-reseed)": {"candidate_steps":[3,15],"ema_alpha":0.07,"update_interval":20,
++                       "warmup_batches":15,"switch_grace_batches":40,"down_hysteresis":2.5,
++                       "up_hysteresis":0.0,"reset_ema_on_switch":"down"},
+ }
+ for name, cfg in cfgs.items():
+     print(f"--- {name}")
+diff --git a/dbg/w16_3_15.json b/dbg/w16_3_15.json
+index 0724e7afa7..9850b0da4a 100644
+--- a/dbg/w16_3_15.json
++++ b/dbg/w16_3_15.json
+@@ -1,24 +1,24 @@
+ {
+   "1": {
+     "candidate_steps": [3, 15],
+-    "ema_alpha": 0.1,
++    "ema_alpha": 0.07,
+     "update_interval": 20,
+     "warmup_batches": 15,
+     "switch_grace_batches": 40,
+-    "down_hysteresis": 3.5,
++    "down_hysteresis": 2.5,
+     "up_hysteresis": 0.0,
+     "ceiling_coeff": 0,
+-    "reset_ema_on_switch": false
++    "reset_ema_on_switch": "down"
+   },
+   "2": {
+     "candidate_steps": [15],
+-    "ema_alpha": 0.1,
++    "ema_alpha": 0.07,
+     "update_interval": 20,
+     "warmup_batches": 15,
+     "switch_grace_batches": 40,
+-    "down_hysteresis": 3.5,
++    "down_hysteresis": 2.5,
+     "up_hysteresis": 0.0,
+     "ceiling_coeff": 0,
+-    "reset_ema_on_switch": false
++    "reset_ema_on_switch": "down"
+   }
+ }
+diff --git a/python/sglang/srt/speculative/adaptive_spec_params.py b/python/sglang/srt/speculative/adaptive_spec_params.py
+index c2b7df08c4..0aef671d33 100644
+--- a/python/sglang/srt/speculative/adaptive_spec_params.py
++++ b/python/sglang/srt/speculative/adaptive_spec_params.py
+@@ -164,14 +164,27 @@ class AdaptiveStepSlot:
+         self.ceiling_coeff = cfg.get("ceiling_coeff", 0)
+         # One EMA is shared by every candidate, but the quantity it tracks
+         # (accepted drafts per verify) is bounded by the *current* step count,
+-        # so its scale changes with every switch: an EMA of 5.9 that justified
+-        # leaving steps=15 is an impossibly high reading at steps=3 and would
+-        # bounce straight back up. Re-seeding it at the new step's neutral
+-        # value (target - 1, the same convention __init__ and the steps=0 probe
+-        # use) makes each candidate's threshold a statement about that
+-        # candidate, and turns a switch into a probe that the next update
+-        # confirms or undoes. Off by default (upstream behaviour).
++        # so its scale changes with every switch. False (upstream), True, or
++        # "down".
++        #
++        # "down" is what this model wants, and the asymmetry is the point.
++        # Stepping DOWN carries a large-chain EMA into a small chain, where it
++        # reads as a near-perfect chain: agent-loop measures 2.29 accepted
++        # drafts at steps=3 but arrives carrying ~4.4, and the 20-batch window
++        # is not long enough to forget it, so it steps straight back up and
++        # oscillates. Re-seeding at the new step's neutral value (target - 1,
++        # the convention __init__ and the steps=0 probe use) makes the window
++        # measure the new setting instead. Stepping UP has the opposite need:
++        # the carried small-chain EMA is a *pessimistic* start that the long
++        # chain quickly beats, whereas re-seeding at 14 would make every
++        # workload look worth 15 steps for a window (measured: 489 switches in
++        # 90 s).
+         self.reset_ema_on_switch = cfg.get("reset_ema_on_switch", False)
++        if self.reset_ema_on_switch not in (True, False, "down"):
++            raise ValueError(
++                "reset_ema_on_switch must be true, false or \"down\", got "
++                f"{self.reset_ema_on_switch!r}"
++            )
+         # Batches after a switch during which no new decision may be taken.
+         # A swap leaves the draft model cold (its per-step KV branches and the
+         # state's QSA shared-index buffers were captured for the other step
+@@ -320,7 +333,10 @@ class AdaptiveStepSlot:
+             decided_at = self.ema_accept_len
+             self.current_steps = target
+             self._grace_until = self._batch_count + self.switch_grace_batches
+-            if self.reset_ema_on_switch and target > 0:
++            if target > 0 and (
++                self.reset_ema_on_switch is True
++                or (self.reset_ema_on_switch == "down" and target < old_steps)
++            ):
+                 self.ema_accept_len = float(target - 1)
+             log_info_on_rank0(
+                 logger,
+diff --git a/test/registered/unit/spec/test_adaptive_runtime_state_sizing.py b/test/registered/unit/spec/test_adaptive_runtime_state_sizing.py
+index 4fd5cd0468..11c37146f5 100644
+--- a/test/registered/unit/spec/test_adaptive_runtime_state_sizing.py
++++ b/test/registered/unit/spec/test_adaptive_runtime_state_sizing.py
+@@ -133,13 +133,13 @@ class TestControllerSettles(CustomTestCase):
+ 
+     CFG = {
+         "candidate_steps": [3, 15],
+-        "ema_alpha": 0.1,
++        "ema_alpha": 0.07,
+         "update_interval": 20,
+         "warmup_batches": 15,
+         "switch_grace_batches": 40,
+-        "down_hysteresis": 3.5,
++        "down_hysteresis": 2.5,
+         "up_hysteresis": 0.0,
+-        "reset_ema_on_switch": False,
++        "reset_ema_on_switch": "down",
+     }
+ 
+     LAG = 2  # verify results reach the controller this many batches late
+@@ -163,20 +163,20 @@ class TestControllerSettles(CustomTestCase):
+         return slot, trace
+ 
+     def test_prose_settles_at_three(self):
+-        # measured num_correct_drafts (acc - 1): prose-en 1.96 @15, 1.54 @3
+-        slot, trace = self._run({15: 1.96, 3: 1.54})
++        # measured num_correct_drafts (acc - 1): prose-en 1.83 @15, 1.51 @3
++        slot, trace = self._run({15: 1.83, 3: 1.51})
+         self.assertEqual(slot.current_steps, 3)
+         self.assertEqual(trace[-50:], [3] * 50)
+ 
+     def test_code_settles_at_fifteen(self):
+-        # code-edit 8.85 @15, 2.81 @3
+-        slot, trace = self._run({15: 8.85, 3: 2.81})
++        # code-edit 9.87 @15, 2.86 @3
++        slot, trace = self._run({15: 9.87, 3: 2.86})
+         self.assertEqual(slot.current_steps, 15)
+         self.assertEqual(trace[-50:], [15] * 50)
+ 
+     def test_agent_settles_at_three(self):
+-        # agent-loop 3.76 @15, 2.24 @3 -- W4 is the faster profile there
+-        slot, trace = self._run({15: 3.76, 3: 2.24})
++        # agent-loop 3.82 @15, 2.29 @3 -- W4 is the faster profile there
++        slot, trace = self._run({15: 3.82, 3: 2.29})
+         self.assertEqual(slot.current_steps, 3)
+         self.assertEqual(trace[-50:], [3] * 50)
+ 
+@@ -192,15 +192,25 @@ class TestControllerSettles(CustomTestCase):
+     def test_switch_count_stays_small(self):
+         """The 2026-09-05 run made 489 switches in 90s; bound the churn."""
+         for name, accept in (
+-            ("prose-en", {15: 1.96, 3: 1.54}),
+-            ("code-edit", {15: 8.85, 3: 2.81}),
+-            ("agent-loop", {15: 3.76, 3: 2.24}),
++            ("prose-en", {15: 1.83, 3: 1.51}),
++            ("code-edit", {15: 9.87, 3: 2.86}),
++            ("agent-loop", {15: 3.82, 3: 2.29}),
+         ):
+             with self.subTest(name):
+                 _, trace = self._run(accept, batches=300)
+                 switches = sum(a != b for a, b in zip(trace, trace[1:]))
+                 self.assertLessEqual(switches, 4, f"{name}: {switches} switches")
+ 
++    def test_reseed_is_downward_only(self):
++        """Stepping down re-seeds at the new neutral; stepping up must not."""
++        slot = AdaptiveStepSlot(initial_steps=15, cfg=dict(self.CFG))
++        slot.ema_accept_len = 9.0
++        self.assertTrue(slot._apply_target_steps(15, 3))
++        self.assertEqual(slot.ema_accept_len, 2.0)
++        slot.ema_accept_len = 2.9
++        self.assertTrue(slot._apply_target_steps(3, 15))
++        self.assertEqual(slot.ema_accept_len, 2.9)
++
+     def test_grace_window_holds_decisions_after_a_switch(self):
+         """No second decision until the post-switch transient has passed."""
+         cfg = dict(self.CFG)
+-- 
+2.43.0
+

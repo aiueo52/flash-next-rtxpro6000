@@ -1,0 +1,611 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: aiueo52 <aiueo52@users.noreply.github.com>
+Date: Wed, 2 Sep 2026 12:21:16 +0900
+Subject: [PATCH 012/105] fix(adaptive): make --speculative-adaptive sound for
+ qwen4_exp (GDN recovery fence, per-state QSA index share, per-state recovery
+ graphs)
+
+- activate runtime states only at activate_step_by_batch; on_verify_complete just records
+- drain the outgoing HybridLinearAttnBackend recovery stream before swapping backends
+- capture GDN recovery CUDA graphs for every adaptive state's target backend
+- one QSAMTPSharedSparseIndices per state (tail_width = steps + 1) instead of disabling
+  index sharing under adaptive
+- override cuda_graph_config.decode (what capture actually reads) and skip unreachable states
+- decode graph runner warmup hook uses the runner's own backend
+- adaptive_two_state.json: candidate steps [3, 15] with wide hysteresis
+
+Implemented by Codex (gpt-5.6-sol high) from a supervisor spec; CPU tests added.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+---
+ adaptive_two_state.json                       |   1 +
+ .../attention/hybrid_linear_attn_backend.py   |   6 +
+ .../sglang/srt/model_executor/model_runner.py |  27 ++--
+ .../runner/decode_cuda_graph_runner.py        |   2 +-
+ .../srt/speculative/adaptive_runtime_state.py |  33 ++++-
+ .../srt/speculative/adaptive_spec_params.py   |   7 +
+ .../sglang/srt/speculative/eagle_worker_v2.py | 135 +++++++++++++-----
+ .../unit/spec/test_adaptive_switch_point.py   |  68 +++++++++
+ .../test_eagle_worker_v2_topk1_fastpath.py    |  13 +-
+ 9 files changed, 233 insertions(+), 59 deletions(-)
+ create mode 100644 adaptive_two_state.json
+ create mode 100644 test/registered/unit/spec/test_adaptive_switch_point.py
+
+diff --git a/adaptive_two_state.json b/adaptive_two_state.json
+new file mode 100644
+index 0000000000..ecd351d05c
+--- /dev/null
++++ b/adaptive_two_state.json
+@@ -0,0 +1 @@
++{"1": {"candidate_steps": [3, 15], "ema_alpha": 0.05, "update_interval": 20, "warmup_batches": 50, "down_hysteresis": -1.5, "up_hysteresis": 1.5}}
+diff --git a/python/sglang/srt/layers/attention/hybrid_linear_attn_backend.py b/python/sglang/srt/layers/attention/hybrid_linear_attn_backend.py
+index b355fa77ee..ab97312185 100644
+--- a/python/sglang/srt/layers/attention/hybrid_linear_attn_backend.py
++++ b/python/sglang/srt/layers/attention/hybrid_linear_attn_backend.py
+@@ -1078,6 +1078,12 @@ class HybridLinearAttnBackend(AttentionBackend):
+             self._recovery_event.wait()
+             self._recovery_event_pending = False
+ 
++    def drain_pending_recovery(self) -> None:
++        """Fence all recovery-stream work before this backend is replaced."""
++        self._wait_recovery_if_pending()
++        if self._recovery_stream is not None:
++            torch.cuda.current_stream().wait_stream(self._recovery_stream)
++
+     def init_forward_metadata_out_graph(
+         self,
+         forward_batch: ForwardBatch,
+diff --git a/python/sglang/srt/model_executor/model_runner.py b/python/sglang/srt/model_executor/model_runner.py
+index 85b34e6d46..d28596d7a3 100644
+--- a/python/sglang/srt/model_executor/model_runner.py
++++ b/python/sglang/srt/model_executor/model_runner.py
+@@ -1028,16 +1028,21 @@ class ModelRunner:
+         # gdn_mtp_cache_mode=none: capture the per-bucket SSM-state recovery graphs
+         # now that target_verify capture above allocated the recovery stash at its
+         # final addresses. Self-guards (no-op in full mode / non-recovery paths).
+-        self.maybe_capture_gdn_recovery_graphs()
++        self.maybe_capture_gdn_recovery_graphs(
++            attn_backend=self.attn_backend,
++            capture_bs=(
++                None
++                if self.decode_cuda_graph_runner is None
++                else self.decode_cuda_graph_runner.capture_bs
++            ),
++        )
+ 
+-    def maybe_capture_gdn_recovery_graphs(self):
++    def maybe_capture_gdn_recovery_graphs(self, attn_backend, capture_bs):
+         """Capture per-bucket FlashInfer SSM-state recovery cuda graphs at warmup.
+ 
+-        Called from init_cuda_graphs after the decode/target_verify graphs are
+-        captured, so the per-layer recovery stash is already allocated at its
+-        final addresses. HybridLinearAttnBackend pads the serving batch up to a
+-        captured bucket and replays on the side stream, and owns the
+-        capture-failure fallback to eager recovery -- so nothing is wrapped here.
++        Called after each runtime state's decode/target_verify graphs are captured,
++        so the per-layer recovery stash is already allocated at its final addresses.
++        HybridLinearAttnBackend owns bucket padding and the eager fallback.
+         """
+         if self.device != "cuda" or self.is_draft_worker:
+             return
+@@ -1048,13 +1053,11 @@ class ModelRunner:
+             HybridLinearAttnBackend,
+         )
+ 
+-        if not isinstance(self.attn_backend, HybridLinearAttnBackend):
++        if not isinstance(attn_backend, HybridLinearAttnBackend):
+             return
+-        if self.decode_cuda_graph_runner is None:
++        if capture_bs is None:
+             return
+-        self.attn_backend.capture_recovery_graphs(
+-            self.decode_cuda_graph_runner.capture_bs
+-        )
++        attn_backend.capture_recovery_graphs(capture_bs)
+ 
+     def init_routed_experts_capturer(self):
+         if self.is_draft_worker:
+diff --git a/python/sglang/srt/model_executor/runner/decode_cuda_graph_runner.py b/python/sglang/srt/model_executor/runner/decode_cuda_graph_runner.py
+index a954cd1816..0af6789f78 100644
+--- a/python/sglang/srt/model_executor/runner/decode_cuda_graph_runner.py
++++ b/python/sglang/srt/model_executor/runner/decode_cuda_graph_runner.py
+@@ -1220,7 +1220,7 @@ class DecodeCudaGraphRunner(BaseCudaGraphRunner):
+                     dsa_variant,
+                 )
+                 post_warmup_hook = getattr(
+-                    self.model_runner.attn_backend,
++                    self.attn_backend,
+                     "on_after_cuda_graph_warmup",
+                     None,
+                 )
+diff --git a/python/sglang/srt/speculative/adaptive_runtime_state.py b/python/sglang/srt/speculative/adaptive_runtime_state.py
+index fa9211dd39..180156ced5 100644
+--- a/python/sglang/srt/speculative/adaptive_runtime_state.py
++++ b/python/sglang/srt/speculative/adaptive_runtime_state.py
+@@ -5,6 +5,9 @@ from sglang.srt.speculative.adaptive_spec_params import AdaptiveSpeculativeParam
+ 
+ if TYPE_CHECKING:
+     from sglang.srt.layers.attention.base_attn_backend import AttentionBackend
++    from sglang.srt.layers.attention.qwen_sparse_attn_backend import (
++        QSAMTPSharedSparseIndices,
++    )
+     from sglang.srt.model_executor.cpu_graph_runner import CPUGraphRunner
+     from sglang.srt.model_executor.runner import DecodeCudaGraphRunner
+     from sglang.srt.speculative.eagle_draft_cuda_graph_runner import (
+@@ -41,6 +44,7 @@ class SpecRuntimeState:
+     # -- Extend stage: draft model KV cache catch-up after verify --
+     draft_extend_attn_backend: "AttentionBackend | None"
+     cuda_graph_runner_for_draft_extend: "EAGLEDraftExtendCudaGraphRunner | None"
++    qsa_mtp_shared_sparse_indices: "QSAMTPSharedSparseIndices | None"
+ 
+ 
+ class AdaptiveSpecWorker(Protocol):
+@@ -78,6 +82,7 @@ class AdaptiveController:
+             cfg_path=config_path,
+         )
+         self._states: dict[int, SpecRuntimeState] = {}
++        self._pending_steps: int | None = None
+ 
+     @property
+     def candidate_steps(self) -> list[int]:
+@@ -91,7 +96,11 @@ class AdaptiveController:
+         key = steps if steps is not None else state.speculative_num_steps
+         self._states[key] = state
+ 
+-    def init_states(self, cuda_graph_bs: list[int] | None = None) -> None:
++    def init_states(
++        self,
++        cuda_graph_bs: list[int] | None = None,
++        max_batch_size: int | None = None,
++    ) -> None:
+         """Build and register runtime states for all candidate steps."""
+         self.params.set_cuda_graph_bs(cuda_graph_bs)
+ 
+@@ -100,6 +109,14 @@ class AdaptiveController:
+                 continue
+ 
+             pruned_bs = self.params.cuda_graph_bs_for_step(steps)
++            if (
++                pruned_bs == []
++                and max_batch_size is not None
++                and not self.params.can_reach_step(
++                    step=steps, max_batch_size=max_batch_size
++                )
++            ):
++                continue
+             state = self.worker.build_adaptive_runtime_state(
+                 speculative_num_steps=steps,
+                 speculative_num_draft_tokens=steps + 1,
+@@ -107,23 +124,25 @@ class AdaptiveController:
+             )
+             self._states[steps] = state
+ 
+-        # Start on the initial step.
+-        self._activate(self.worker.speculative_num_steps)
+-
+     def activate_step_by_batch(self, batch_size: int) -> None:
+-        target = self.params.get_steps_for_batch(batch_size)
++        target = (
++            self._pending_steps
++            if self._pending_steps is not None
++            else self.params.get_steps_for_batch(batch_size)
++        )
++        self._pending_steps = None
+         if target != self.worker.speculative_num_steps:
+             self._activate(target)
+ 
+     def on_verify_complete(
+         self, num_correct_drafts_per_req: list[int], batch_size: int
+     ) -> None:
+-        """Feed verify results; switch runtime state if EMA warrants it."""
++        """Feed verify results and record any EMA step decision."""
+         new_step = self.params.on_verify_complete(
+             num_correct_drafts_per_req, batch_size
+         )
+         if new_step is not None:
+-            self._activate(new_step)
++            self._pending_steps = new_step
+ 
+     def _activate(self, speculative_num_steps: int) -> None:
+         state = self._states.get(speculative_num_steps)
+diff --git a/python/sglang/srt/speculative/adaptive_spec_params.py b/python/sglang/srt/speculative/adaptive_spec_params.py
+index c3c252f823..2ad4640020 100644
+--- a/python/sglang/srt/speculative/adaptive_spec_params.py
++++ b/python/sglang/srt/speculative/adaptive_spec_params.py
+@@ -326,6 +326,13 @@ class AdaptiveSpeculativeParams:
+             if step in self._slots[self._find_closest_bs(v)].candidate_steps
+         ]
+ 
++    def can_reach_step(self, step: int, max_batch_size: int) -> bool:
++        """Whether any runnable batch size can select *step*."""
++        return any(
++            step in self._route(batch_size).candidate_steps
++            for batch_size in range(1, max_batch_size + 1)
++        )
++
+     def _route(self, batch_size: int) -> AdaptiveStepSlot:
+         """Map *batch_size* → pad to CUDA-graph BS → closest slot."""
+         return self._slots[
+diff --git a/python/sglang/srt/speculative/eagle_worker_v2.py b/python/sglang/srt/speculative/eagle_worker_v2.py
+index b804b209df..95d48aa79b 100644
+--- a/python/sglang/srt/speculative/eagle_worker_v2.py
++++ b/python/sglang/srt/speculative/eagle_worker_v2.py
+@@ -384,10 +384,10 @@ class EagleDraftWorker(EagleDraftWorkerBase):
+         self.draft_runner.draft_attn_backend = self.draft_attn_backend
+         if self.draft_extend_attn_backend is not None:
+             self.draft_runner.attn_backend = self.draft_extend_attn_backend
+-        self._configure_qsa_mtp_index_share()
++        self.qsa_mtp_shared_sparse_indices = self._configure_qsa_mtp_index_share()
+         self.tree_mask_mode = default_tree_mask_mode()
+ 
+-    def _configure_qsa_mtp_index_share(self) -> None:
++    def _configure_qsa_mtp_index_share(self):
+         """Share the draft-extend's target-aligned QSA selection across the
+         MTP decode steps (config-gated: index_share_for_mtp_iteration).
+ 
+@@ -411,15 +411,6 @@ class EagleDraftWorker(EagleDraftWorkerBase):
+             or self.draft_extend_attn_backend is None
+         ):
+             return
+-        if get_spec().speculative_adaptive:
+-            # Adaptive candidates rebuild this worker per step count around
+-            # one shared draft-extend backend; the shared selection state is
+-            # not sized or validated for that regime.
+-            logger.warning(
+-                "index_share_for_mtp_iteration is disabled under adaptive "
+-                "speculative decoding"
+-            )
+-            return
+         layer_ids = sorted(
+             {
+                 module.layer_id
+@@ -433,7 +424,7 @@ class EagleDraftWorker(EagleDraftWorkerBase):
+ 
+         extend_backend = resolve_qsa_sparse_backend(self.draft_extend_attn_backend)
+         state = getattr(extend_backend, "_mtp_shared_sparse_indices", None)
+-        if state is None:
++        if state is None or get_spec().speculative_adaptive:
+             pool = self.draft_runner.token_to_kv_pool
+             # The expansion emits token_topk + ratio - 1 columns (top-k blocks
+             # plus the uncompressed tail of the capture position).
+@@ -442,17 +433,31 @@ class EagleDraftWorker(EagleDraftWorkerBase):
+                 layer_ids=layer_ids,
+                 num_requests=self.draft_runner.req_to_token_pool.req_to_token.shape[0],
+                 token_topk=expanded_width,
+-                tail_width=get_spec().speculative_num_steps + 1,
++                tail_width=self.speculative_num_steps + 1,
+                 device=self.draft_runner.device,
+             )
+-        for backend in (self.draft_attn_backend, self.draft_extend_attn_backend):
+-            resolved = resolve_qsa_sparse_backend(backend)
+-            assert hasattr(resolved, "set_mtp_shared_sparse_indices"), type(resolved)
+-            resolved.set_mtp_shared_sparse_indices(state)
++        self._install_qsa_mtp_index_share(
++            state=state,
++            draft_attn_backend=self.draft_attn_backend,
++            draft_extend_attn_backend=self.draft_extend_attn_backend,
++        )
+         logger.info(
+             "QSA MTP index sharing enabled: draft decode steps reuse the "
+             f"draft-extend selection for layers {layer_ids}"
+         )
++        return state
++
++    @staticmethod
++    def _install_qsa_mtp_index_share(
++        *, state, draft_attn_backend, draft_extend_attn_backend
++    ) -> None:
++        from sglang.srt.layers.attention.qsa.glue import resolve_qsa_sparse_backend
++
++        for backend in (draft_attn_backend, draft_extend_attn_backend):
++            if backend is None:
++                continue
++            resolved = resolve_qsa_sparse_backend(backend)
++            resolved.set_mtp_shared_sparse_indices(state)
+ 
+     def _capture_cuda_graphs(self):
+         """Capture the draft worker's own cuda graphs (decode + draft-extend)."""
+@@ -1243,24 +1248,35 @@ class EAGLEWorkerV2(BaseSpecWorker):
+                 speculative_moe_backend_context(),
+                 speculative_moe_a2a_backend_context(),
+             ):
++                target_model_runner = self._target_worker.model_runner
+                 self.adaptive_controller.register(
+                     SpecRuntimeState(
+                         speculative_num_steps=self.speculative_num_steps,
+                         speculative_num_draft_tokens=self.speculative_num_draft_tokens,
+                         draft_attn_backend=self._draft_worker.draft_attn_backend,
+                         cuda_graph_runner=self._draft_worker.cuda_graph_runner,
+-                        target_attn_backend=self._target_worker.model_runner.attn_backend,
+-                        target_graph_runner=self._target_worker.model_runner.decode_cuda_graph_runner,
+-                        draft_extend_attn_backend=self._draft_worker.draft_extend_attn_backend,
+-                        cuda_graph_runner_for_draft_extend=self._draft_worker.cuda_graph_runner_for_draft_extend,
++                        target_attn_backend=target_model_runner.attn_backend,
++                        target_graph_runner=(
++                            target_model_runner.decode_cuda_graph_runner
++                        ),
++                        draft_extend_attn_backend=(
++                            self._draft_worker.draft_extend_attn_backend
++                        ),
++                        cuda_graph_runner_for_draft_extend=(
++                            self._draft_worker.cuda_graph_runner_for_draft_extend
++                        ),
++                        qsa_mtp_shared_sparse_indices=(
++                            self._draft_worker.qsa_mtp_shared_sparse_indices
++                        ),
+                     )
+                 )
+                 self.adaptive_controller.init_states(
+                     cuda_graph_bs=(
+                         None
+                         if check_cuda_graph_backend(Phase.DECODE, Backend.DISABLED)
+-                        else get_exec().graph.cuda_graph_bs_decode
++                        else target_model_runner.decode_cuda_graph_runner.capture_bs
+                     ),
++                    max_batch_size=target_model_runner.max_running_requests,
+                 )
+ 
+     def forward_batch_generation(
+@@ -1502,6 +1518,10 @@ class EAGLEWorkerV2(BaseSpecWorker):
+                     speculative_num_steps=speculative_num_steps,
+                     speculative_num_draft_tokens=speculative_num_draft_tokens,
+                 )
++                target_model_runner.maybe_capture_gdn_recovery_graphs(
++                    attn_backend=target_attn_backend,
++                    capture_bs=target_graph_runner.capture_bs,
++                )
+                 target_graph_after_mem = get_available_gpu_memory(
+                     self.device, self.gpu_id
+                 )
+@@ -1524,7 +1544,12 @@ class EAGLEWorkerV2(BaseSpecWorker):
+                 target_attn_backend=target_attn_backend,
+                 target_graph_runner=target_graph_runner,
+                 draft_extend_attn_backend=self._draft_worker.draft_extend_attn_backend,
+-                cuda_graph_runner_for_draft_extend=self._draft_worker.cuda_graph_runner_for_draft_extend,
++                cuda_graph_runner_for_draft_extend=(
++                    self._draft_worker.cuda_graph_runner_for_draft_extend
++                ),
++                qsa_mtp_shared_sparse_indices=(
++                    self._draft_worker.qsa_mtp_shared_sparse_indices
++                ),
+             )
+ 
+         after_mem = get_available_gpu_memory(self.device, self.gpu_id)
+@@ -1542,6 +1567,26 @@ class EAGLEWorkerV2(BaseSpecWorker):
+         if self.speculative_num_steps == state.speculative_num_steps:
+             return
+ 
++        from sglang.srt.layers.attention.hybrid_linear_attn_backend import (
++            HybridLinearAttnBackend,
++        )
++
++        dw = self._draft_worker
++        outgoing_backends = (
++            self._target_worker.model_runner.attn_backend,
++            dw.draft_attn_backend,
++            dw.draft_extend_attn_backend,
++            dw.draft_runner.attn_backend,
++        )
++        drained_backend_ids = set()
++        for backend in outgoing_backends:
++            if (
++                isinstance(backend, HybridLinearAttnBackend)
++                and id(backend) not in drained_backend_ids
++            ):
++                backend.drain_pending_recovery()
++                drained_backend_ids.add(id(backend))
++
+         log_info_on_rank0(
+             logger,
+             "Switch adaptive runtime state: "
+@@ -1555,7 +1600,6 @@ class EAGLEWorkerV2(BaseSpecWorker):
+         self.speculative_num_draft_tokens = state.speculative_num_draft_tokens
+ 
+         # Draft side
+-        dw = self._draft_worker
+         dw.speculative_num_steps = state.speculative_num_steps
+         dw.speculative_num_draft_tokens = state.speculative_num_draft_tokens
+         dw.draft_attn_backend = state.draft_attn_backend
+@@ -1569,6 +1613,13 @@ class EAGLEWorkerV2(BaseSpecWorker):
+         if state.draft_extend_attn_backend is not None:
+             dw.draft_runner.attn_backend = state.draft_extend_attn_backend
+         dw.cuda_graph_runner_for_draft_extend = state.cuda_graph_runner_for_draft_extend
++        dw.qsa_mtp_shared_sparse_indices = state.qsa_mtp_shared_sparse_indices
++        if state.qsa_mtp_shared_sparse_indices is not None:
++            dw._install_qsa_mtp_index_share(
++                state=state.qsa_mtp_shared_sparse_indices,
++                draft_attn_backend=state.draft_attn_backend,
++                draft_extend_attn_backend=state.draft_extend_attn_backend,
++            )
+         dw._rebuild_topk1_chain_buffers()
+ 
+         # Target side
+@@ -1604,10 +1655,10 @@ class EAGLEWorkerV2(BaseSpecWorker):
+             dw.draft_runner.attn_backend,
+             dw.cuda_graph_runner,
+             dw.cuda_graph_runner_for_draft_extend,
++            dw.qsa_mtp_shared_sparse_indices,
+             get_spec().speculative_num_steps,
+             get_spec().speculative_num_draft_tokens,
+-            get_exec().graph.cuda_graph_bs_decode,
+-            get_exec().graph.disable_cuda_graph,
++            get_exec().graph.cuda_graph_config,
+         )
+ 
+         self.speculative_num_steps = speculative_num_steps
+@@ -1620,14 +1671,18 @@ class EAGLEWorkerV2(BaseSpecWorker):
+             speculative_num_draft_tokens=speculative_num_draft_tokens,
+         )
+         if cuda_graph_bs is not None:
+-            # BS-aware adaptive spec may prune cuda_graph_bs to an empty list
+-            # for steps that no BS range uses (e.g. step=1). Disable graph
+-            # capture for those steps; restore in finally so subsequent steps
+-            # are not affected.
++            graph_config = get_exec().graph.cuda_graph_config
++            decode_config = (
++                replace(graph_config.decode, backend=Backend.DISABLED)
++                if not cuda_graph_bs
++                else replace(graph_config.decode, bs=cuda_graph_bs)
++            )
+             get_context().override(
+                 "adaptive_spec.capture_override",
+-                cuda_graph_bs_decode=cuda_graph_bs,
+-                **({"disable_cuda_graph": True} if not cuda_graph_bs else {}),
++                cuda_graph_config=replace(
++                    graph_config,
++                    decode=decode_config,
++                ),
+             )
+         dw._rebuild_topk1_chain_buffers()
+ 
+@@ -1645,13 +1700,19 @@ class EAGLEWorkerV2(BaseSpecWorker):
+                 dw.draft_runner.attn_backend,
+                 dw.cuda_graph_runner,
+                 dw.cuda_graph_runner_for_draft_extend,
+-            ) = backup[:10]
++                dw.qsa_mtp_shared_sparse_indices,
++            ) = backup[:11]
++            if dw.qsa_mtp_shared_sparse_indices is not None:
++                dw._install_qsa_mtp_index_share(
++                    state=dw.qsa_mtp_shared_sparse_indices,
++                    draft_attn_backend=dw.draft_attn_backend,
++                    draft_extend_attn_backend=dw.draft_extend_attn_backend,
++                )
+             get_context().override(
+                 "adaptive_spec.capture_restore",
+-                speculative_num_steps=backup[10],
+-                speculative_num_draft_tokens=backup[11],
+-                cuda_graph_bs_decode=backup[12],
+-                disable_cuda_graph=backup[13],
++                speculative_num_steps=backup[11],
++                speculative_num_draft_tokens=backup[12],
++                cuda_graph_config=backup[13],
+             )
+             dw._rebuild_topk1_chain_buffers()
+ 
+diff --git a/test/registered/unit/spec/test_adaptive_switch_point.py b/test/registered/unit/spec/test_adaptive_switch_point.py
+new file mode 100644
+index 0000000000..765d84ce3b
+--- /dev/null
++++ b/test/registered/unit/spec/test_adaptive_switch_point.py
+@@ -0,0 +1,68 @@
++"""Regression tests for the adaptive speculative state-switch boundary."""
++
++import json
++import tempfile
++import unittest
++from unittest.mock import MagicMock
++
++from sglang.srt.speculative.adaptive_runtime_state import (
++    AdaptiveController,
++    SpecRuntimeState,
++)
++from sglang.test.ci.ci_register import register_cpu_ci
++from sglang.test.test_utils import CustomTestCase
++
++register_cpu_ci(est_time=1, suite="base-a-test-cpu")
++
++
++class _StubWorker:
++    def __init__(self):
++        self.speculative_num_steps = 3
++        self.applied_steps = []
++
++    def apply_runtime_state(self, state):
++        self.applied_steps.append(state.speculative_num_steps)
++        self.speculative_num_steps = state.speculative_num_steps
++
++
++def _state(steps):
++    return SpecRuntimeState(
++        speculative_num_steps=steps,
++        speculative_num_draft_tokens=steps + 1,
++        draft_attn_backend=None,
++        cuda_graph_runner=None,
++        target_attn_backend=object(),
++        target_graph_runner=None,
++        draft_extend_attn_backend=None,
++        cuda_graph_runner_for_draft_extend=None,
++        qsa_mtp_shared_sparse_indices=None,
++    )
++
++
++class TestAdaptiveSwitchPoint(CustomTestCase):
++    def test_verify_decision_is_applied_only_at_next_batch_boundary(self):
++        """Result processing must not replace runtime resources mid-round."""
++        with tempfile.NamedTemporaryFile("w", suffix=".json") as config_file:
++            json.dump({"1": {"candidate_steps": [3, 15]}}, config_file)
++            config_file.flush()
++            worker = _StubWorker()
++            controller = AdaptiveController(worker, config_path=config_file.name)
++
++        controller.register(_state(3))
++        controller.register(_state(15))
++        controller.params.on_verify_complete = MagicMock(return_value=15)
++
++        controller.on_verify_complete([3], batch_size=1)
++        self.assertEqual(worker.applied_steps, [])
++
++        controller.activate_step_by_batch(1)
++        self.assertEqual(worker.applied_steps, [15])
++
++        controller.on_verify_complete([15], batch_size=1)
++        self.assertEqual(worker.applied_steps, [15])
++        controller.activate_step_by_batch(1)
++        self.assertEqual(worker.applied_steps, [15])
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/test/registered/unit/spec/test_eagle_worker_v2_topk1_fastpath.py b/test/registered/unit/spec/test_eagle_worker_v2_topk1_fastpath.py
+index 9587dda35b..07f017ab81 100644
+--- a/test/registered/unit/spec/test_eagle_worker_v2_topk1_fastpath.py
++++ b/test/registered/unit/spec/test_eagle_worker_v2_topk1_fastpath.py
+@@ -248,7 +248,10 @@ class TestEagleWorkerV2BackendFallback(CustomTestCase):
+         existing_backend = object()
+         decode_backend = object()
+         worker.server_args = _fake_server_args()
+-        worker.draft_runner = SimpleNamespace(attn_backend=existing_backend)
++        worker.draft_runner = SimpleNamespace(
++            attn_backend=existing_backend,
++            model_config=SimpleNamespace(hf_config=SimpleNamespace()),
++        )
+         worker.topk = 1
+         worker.speculative_num_steps = 2
+         worker.seed_dsa_topk_from_draft_extend = False
+@@ -270,7 +273,10 @@ class TestEagleWorkerV2BackendFallback(CustomTestCase):
+         decode_backend = object()
+         draft_extend_backend = object()
+         worker.server_args = _fake_server_args()
+-        worker.draft_runner = SimpleNamespace(attn_backend=existing_backend)
++        worker.draft_runner = SimpleNamespace(
++            attn_backend=existing_backend,
++            model_config=SimpleNamespace(hf_config=SimpleNamespace()),
++        )
+         worker.topk = 1
+         worker.speculative_num_steps = 2
+         worker.seed_dsa_topk_from_draft_extend = True
+@@ -305,10 +311,12 @@ class TestEagleWorkerV2BackendFallback(CustomTestCase):
+             draft_extend_attn_backend=object(),
+             cuda_graph_runner=object(),
+             cuda_graph_runner_for_draft_extend=object(),
++            qsa_mtp_shared_sparse_indices=None,
+             draft_runner=draft_runner,
+             # _override_worker_state / apply_runtime_state call this hook; the
+             # topk=1 buffers are exercised by the fast-path tests above.
+             _rebuild_topk1_chain_buffers=lambda: None,
++            _install_qsa_mtp_index_share=lambda *_args: None,
+         )
+         worker = object.__new__(EAGLEWorkerV2)
+         worker._draft_worker = draft_worker
+@@ -356,6 +364,7 @@ class TestEagleWorkerV2BackendFallback(CustomTestCase):
+             target_graph_runner=object(),
+             draft_extend_attn_backend=new_extend_backend,
+             cuda_graph_runner_for_draft_extend=object(),
++            qsa_mtp_shared_sparse_indices=None,
+         )
+         worker.apply_runtime_state(state)
+ 
+-- 
+2.43.0
+

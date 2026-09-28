@@ -1,0 +1,41 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: aiueo52 <aiueo52@users.noreply.github.com>
+Date: Thu, 3 Sep 2026 20:11:45 +0900
+Subject: [PATCH 4/9] mtp dump: wire stash_post_attn_hc into the attention
+ decoder layer
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+---
+ python/sglang/srt/models/qwen4_exp.py | 9 ++++++++-
+ 1 file changed, 8 insertions(+), 1 deletion(-)
+
+diff --git a/python/sglang/srt/models/qwen4_exp.py b/python/sglang/srt/models/qwen4_exp.py
+index 9824664a9a..eb68eff972 100644
+--- a/python/sglang/srt/models/qwen4_exp.py
++++ b/python/sglang/srt/models/qwen4_exp.py
+@@ -57,7 +57,11 @@ from sglang.srt.model_executor.forward_context import (
+ )
+ from sglang.srt.model_executor.runner import get_is_capture_mode
+ from sglang.srt.model_loader.weight_utils import default_weight_loader
+-from sglang.srt.models.mtp_dump import maybe_flush, maybe_stage
++from sglang.srt.models.mtp_dump import (
++    maybe_flush,
++    maybe_stage,
++    stash_post_attn_hc,
++)
+ from sglang.srt.models.qwen3_5 import (
+     Qwen3_5AttentionDecoderLayer,
+     Qwen3_5ForCausalLM,
+@@ -1693,6 +1697,9 @@ class Qwen4ExpAttentionDecoderLayer(
+         hidden_states, residual = self._prepare_qwen4_exp_mlp(
+             hidden_states, residual, forward_batch
+         )
++        # Parity gate only: residual[0] is the raw HC state at the attn/MLP
++        # boundary.  No-op unless SGLANG_MTP_DRAFT_DUMP_DIR is set.
++        stash_post_attn_hc(residual[0] if isinstance(residual, tuple) else residual)
+         hidden_states = self._run_qwen4_exp_mlp(hidden_states, forward_batch)
+         return self._postprocess_qwen4_exp_layer(hidden_states, residual, forward_batch)
+ 
+-- 
+2.43.0
+

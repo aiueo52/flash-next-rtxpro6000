@@ -1,0 +1,252 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: aiueo52 <aiueo52@users.noreply.github.com>
+Date: Sun, 6 Sep 2026 15:30:56 +0900
+Subject: [PATCH 092/105] N1: kernel compiles clean; add a CPU-only Triton
+ front-end check
+
+Three GPU-lock windows were spent discovering one Triton compile error at a time, on a
+machine where the lock can be held for hours. Two real fixes here:
+
+- FP4_SCALE_BLOCK could not be read from jitted code (Triton 3.7 only allows globals
+  instantiated as tl.constexpr), so kernel-side uses now go through _FP4_BLK.
+- _load_block_scales branched on a constexpr with an early return in each arm. Triton
+  type-checks both arms regardless, so the dead non-native-e4m3 branch's integer
+   on an fp8 pointer was a hard error. Rewritten with one assignment and one
+  return; the non-native path is deleted (this fork targets sm_120).
+
+bench/n1/compile_check.py runs the Python->TTIR front end for all 36 tile variants
+against an explicit sm_120 target with no device, which is where every one of these
+surfaced. 36/36 now compile. The smoke test in check_nvfp4_gemv.py also collects
+failures across variants instead of raising on the first.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+---
+ bench/n1/check_nvfp4_gemv.py                  | 40 ++++++++++++++++
+ bench/n1/compile_check.py                     | 46 +++++++++++++++++++
+ .../layers/quantization/w4a16_nvfp4_gemv.py   | 45 ++++++++++--------
+ 3 files changed, 111 insertions(+), 20 deletions(-)
+ create mode 100644 bench/n1/compile_check.py
+
+diff --git a/bench/n1/check_nvfp4_gemv.py b/bench/n1/check_nvfp4_gemv.py
+index 5f7fb4a107..2011eeca8b 100644
+--- a/bench/n1/check_nvfp4_gemv.py
++++ b/bench/n1/check_nvfp4_gemv.py
+@@ -111,8 +111,48 @@ def check_bitexact_decode(N=256, K=2560):
+     return bad, tested
+ 
+ 
++def smoke_compile():
++    """Compile+launch every tile shape the planner can emit, before anything else.
++
++    A Triton compile error costs a whole GPU-lock window if it only surfaces after the
++    codec tests, so this runs first. It also *collects* failures instead of raising on
++    the first one: two windows were already spent learning one compile error at a time,
++    and the two scale-broadcast paths generate different IR, so one of them failing is
++    exactly when you most want to know whether the other works.
++    """
++    import sglang.srt.layers.quantization.w4a16_nvfp4_gemv as K
++
++    w = (torch.randn(256, 512, device=DEV) * 0.02).bfloat16()
++    wq, bs, gs = quantize_nvfp4(w)
++    ok, bad = [], []
++    for gather in (False, True):
++        K.SCALE_GATHER = gather
++        for M in (1, 4, 16):
++            for cfg in ((32, 128, 1, M > 1, 4, 3), (64, 256, 1, True, 8, 3),
++                        (16, 128, 2, M > 1, 4, 3)):
++                x = torch.randn(M, 512, device=DEV, dtype=torch.bfloat16)
++                tag = f"gather={gather} M={M} cfg={cfg}"
++                try:
++                    w4a16_nvfp4_gemv(x, wq, bs, gs, cfg=cfg)
++                    torch.cuda.synchronize()
++                    ok.append(tag)
++                except Exception as e:
++                    first = str(e).strip().splitlines()
++                    bad.append((tag, f"{type(e).__name__}: {first[-1][:150] if first else ''}"))
++    K.SCALE_GATHER = False
++    for tag, err in bad:
++        print(f"  [smoke FAIL] {tag}\n              {err}")
++    print(f"[smoke] {len(ok)} ok, {len(bad)} failed"
++          + (f"; gather=False ok={sum('gather=False' in t for t in ok)}/9"
++             f" gather=True ok={sum('gather=True' in t for t in ok)}/9"))
++    if not ok:
++        raise SystemExit("every tile variant failed to compile; aborting")
++    return len(ok), len(bad)
++
++
+ if __name__ == "__main__":
+     print(f"torch {torch.__version__} device {torch.cuda.get_device_name(0)}")
++    smoke_compile()
+     rel, codes = check_code_coverage()
+     print(f"[codes] all-16-code round trip: max rel err {rel:.3e}, codes seen {codes}")
+     want = [c for c in range(16) if c not in _UNREACHABLE_CODES]
+diff --git a/bench/n1/compile_check.py b/bench/n1/compile_check.py
+new file mode 100644
+index 0000000000..f068b3b7cb
+--- /dev/null
++++ b/bench/n1/compile_check.py
+@@ -0,0 +1,46 @@
++"""CPU-only Triton front-end compile of the NVFP4 GEMV, for every tile the planner emits.
++
++Catches the class of failure that has already cost three GPU-lock windows (unsupported
++globals, constexpr-branch type errors) without touching the GPU: `ASTSource.make_ir`
++runs the Python->TTIR front end, which is where all of them surfaced.
++"""
++import sys, itertools, traceback
++sys.path.insert(0, "/home/user/tools/sglang-n1/python")
++import torch, triton
++from triton.backends.compiler import GPUTarget
++from triton.compiler.compiler import ASTSource, make_backend
++
++import sglang.srt.layers.quantization.w4a16_nvfp4_gemv as K
++
++target = GPUTarget("cuda", 120, 32)
++backend = make_backend(target)
++
++# 8 pointers, then M,N,K + 7 strides = ints
++sig = {}
++names = ["x_ptr","q_ptr","s_ptr","g_ptr","y_ptr","y2_ptr","ws_ptr","cnt_ptr"]
++for n in names: sig[n] = "*bf16" if n in ("x_ptr","y_ptr","y2_ptr") else ("*fp32" if n in("g_ptr","ws_ptr") else ("*i32" if n=="cnt_ptr" else ("*fp8e4nv" if n=="s_ptr" else "*u8")))
++for n in ["M","N","K","stride_xm","stride_xk","stride_qn","stride_sn","stride_ym","stride_yn","stride_y2m"]:
++    sig[n] = "i32"
++
++ok = bad = 0
++for gather, M, (bn, bk, sp, use_dot, warps, stages) in itertools.product(
++    (False, True), (1, 4, 16),
++    ((32,128,1,False,4,3), (64,256,1,True,8,3), (16,128,2,True,4,3), (128,256,1,True,8,3),
++     (32,512,1,False,4,3), (64,512,1,True,8,3)),
++):
++    ud = use_dot or M > 1
++    cst = {"SPLIT_N":0, "PER_CHANNEL":False, "BLOCK_N":bn, "BLOCK_K":bk,
++           "M_PAD":16 if ud else 1, "SPLITS":sp, "USE_DOT":ud,
++           "SCALE_GATHER":gather, "USE_PDL":False}
++    tag = f"gather={int(gather)} M={M:2d} BN={bn:3d} BK={bk:3d} sp={sp} dot={int(ud)} w={warps} st={stages}"
++    try:
++        src = ASTSource(fn=K._w4a16_nvfp4_gemv_kernel, signature=sig, constexprs=cst)
++        opts = backend.parse_options({"num_warps": warps, "num_stages": stages})
++        import triton.compiler.compiler as C
++        C.compile(src, target=target, options=opts.__dict__)
++        ok += 1
++    except Exception as e:
++        bad += 1
++        msg = [l for l in str(e).splitlines() if l.strip()]
++        print(f"FAIL {tag}\n     {type(e).__name__}: {msg[-1][:170] if msg else ''}")
++print(f"\n{ok} compiled, {bad} failed")
+diff --git a/python/sglang/srt/layers/quantization/w4a16_nvfp4_gemv.py b/python/sglang/srt/layers/quantization/w4a16_nvfp4_gemv.py
+index 75d61991ca..fb746fd159 100644
+--- a/python/sglang/srt/layers/quantization/w4a16_nvfp4_gemv.py
++++ b/python/sglang/srt/layers/quantization/w4a16_nvfp4_gemv.py
+@@ -45,6 +45,11 @@ import triton.language as tl
+ from sglang.kernels.triton_pdl import PDL, pdl_trigger, pdl_wait
+ 
+ FP4_SCALE_BLOCK = 16
++#: The same 16, for use *inside* jitted code. Triton 3.7 refuses to read a plain int
++#: module global from a kernel ("Cannot access global variable ... only global variables
++#: instantiated as constexpr"), and an annotation (`x: tl.constexpr = 16`) does not
++#: count -- it has to be a `tl.constexpr` value.
++_FP4_BLK = tl.constexpr(16)
+ #: e2m1 -> the fp16 bit trick returns value * 2^-14; fold the reciprocal into the
+ #: global scale so the k loop never touches it.
+ FP4_TRICK_SCALE = 16384.0
+@@ -80,7 +85,7 @@ def _unpack_dequant(b, BLOCK_N: tl.constexpr, BLOCK_KB: tl.constexpr):
+ @triton.jit
+ def _load_block_scales(
+     s_ptr, offs_n, kb0, n_mask, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
+-    stride_sn, NB: tl.constexpr, E4M3_NATIVE: tl.constexpr, GATHER: tl.constexpr,
++    stride_sn, NB: tl.constexpr, GATHER: tl.constexpr,
+ ):
+     """[BLOCK_N, BLOCK_K//16] e4m3 scales, broadcast to [BLOCK_N, BLOCK_K] bf16.
+ 
+@@ -88,22 +93,25 @@ def _load_block_scales(
+     re-reads each scale 16 times (an L1 hit) with no reshape. The first is fewer
+     instructions, the second is the fallback if a Triton version refuses to reshape a
+     broadcast value. They are numerically identical.
++
++    One assignment and one return, deliberately: Triton type-checks *both* arms of a
++    constexpr `if` that contains an early `return`, so a branch whose `other=` operand
++    only makes sense for the taken arm is a compile error even when it is dead. (That is
++    exactly how the E4M3-native branch this function used to carry failed -- `other=0`
++    on an fp8 pointer.) The non-native e4m3 path is gone with it; this fork targets
++    sm_120, where fp8e4nv loads are native.
+     """
+     if GATHER:
+         offs_k = tl.arange(0, BLOCK_K)
+-        p = s_ptr + offs_n[:, None] * stride_sn + (kb0 + offs_k // FP4_SCALE_BLOCK)[None, :]
+-        if E4M3_NATIVE:
+-            return tl.load(p, mask=n_mask[:, None], other=0.0).to(tl.bfloat16)
+-        return tl.load(p, mask=n_mask[:, None], other=0).to(tl.bfloat16)
+-    offs_b = kb0 + tl.arange(0, NB)
+-    p = s_ptr + offs_n[:, None] * stride_sn + offs_b[None, :]
+-    if E4M3_NATIVE:
+-        s = tl.load(p, mask=n_mask[:, None], other=0.0).to(tl.bfloat16)
++        p = s_ptr + offs_n[:, None] * stride_sn + (kb0 + offs_k // _FP4_BLK)[None, :]
++        out = tl.load(p, mask=n_mask[:, None], other=0.0).to(tl.bfloat16)
+     else:
+-        s = tl.load(p, mask=n_mask[:, None], other=0).to(tl.bfloat16)
+-    # broadcast each scale over its 16 contiguous k
+-    s = tl.broadcast_to(s[:, :, None], (BLOCK_N, NB, FP4_SCALE_BLOCK))
+-    return tl.reshape(s, (BLOCK_N, BLOCK_K))
++        p = s_ptr + offs_n[:, None] * stride_sn + (kb0 + tl.arange(0, NB))[None, :]
++        s = tl.load(p, mask=n_mask[:, None], other=0.0).to(tl.bfloat16)
++        # broadcast each scale over its 16 contiguous k
++        s = tl.broadcast_to(s[:, :, None], (BLOCK_N, NB, _FP4_BLK))
++        out = tl.reshape(s, (BLOCK_N, BLOCK_K))
++    return out
+ 
+ 
+ @triton.jit
+@@ -133,14 +141,13 @@ def _w4a16_nvfp4_gemv_kernel(
+     M_PAD: tl.constexpr,
+     SPLITS: tl.constexpr,
+     USE_DOT: tl.constexpr,
+-    E4M3_NATIVE: tl.constexpr,
+     SCALE_GATHER: tl.constexpr = False,
+     USE_PDL: tl.constexpr = False,
+ ):
+     pid_n = tl.program_id(0)
+     pid_k = tl.program_id(1)
+     BLOCK_KB: tl.constexpr = BLOCK_K // 2
+-    NB: tl.constexpr = BLOCK_K // FP4_SCALE_BLOCK
++    NB: tl.constexpr = BLOCK_K // _FP4_BLK
+ 
+     offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+     offs_m = tl.arange(0, M_PAD)
+@@ -160,8 +167,8 @@ def _w4a16_nvfp4_gemv_kernel(
+         )
+         w = _unpack_dequant(qb, BLOCK_N, BLOCK_KB)
+         s = _load_block_scales(
+-            s_ptr, offs_n, k0 // FP4_SCALE_BLOCK, n_mask,
+-            BLOCK_N, BLOCK_K, stride_sn, NB, E4M3_NATIVE, SCALE_GATHER,
++            s_ptr, offs_n, k0 // _FP4_BLK, n_mask,
++            BLOCK_N, BLOCK_K, stride_sn, NB, SCALE_GATHER,
+         )
+         w = w * s
+         if USE_DOT:
+@@ -244,7 +251,6 @@ from sglang.srt.layers.quantization.w8a16_gemv import (  # noqa: E402
+     _workspace,
+ )
+ 
+-E4M3_NATIVE = True
+ #: Fallback scale broadcast (see _load_block_scales); set if the reshape path fails
+ #: to compile on a given Triton build.
+ SCALE_GATHER = _env_flag("SGLANG_NVFP4_GEMV_SCALE_GATHER")
+@@ -356,7 +362,7 @@ def w4a16_nvfp4_gemv(
+     use_dot = use_dot or M > 1
+     m_pad = 16 if use_dot else 1
+     ws, cnt = _workspace(x.device)
+-    sview = bs.view(torch.float8_e4m3fn) if E4M3_NATIVE else bs
++    sview = bs.view(torch.float8_e4m3fn)
+ 
+     _w4a16_nvfp4_gemv_kernel[(triton.cdiv(N, block_n), splits)](
+         x, wq, sview, g, y, y if y2 is None else y2, ws, cnt,
+@@ -372,7 +378,6 @@ def w4a16_nvfp4_gemv(
+         M_PAD=m_pad,
+         SPLITS=splits,
+         USE_DOT=use_dot,
+-        E4M3_NATIVE=E4M3_NATIVE,
+         SCALE_GATHER=SCALE_GATHER,
+         USE_PDL=PDL,
+         launch_pdl=PDL,
+-- 
+2.43.0
+

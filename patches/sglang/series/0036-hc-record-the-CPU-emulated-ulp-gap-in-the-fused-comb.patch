@@ -1,0 +1,39 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: aiueo52 <aiueo52@users.noreply.github.com>
+Date: Thu, 3 Sep 2026 20:58:03 +0900
+Subject: [PATCH 036/105] hc: record the CPU-emulated ulp gap in the
+ fused-combine docstring
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+---
+ .../sglang/srt/layers/hc_combine_fused_triton.py   | 14 ++++++++------
+ 1 file changed, 8 insertions(+), 6 deletions(-)
+
+diff --git a/python/sglang/srt/layers/hc_combine_fused_triton.py b/python/sglang/srt/layers/hc_combine_fused_triton.py
+index 26176474ff..c6eabb6f6c 100644
+--- a/python/sglang/srt/layers/hc_combine_fused_triton.py
++++ b/python/sglang/srt/layers/hc_combine_fused_triton.py
+@@ -29,12 +29,14 @@ wrapper falls back to the two-kernel path whenever that does not hold.  The two
+ counters are restored to 0 by the last CTA out, so a graph replay starts clean.
+ 
+ Numerics.  Everything is fp32 with a bf16 round at the store, exactly as the CUDA
+-pair does, but the fp32 dot is reduced in a different order (per-chunk tl.sum tree
+-plus a sequential fold over the chunks, vs. the reference's per-thread sequential
+-sum, warp butterfly and sequential fold over its 8 splits).  The gate therefore
+-differs by a few fp32 ulp, i.e. ~1e-7 relative; the bf16 output only moves when the
+-fp32 result sits within that of a bf16 rounding boundary, and then by exactly one
+-bf16 ulp.  See ``test/srt/layers/test_hc_combine_fused.py`` for the measured rate.
++pair does, but the fp32 dot is reduced in a different order: a tl.sum tree over the
++[HC, SUB] tile and then over the Q slices, versus the reference's per-thread
++sequential sum of 40 products, warp butterfly and sequential fold over its 8 splits.
++The gate therefore differs by ~1e-7 relative, and the bf16 output only moves when the
++fp32 result sits within that of a bf16 rounding boundary -- then by exactly one bf16
++ulp.  A CPU emulation of both reduction orders puts that at ~2e-5 of elements at 16
++rows and 0 at 4 rows; ``test/srt/layers/test_hc_combine_fused.py`` asserts the <= 1
++ulp bound on device and prints the measured rate.
+ 
+ Enable with ``SGLANG_HC_COMBINE_FUSED=1``.
+ """
+-- 
+2.43.0
+

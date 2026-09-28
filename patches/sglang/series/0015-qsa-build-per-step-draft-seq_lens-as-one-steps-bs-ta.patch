@@ -1,0 +1,130 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: aiueo52 <aiueo52@users.noreply.github.com>
+Date: Thu, 3 Sep 2026 05:12:20 +0900
+Subject: [PATCH 015/105] qsa: build per-step draft seq_lens as one [steps, bs]
+ table
+
+The multi-step draft backend rebuilt (seq_lens + step + 1).to(int32) for every
+draft step before the draft CUDA graph: 3 eager launches per step (42 at
+num_steps=15) on the GPU-idle critical path, ~250us/decode step at W16.
+One int32 table [steps, bs] (2 launches) now feeds every step's metadata;
+host lengths are derived once and offset per step.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+---
+ .../attention/qwen_sparse_attn_backend.py     | 71 +++++++++++++++----
+ 1 file changed, 58 insertions(+), 13 deletions(-)
+
+diff --git a/python/sglang/srt/layers/attention/qwen_sparse_attn_backend.py b/python/sglang/srt/layers/attention/qwen_sparse_attn_backend.py
+index 464738731c..9a217a55d4 100644
+--- a/python/sglang/srt/layers/attention/qwen_sparse_attn_backend.py
++++ b/python/sglang/srt/layers/attention/qwen_sparse_attn_backend.py
+@@ -1744,6 +1744,7 @@ class QwenSparseMultiStepDraftBackend:
+             QwenSparseAttnBackend(model_runner)
+             for _ in range(speculative_num_steps - 1)
+         ]
++        self._step_offsets = None
+ 
+     @staticmethod
+     def _as_cpu_lengths(seq_lens_cpu, seq_lens: torch.Tensor) -> torch.Tensor:
+@@ -1787,20 +1788,62 @@ class QwenSparseMultiStepDraftBackend:
+             .reshape(steps, -1)[step]
+         )
+ 
+-    def _make_step_forward_batch(self, forward_batch, step: int, num_padding: int = 0):
++    def _all_step_seq_lens(self, forward_batch):
++        """Per-step decode lengths for every draft step in two kernels.
++
++        Building ``(seq_lens + step + 1).to(int32)`` per step costs three
++        eager launches per step (2 adds + 1 cast) on the GPU-idle critical
++        path before the draft graph; one table ``[steps, bs]`` replaces them.
++        Returns ``(gpu_table, cpu_base)``; ``cpu_base`` is None when the batch
++        carries no host lengths.
++        """
++        steps = max(1, self.speculative_num_steps - 1)
++        seq_lens = forward_batch.seq_lens
++        offsets = self._step_offsets
++        if (
++            offsets is None
++            or offsets.device != seq_lens.device
++            or offsets.shape[0] != steps
++        ):
++            offsets = torch.arange(
++                1, steps + 1, dtype=torch.int32, device=seq_lens.device
++            ).unsqueeze(1)
++            self._step_offsets = offsets
++        gpu_table = seq_lens.to(torch.int32).unsqueeze(0) + offsets
++        cpu_base = (
++            None
++            if forward_batch.seq_lens_cpu is None
++            else self._as_cpu_lengths(forward_batch.seq_lens_cpu, seq_lens)
++        )
++        return gpu_table, cpu_base
++
++    def _make_step_forward_batch(
++        self,
++        forward_batch,
++        step: int,
++        num_padding: int = 0,
++        step_lens=None,
++    ):
+         step_forward_batch = copy(forward_batch)
+         step_forward_batch.forward_mode = ForwardMode.DECODE
+-        step_forward_batch.seq_lens = (forward_batch.seq_lens + step + 1).to(
+-            torch.int32
+-        )
+-        if forward_batch.seq_lens_cpu is None:
+-            # GPU-only serving: downstream metadata paths derive host bounds
+-            # from batch shape; do not force a per-step D2H here.
+-            step_forward_batch.seq_lens_cpu = None
++        if step_lens is not None:
++            gpu_table, cpu_base = step_lens
++            step_forward_batch.seq_lens = gpu_table[step]
++            step_forward_batch.seq_lens_cpu = (
++                None if cpu_base is None else cpu_base + (step + 1)
++            )
+         else:
+-            step_forward_batch.seq_lens_cpu = self._as_cpu_lengths(
+-                forward_batch.seq_lens_cpu, forward_batch.seq_lens
+-            ) + (step + 1)
++            step_forward_batch.seq_lens = (forward_batch.seq_lens + step + 1).to(
++                torch.int32
++            )
++            if forward_batch.seq_lens_cpu is None:
++                # GPU-only serving: downstream metadata paths derive host bounds
++                # from batch shape; do not force a per-step D2H here.
++                step_forward_batch.seq_lens_cpu = None
++            else:
++                step_forward_batch.seq_lens_cpu = self._as_cpu_lengths(
++                    forward_batch.seq_lens_cpu, forward_batch.seq_lens
++                ) + (step + 1)
+         num_padding = max(
+             0,
+             min(int(num_padding), int(step_forward_batch.seq_lens.numel())),
+@@ -1822,9 +1865,10 @@ class QwenSparseMultiStepDraftBackend:
+             backend.set_mtp_shared_sparse_indices(state)
+ 
+     def init_forward_metadata(self, forward_batch):
++        step_lens = self._all_step_seq_lens(forward_batch)
+         for step, backend in enumerate(self.attn_backends):
+             backend.init_forward_metadata(
+-                self._make_step_forward_batch(forward_batch, step)
++                self._make_step_forward_batch(forward_batch, step, step_lens=step_lens)
+             )
+ 
+     def init_cuda_graph_state(self, max_bs: int, max_num_tokens: int):
+@@ -1855,9 +1899,10 @@ class QwenSparseMultiStepDraftBackend:
+ 
+         num_padding = getattr(forward_batch, "num_padding", None)
+         num_padding = num_padding if num_padding is not None else 0
++        step_lens = self._all_step_seq_lens(forward_batch)
+         for step, backend in enumerate(self.attn_backends):
+             step_batch = self._make_step_forward_batch(
+-                forward_batch, step, num_padding=num_padding
++                forward_batch, step, num_padding=num_padding, step_lens=step_lens
+             )
+             backend._replay_cuda_graph_metadata(
+                 bs=step_batch.batch_size,
+-- 
+2.43.0
+

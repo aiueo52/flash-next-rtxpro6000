@@ -1,0 +1,1058 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: aiueo52 <aiueo52@users.noreply.github.com>
+Date: Thu, 3 Sep 2026 06:00:24 +0900
+Subject: [PATCH 019/105] glue: cached router zero-bias, fused FP8 KV
+ scale+cast+store, router GEMV and MTP-entry kernels (flag-gated)
+
+- topk.fused_topk: reuse one zero correction-bias tensor per (N, device)
+  instead of torch.zeros per MoE layer (always on, semantically identical).
+- SGLANG_KV_FP8_FUSED_STORE=1: one Triton kernel replaces div_/div_/to/to +
+  store_cache for bf16->fp8_e4m3 NHD KV writes at N<=64 (bit-exact vs the
+  reference path; 0-d tensor scales are rounded to bf16 first like torch
+  promotion does).
+- SGLANG_ROUTER_GEMV=1 (router_gemv.py) and SGLANG_MTP_ENTRY_FUSED=1
+  (mtp_entry.py): numerically validated but SLOWER than the cuBLAS/reference
+  paths on RTX PRO 6000 (7.5 vs 5.0us; 94-157 vs 63-75us) -> keep OFF.
+- GPU tests: test/srt/layers/test_glue_d.py (13 passed).
+
+Implemented by Codex (gpt-5.6-sol) from GLUE_D_SPEC.md; KV-store rounding fix,
+test tolerance and review by the supervisor.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+---
+ bench/glue_d/bench_glue_d.py                | 143 +++++++++++
+ python/sglang/srt/environ.py                |   6 +
+ python/sglang/srt/layers/moe/router_gemv.py |  93 ++++++++
+ python/sglang/srt/layers/moe/topk.py        |  19 +-
+ python/sglang/srt/layers/mtp_entry.py       | 248 ++++++++++++++++++++
+ python/sglang/srt/mem_cache/fp8_kv_store.py | 120 ++++++++++
+ python/sglang/srt/mem_cache/memory_pool.py  |  42 ++++
+ python/sglang/srt/models/qwen2_moe.py       |  35 ++-
+ python/sglang/srt/models/qwen4_exp_mtp.py   |  29 +++
+ test/srt/layers/test_glue_d.py              | 159 +++++++++++++
+ 10 files changed, 888 insertions(+), 6 deletions(-)
+ create mode 100644 bench/glue_d/bench_glue_d.py
+ create mode 100644 python/sglang/srt/layers/moe/router_gemv.py
+ create mode 100644 python/sglang/srt/layers/mtp_entry.py
+ create mode 100644 python/sglang/srt/mem_cache/fp8_kv_store.py
+ create mode 100644 test/srt/layers/test_glue_d.py
+
+diff --git a/bench/glue_d/bench_glue_d.py b/bench/glue_d/bench_glue_d.py
+new file mode 100644
+index 0000000000..5263f60c0f
+--- /dev/null
++++ b/bench/glue_d/bench_glue_d.py
+@@ -0,0 +1,143 @@
++#!/usr/bin/env python3
++"""CUDA-graph replay benchmark for Glue-D router and MTP entry fusions."""
++
++from __future__ import annotations
++
++import torch
++import torch.nn.functional as F
++
++from sglang.srt.layers.moe.router_gemv import router_gemv
++from sglang.srt.layers.mtp_entry import mtp_entry_fused
++
++HIDDEN_SIZE = 2560
++EXPERTS = 512
++HC = 4
++EPS = 1e-6
++WEIGHT_COPIES = 24
++GRAPH_REPLAYS = 50
++
++
++def _time_us(fn) -> float:
++    side = torch.cuda.Stream()
++    side.wait_stream(torch.cuda.current_stream())
++    with torch.cuda.stream(side):
++        for index in range(WEIGHT_COPIES):
++            fn(index)
++    torch.cuda.current_stream().wait_stream(side)
++    torch.cuda.synchronize()
++
++    graph = torch.cuda.CUDAGraph()
++    with torch.cuda.graph(graph):
++        for index in range(WEIGHT_COPIES):
++            fn(index)
++    graph.replay()
++    torch.cuda.synchronize()
++    start = torch.cuda.Event(enable_timing=True)
++    end = torch.cuda.Event(enable_timing=True)
++    start.record()
++    for _ in range(GRAPH_REPLAYS):
++        graph.replay()
++    end.record()
++    end.synchronize()
++    return start.elapsed_time(end) * 1000.0 / (GRAPH_REPLAYS * WEIGHT_COPIES)
++
++
++def _gemma_rms_norm(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
++    x_fp32 = x.float()
++    variance = x_fp32.square().mean(dim=-1, keepdim=True)
++    return (
++        x_fp32 * torch.rsqrt(variance + EPS) * (1.0 + weight.float())
++    ).to(torch.bfloat16)
++
++
++@torch.inference_mode()
++def main() -> None:
++    if not torch.cuda.is_available():
++        raise SystemExit("CUDA is required")
++    torch.manual_seed(0)
++
++    router_weights = [
++        torch.randn(
++            EXPERTS, HIDDEN_SIZE, device="cuda", dtype=torch.bfloat16
++        ).mul_(0.02)
++        for _ in range(WEIGHT_COPIES)
++    ]
++    mtp_weights = [
++        (
++            torch.randn(HIDDEN_SIZE, device="cuda", dtype=torch.bfloat16).mul_(
++                0.02
++            ),
++            torch.randn(
++                HC * HIDDEN_SIZE, device="cuda", dtype=torch.bfloat16
++            ).mul_(0.02),
++            torch.randn(
++                HIDDEN_SIZE, HIDDEN_SIZE, device="cuda", dtype=torch.bfloat16
++            ).mul_(0.02),
++            torch.randn(
++                HIDDEN_SIZE, HIDDEN_SIZE, device="cuda", dtype=torch.bfloat16
++            ).mul_(0.02),
++        )
++        for _ in range(WEIGHT_COPIES)
++    ]
++
++    print(
++        f"CUDA-graph timing: {WEIGHT_COPIES} rotating weight copies, "
++        f"{GRAPH_REPLAYS} replays"
++    )
++    print("part  M   reference_us  fused_us  speedup")
++    for rows in (1, 5, 16):
++        x = torch.randn(rows, HIDDEN_SIZE, device="cuda", dtype=torch.bfloat16)
++
++        def router_reference(index: int):
++            return F.linear(x, router_weights[index])
++
++        def router_fused(index: int):
++            return router_gemv(x, router_weights[index])
++
++        reference_us = _time_us(router_reference)
++        fused_us = _time_us(router_fused)
++        print(
++            f"A     {rows:<3d} {reference_us:12.3f}  {fused_us:8.3f}  "
++            f"{reference_us / fused_us:6.2f}x"
++        )
++
++        input_embeds = torch.randn(
++            rows, HIDDEN_SIZE, device="cuda", dtype=torch.bfloat16
++        )
++        hidden_states = torch.randn(
++            rows, HC * HIDDEN_SIZE, device="cuda", dtype=torch.bfloat16
++        )
++
++        def mtp_reference(index: int):
++            emb_norm, hidden_norm, emb_proj, hidden_proj = mtp_weights[index]
++            embedding = F.linear(
++                _gemma_rms_norm(input_embeds, emb_norm), emb_proj
++            )
++            hidden = _gemma_rms_norm(hidden_states, hidden_norm).view(
++                rows, HC, HIDDEN_SIZE
++            )
++            hidden = F.linear(hidden, hidden_proj)
++            return (embedding.unsqueeze(1) + hidden).view_as(hidden_states)
++
++        def mtp_fused(index: int):
++            emb_norm, hidden_norm, emb_proj, hidden_proj = mtp_weights[index]
++            return mtp_entry_fused(
++                input_embeds,
++                hidden_states,
++                emb_norm,
++                hidden_norm,
++                emb_proj,
++                hidden_proj,
++                EPS,
++            )
++
++        reference_us = _time_us(mtp_reference)
++        fused_us = _time_us(mtp_fused)
++        print(
++            f"C     {rows:<3d} {reference_us:12.3f}  {fused_us:8.3f}  "
++            f"{reference_us / fused_us:6.2f}x"
++        )
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/python/sglang/srt/environ.py b/python/sglang/srt/environ.py
+index 012caf67a5..470da3a44f 100644
+--- a/python/sglang/srt/environ.py
++++ b/python/sglang/srt/environ.py
+@@ -299,6 +299,10 @@ class Envs:
+     # Bitwise-exact, shape-guarded Qwen4 PLE decode fusion. Unsupported inputs
+     # and phases fall back to the original implementation.
+     SGLANG_ENABLE_QWEN4_PLE_FUSION = EnvBool(True)
++    # Low-row Qwen3.5/Qwen4-Exp MoE router projection via a BF16 Triton GEMV.
++    SGLANG_ROUTER_GEMV = EnvBool(False)
++    # Fuse the W16 Qwen4-Exp MTP entry norms, projections, and residual add.
++    SGLANG_MTP_ENTRY_FUSED = EnvBool(False)
+     # Select the FP8 (deep_gemm) tokenwise QSA indexer; only the BF16 reference
+     # path is ported, so setting this fails loudly instead of degrading.
+     SGLANG_QWEN_DSA_USE_FP8_INDEXER = EnvBool(False)
+@@ -831,6 +835,8 @@ class Envs:
+     # the SHUFFLE KV layout that enables pa_decode_gluon for full-attn
+     # decode without runtime permutes.
+     SGLANG_AITER_KV_CACHE_LAYOUT = EnvStr("nhd")
++    # Fuse BF16 scale, E4M3 cast, and NHD KV-cache scatter for small batches.
++    SGLANG_KV_FP8_FUSED_STORE = EnvBool(False)
+     SGLANG_ROCM_FUSED_DECODE_MLA = EnvBool(False)
+     SGLANG_ROCM_DISABLE_LINEARQUANT = EnvBool(False)
+     USE_ROCM_AITER_ROPE_BACKEND = EnvStr("0")
+diff --git a/python/sglang/srt/layers/moe/router_gemv.py b/python/sglang/srt/layers/moe/router_gemv.py
+new file mode 100644
+index 0000000000..353dcee523
+--- /dev/null
++++ b/python/sglang/srt/layers/moe/router_gemv.py
+@@ -0,0 +1,93 @@
++"""Small-batch BF16 router projection for Qwen MoE decode/verify."""
++
++from __future__ import annotations
++
++import torch
++import triton
++import triton.language as tl
++
++
++@triton.jit
++def _router_gemv_kernel(
++    x_ptr,
++    weight_ptr,
++    bias_ptr,
++    out_ptr,
++    m,
++    K: tl.constexpr,
++    N: tl.constexpr,
++    HAS_BIAS: tl.constexpr,
++    BLOCK_M: tl.constexpr,
++    BLOCK_N: tl.constexpr,
++    BLOCK_K: tl.constexpr,
++):
++    n = tl.program_id(0) * BLOCK_N + tl.arange(0, BLOCK_N)
++    rows = tl.arange(0, BLOCK_M)
++    row_mask = rows < m
++    acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
++
++    for k0 in range(0, K, BLOCK_K):
++        k = k0 + tl.arange(0, BLOCK_K)
++        x = tl.load(
++            x_ptr + rows[:, None] * K + k[None, :],
++            mask=row_mask[:, None],
++            other=0.0,
++        )
++        weight = tl.load(weight_ptr + n[:, None] * K + k[None, :])
++        acc += tl.dot(x, tl.trans(weight), out_dtype=tl.float32)
++
++    if HAS_BIAS:
++        acc += tl.load(bias_ptr + n)[None, :].to(tl.float32)
++    tl.store(
++        out_ptr + rows[:, None] * N + n[None, :],
++        acc,
++        mask=row_mask[:, None],
++    )
++
++
++def router_gemv(
++    x: torch.Tensor,
++    weight: torch.Tensor,
++    bias: torch.Tensor | None = None,
++) -> torch.Tensor:
++    """Compute ``x @ weight.T + bias`` into an FP32 router-logit tensor."""
++    if x.dim() != 2 or weight.dim() != 2:
++        raise ValueError("x and weight must be 2-D")
++    m, k = x.shape
++    n, weight_k = weight.shape
++    if not 1 <= m <= 16:
++        raise ValueError("router GEMV requires 1 <= M <= 16")
++    if k != weight_k or k % 128 != 0 or n % 32 != 0:
++        raise ValueError("router GEMV requires matching K % 128 == 0 and N % 32 == 0")
++    tensors = (x, weight) if bias is None else (x, weight, bias)
++    if any(not tensor.is_cuda for tensor in tensors):
++        raise ValueError("router GEMV requires CUDA tensors")
++    if any(tensor.device != x.device for tensor in tensors):
++        raise ValueError("all router GEMV tensors must be on the same device")
++    if x.dtype != torch.bfloat16 or weight.dtype != torch.bfloat16:
++        raise ValueError("router GEMV supports BF16 inputs and weights only")
++    if not x.is_contiguous() or not weight.is_contiguous():
++        raise ValueError("router GEMV inputs and weights must be contiguous")
++    if bias is not None:
++        if bias.shape != (n,) or bias.dtype != torch.bfloat16:
++            raise ValueError("router GEMV bias must be contiguous BF16 with shape [N]")
++        if not bias.is_contiguous():
++            raise ValueError("router GEMV bias must be contiguous")
++
++    out = torch.empty((m, n), dtype=torch.float32, device=x.device)
++    bias_arg = bias if bias is not None else weight
++    _router_gemv_kernel[(n // 32,)](
++        x,
++        weight,
++        bias_arg,
++        out,
++        m,
++        K=k,
++        N=n,
++        HAS_BIAS=bias is not None,
++        BLOCK_M=16,
++        BLOCK_N=32,
++        BLOCK_K=256,
++        num_warps=8,
++    )
++    return out
+diff --git a/python/sglang/srt/layers/moe/topk.py b/python/sglang/srt/layers/moe/topk.py
+index bc8f14f525..625e9a9b75 100644
+--- a/python/sglang/srt/layers/moe/topk.py
++++ b/python/sglang/srt/layers/moe/topk.py
+@@ -137,6 +137,19 @@ _is_musa = is_musa()
+ # computes the whole gate in fp32); the epsilon underflows to zero in float16.
+ _RENORMALIZE_SUM_EPSILON = 1e-20
+ 
++# The softmax router treats this as a read-only correction bias. Reuse one
++# device allocation instead of launching torch.zeros for every MoE layer.
++_ZERO_BIAS_CACHE: dict[tuple[int, torch.device], torch.Tensor] = {}
++
++
++def _get_zero_bias(num_experts: int, device: torch.device) -> torch.Tensor:
++    key = (num_experts, device)
++    zero_bias = _ZERO_BIAS_CACHE.get(key)
++    if zero_bias is None:
++        zero_bias = torch.zeros(num_experts, dtype=torch.float32, device=device)
++        _ZERO_BIAS_CACHE[key] = zero_bias
++    return zero_bias
++
+ # Experimental: skip the HIP padded-token routing-weight masking entirely.
+ # Padded (CUDA-graph) rows are discarded downstream and the MoE combine is
+ # per-token, so zeroing their weights is in principle unnecessary. Gated off by
+@@ -881,10 +894,8 @@ def fused_topk(
+                 moe_fused_gate as _jit_moe_fused_gate,
+             )
+ 
+-            zero_bias = torch.zeros(
+-                gating_output.shape[1],
+-                dtype=torch.float32,
+-                device=gating_output.device,
++            zero_bias = _get_zero_bias(
++                gating_output.shape[1], gating_output.device
+             )
+             topk_weights, topk_ids = _jit_moe_fused_gate(
+                 gating_output,
+diff --git a/python/sglang/srt/layers/mtp_entry.py b/python/sglang/srt/layers/mtp_entry.py
+new file mode 100644
+index 0000000000..259bf57d11
+--- /dev/null
++++ b/python/sglang/srt/layers/mtp_entry.py
+@@ -0,0 +1,248 @@
++"""Fused Qwen4-Exp MTP entry normalization and projections."""
++
++from __future__ import annotations
++
++import torch
++import triton
++import triton.language as tl
++
++
++@triton.jit
++def _mtp_entry_kernel(
++    embedding_ptr,
++    hidden_ptr,
++    embedding_norm_weight_ptr,
++    hidden_norm_weight_ptr,
++    embedding_proj_weight_ptr,
++    hidden_proj_weight_ptr,
++    out_ptr,
++    eps,
++    K: tl.constexpr,
++    ROWS: tl.constexpr,
++    BLOCK_M: tl.constexpr,
++    BLOCK_J: tl.constexpr,
++    BLOCK_K: tl.constexpr,
++    NORM_BLOCK: tl.constexpr,
++):
++    row = tl.arange(0, BLOCK_M)
++    row_mask = row < ROWS
++
++    # First pass: one row at a time keeps the norm working set one-dimensional.
++    # The 4096-wide tile covers embedding K in one masked load and hidden K in
++    # three loads, while retaining only the 16 inverse-RMS scalars afterwards.
++    norm_offset = tl.arange(0, NORM_BLOCK)
++    embedding_inv_rms = tl.zeros((BLOCK_M,), dtype=tl.float32)
++    hidden_inv_rms = tl.zeros((BLOCK_M,), dtype=tl.float32)
++    for m in range(0, ROWS):
++        embedding = tl.load(
++            embedding_ptr + m * K + norm_offset,
++            mask=norm_offset < K,
++            other=0.0,
++        ).to(tl.float32)
++        embedding_sum_sq = tl.sum(embedding * embedding, axis=0)
++        embedding_row_inv_rms = tl.rsqrt(embedding_sum_sq / K + eps)
++        embedding_inv_rms = tl.where(
++            row == m, embedding_row_inv_rms, embedding_inv_rms
++        )
++
++        hidden_sum_sq = 0.0
++        for hidden_k0 in range(0, 4 * K, NORM_BLOCK):
++            hidden_k = hidden_k0 + norm_offset
++            hidden = tl.load(
++                hidden_ptr + m * (4 * K) + hidden_k,
++                mask=hidden_k < 4 * K,
++                other=0.0,
++            ).to(tl.float32)
++            hidden_sum_sq += tl.sum(hidden * hidden, axis=0)
++        hidden_row_inv_rms = tl.rsqrt(hidden_sum_sq / (4 * K) + eps)
++        hidden_inv_rms = tl.where(row == m, hidden_row_inv_rms, hidden_inv_rms)
++
++    j = tl.program_id(0) * BLOCK_J + tl.arange(0, BLOCK_J)
++    k_off = tl.arange(0, BLOCK_K)
++    embedding_acc = tl.zeros((BLOCK_M, BLOCK_J), dtype=tl.float32)
++    hidden_acc_0 = tl.zeros((BLOCK_M, BLOCK_J), dtype=tl.float32)
++    hidden_acc_1 = tl.zeros((BLOCK_M, BLOCK_J), dtype=tl.float32)
++    hidden_acc_2 = tl.zeros((BLOCK_M, BLOCK_J), dtype=tl.float32)
++    hidden_acc_3 = tl.zeros((BLOCK_M, BLOCK_J), dtype=tl.float32)
++
++    for k0 in range(0, K, BLOCK_K):
++        k = k0 + k_off
++        embedding = tl.load(
++            embedding_ptr + row[:, None] * K + k[None, :],
++            mask=row_mask[:, None],
++            other=0.0,
++        ).to(tl.float32)
++        embedding_norm_weight = tl.load(embedding_norm_weight_ptr + k).to(
++            tl.float32
++        )
++        normalized_embedding = (
++            embedding
++            * embedding_inv_rms[:, None]
++            * (1.0 + embedding_norm_weight[None, :])
++        ).to(tl.bfloat16)
++        embedding_weight = tl.load(
++            embedding_proj_weight_ptr + j[:, None] * K + k[None, :]
++        )
++        embedding_acc += tl.dot(
++            normalized_embedding,
++            tl.trans(embedding_weight),
++            out_dtype=tl.float32,
++        )
++
++        # Reuse one weight chunk for all four HC branches, but feed each dot
++        # sequentially so only one [16, BLOCK_K] activation tile is live.
++        hidden_weight = tl.load(hidden_proj_weight_ptr + j[:, None] * K + k[None, :])
++        hidden = tl.load(
++            hidden_ptr + row[:, None] * (4 * K) + k[None, :],
++            mask=row_mask[:, None],
++            other=0.0,
++        ).to(tl.float32)
++        hidden_norm_weight = tl.load(hidden_norm_weight_ptr + k).to(tl.float32)
++        normalized_hidden = (
++            hidden
++            * hidden_inv_rms[:, None]
++            * (1.0 + hidden_norm_weight[None, :])
++        ).to(tl.bfloat16)
++        hidden_acc_0 += tl.dot(
++            normalized_hidden, tl.trans(hidden_weight), out_dtype=tl.float32
++        )
++
++        hidden = tl.load(
++            hidden_ptr + row[:, None] * (4 * K) + K + k[None, :],
++            mask=row_mask[:, None],
++            other=0.0,
++        ).to(tl.float32)
++        hidden_norm_weight = tl.load(hidden_norm_weight_ptr + K + k).to(tl.float32)
++        normalized_hidden = (
++            hidden
++            * hidden_inv_rms[:, None]
++            * (1.0 + hidden_norm_weight[None, :])
++        ).to(tl.bfloat16)
++        hidden_acc_1 += tl.dot(
++            normalized_hidden, tl.trans(hidden_weight), out_dtype=tl.float32
++        )
++
++        hidden = tl.load(
++            hidden_ptr + row[:, None] * (4 * K) + 2 * K + k[None, :],
++            mask=row_mask[:, None],
++            other=0.0,
++        ).to(tl.float32)
++        hidden_norm_weight = tl.load(hidden_norm_weight_ptr + 2 * K + k).to(
++            tl.float32
++        )
++        normalized_hidden = (
++            hidden
++            * hidden_inv_rms[:, None]
++            * (1.0 + hidden_norm_weight[None, :])
++        ).to(tl.bfloat16)
++        hidden_acc_2 += tl.dot(
++            normalized_hidden, tl.trans(hidden_weight), out_dtype=tl.float32
++        )
++
++        hidden = tl.load(
++            hidden_ptr + row[:, None] * (4 * K) + 3 * K + k[None, :],
++            mask=row_mask[:, None],
++            other=0.0,
++        ).to(tl.float32)
++        hidden_norm_weight = tl.load(hidden_norm_weight_ptr + 3 * K + k).to(
++            tl.float32
++        )
++        normalized_hidden = (
++            hidden
++            * hidden_inv_rms[:, None]
++            * (1.0 + hidden_norm_weight[None, :])
++        ).to(tl.bfloat16)
++        hidden_acc_3 += tl.dot(
++            normalized_hidden, tl.trans(hidden_weight), out_dtype=tl.float32
++        )
++
++    # Both linears materialize BF16 before the reference BF16 add.
++    embedding_result = embedding_acc.to(tl.bfloat16).to(tl.float32)
++    hidden_result_0 = hidden_acc_0.to(tl.bfloat16).to(tl.float32)
++    hidden_result_1 = hidden_acc_1.to(tl.bfloat16).to(tl.float32)
++    hidden_result_2 = hidden_acc_2.to(tl.bfloat16).to(tl.float32)
++    hidden_result_3 = hidden_acc_3.to(tl.bfloat16).to(tl.float32)
++    tl.store(
++        out_ptr + row[:, None] * (4 * K) + j[None, :],
++        (embedding_result + hidden_result_0).to(tl.bfloat16),
++        mask=row_mask[:, None],
++    )
++    tl.store(
++        out_ptr + row[:, None] * (4 * K) + K + j[None, :],
++        (embedding_result + hidden_result_1).to(tl.bfloat16),
++        mask=row_mask[:, None],
++    )
++    tl.store(
++        out_ptr + row[:, None] * (4 * K) + 2 * K + j[None, :],
++        (embedding_result + hidden_result_2).to(tl.bfloat16),
++        mask=row_mask[:, None],
++    )
++    tl.store(
++        out_ptr + row[:, None] * (4 * K) + 3 * K + j[None, :],
++        (embedding_result + hidden_result_3).to(tl.bfloat16),
++        mask=row_mask[:, None],
++    )
++
++
++def mtp_entry_fused(
++    input_embeds: torch.Tensor,
++    hidden_states: torch.Tensor,
++    embedding_norm_weight: torch.Tensor,
++    hidden_norm_weight: torch.Tensor,
++    embedding_proj_weight: torch.Tensor,
++    hidden_proj_weight: torch.Tensor,
++    eps: float,
++) -> torch.Tensor:
++    """Fuse the W16 Qwen4-Exp MTP entry chain into one Triton launch."""
++    if input_embeds.dim() != 2 or hidden_states.dim() != 2:
++        raise ValueError("MTP entry inputs must be 2-D")
++    rows, hidden_size = input_embeds.shape
++    tensors = (
++        input_embeds,
++        hidden_states,
++        embedding_norm_weight,
++        hidden_norm_weight,
++        embedding_proj_weight,
++        hidden_proj_weight,
++    )
++    if not 1 <= rows <= 16:
++        raise ValueError("fused MTP entry requires 1 <= M <= 16")
++    if hidden_size != 2560 or hidden_states.shape != (rows, 4 * hidden_size):
++        raise ValueError("fused MTP entry supports the W16 (4 x 2560) layout only")
++    if embedding_norm_weight.shape != (hidden_size,):
++        raise ValueError("invalid embedding norm weight shape")
++    if hidden_norm_weight.shape != (4 * hidden_size,):
++        raise ValueError("invalid hidden norm weight shape")
++    if embedding_proj_weight.shape != (hidden_size, hidden_size):
++        raise ValueError("invalid embedding projection weight shape")
++    if hidden_proj_weight.shape != (hidden_size, hidden_size):
++        raise ValueError("invalid hidden projection weight shape")
++    if any(not tensor.is_cuda for tensor in tensors):
++        raise ValueError("fused MTP entry requires CUDA tensors")
++    if any(tensor.device != input_embeds.device for tensor in tensors):
++        raise ValueError("all fused MTP entry tensors must be on one device")
++    if any(tensor.dtype != torch.bfloat16 for tensor in tensors):
++        raise ValueError("fused MTP entry supports BF16 only")
++    if any(not tensor.is_contiguous() for tensor in tensors):
++        raise ValueError("all fused MTP entry tensors must be contiguous")
++
++    out = torch.empty_like(hidden_states)
++    _mtp_entry_kernel[(hidden_size // 64,)](
++        input_embeds,
++        hidden_states,
++        embedding_norm_weight,
++        hidden_norm_weight,
++        embedding_proj_weight,
++        hidden_proj_weight,
++        out,
++        eps,
++        K=hidden_size,
++        ROWS=rows,
++        BLOCK_M=16,
++        BLOCK_J=64,
++        BLOCK_K=128,
++        NORM_BLOCK=4096,
++        num_warps=8,
++        num_stages=1,
++    )
++    return out
+diff --git a/python/sglang/srt/mem_cache/fp8_kv_store.py b/python/sglang/srt/mem_cache/fp8_kv_store.py
+new file mode 100644
+index 0000000000..8c54079cad
+--- /dev/null
++++ b/python/sglang/srt/mem_cache/fp8_kv_store.py
+@@ -0,0 +1,120 @@
++"""Fused BF16 scale, FP8 cast, and NHD KV-cache scatter."""
++
++from __future__ import annotations
++
++import torch
++import triton
++import triton.language as tl
++
++
++@triton.jit
++def _fp8_kv_store_kernel(
++    k_ptr,
++    v_ptr,
++    k_cache_ptr,
++    v_cache_ptr,
++    loc_ptr,
++    k_scale,
++    v_scale,
++    row_size: tl.constexpr,
++    HAS_K_SCALE: tl.constexpr,
++    HAS_V_SCALE: tl.constexpr,
++    K_SCALE_IS_TENSOR: tl.constexpr,
++    V_SCALE_IS_TENSOR: tl.constexpr,
++    BLOCK: tl.constexpr,
++):
++    token = tl.program_id(0)
++    offset = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
++    mask = offset < row_size
++    src = token * row_size + offset
++    dst = tl.load(loc_ptr + token).to(tl.int64) * row_size + offset
++    k = tl.load(k_ptr + src, mask=mask).to(tl.float32)
++    v = tl.load(v_ptr + src, mask=mask).to(tl.float32)
++    # Match ``cache.div_(scale)`` exactly: a true fp32 division (not a
++    # multiply by the reciprocal), rounded to BF16, then cast to FP8.
++    # A 0-d scale *tensor* is first cast to the BF16 common dtype by torch's
++    # type promotion (a python float scalar is not), so mirror that here.
++    if HAS_K_SCALE:
++        if K_SCALE_IS_TENSOR:
++            k = k / tl.load(k_scale).to(tl.bfloat16).to(tl.float32)
++        else:
++            k = k / k_scale
++    if HAS_V_SCALE:
++        if V_SCALE_IS_TENSOR:
++            v = v / tl.load(v_scale).to(tl.bfloat16).to(tl.float32)
++        else:
++            v = v / v_scale
++    # div_ first materializes BF16, then Tensor.to performs the FP8 rounding.
++    k_fp8 = k.to(tl.bfloat16).to(tl.float8e4nv)
++    v_fp8 = v.to(tl.bfloat16).to(tl.float8e4nv)
++    tl.store(k_cache_ptr + dst, k_fp8, mask=mask)
++    tl.store(v_cache_ptr + dst, v_fp8, mask=mask)
++
++
++def fp8_kv_store(
++    cache_k: torch.Tensor,
++    cache_v: torch.Tensor,
++    k_buffer: torch.Tensor,
++    v_buffer: torch.Tensor,
++    loc: torch.Tensor,
++    k_scale: float | torch.Tensor | None = None,
++    v_scale: float | torch.Tensor | None = None,
++) -> None:
++    """Scale/cast BF16 K/V and scatter them into native E4M3 NHD buffers."""
++    if cache_k.dim() != 3 or cache_v.shape != cache_k.shape:
++        raise ValueError("K and V must have the same 3-D shape")
++    tokens, heads, head_dim = cache_k.shape
++    if not 1 <= tokens <= 64:
++        raise ValueError("fused FP8 KV store requires 1 <= N <= 64")
++    if loc.shape != (tokens,) or loc.dtype not in (torch.int32, torch.int64):
++        raise ValueError("loc must be int32/int64 with shape [N]")
++    tensors = (cache_k, cache_v, k_buffer, v_buffer, loc)
++    if any(not tensor.is_cuda for tensor in tensors):
++        raise ValueError("fused FP8 KV store requires CUDA tensors")
++    if any(tensor.device != cache_k.device for tensor in tensors):
++        raise ValueError("all fused FP8 KV store tensors must be on one device")
++    if cache_k.dtype != torch.bfloat16 or cache_v.dtype != torch.bfloat16:
++        raise ValueError("fused FP8 KV store inputs must be BF16")
++    if k_buffer.dtype != torch.float8_e4m3fn or v_buffer.dtype != k_buffer.dtype:
++        raise ValueError("fused FP8 KV store destinations must be float8_e4m3fn")
++    if k_buffer.dim() != 3 or v_buffer.shape != k_buffer.shape:
++        raise ValueError("K/V destination buffers must have the same 3-D shape")
++    if k_buffer.shape[1:] != (heads, head_dim):
++        raise ValueError("source and destination KV row shapes must match")
++    if any(not tensor.is_contiguous() for tensor in tensors):
++        raise ValueError("all fused FP8 KV store tensors must be contiguous")
++
++    def _check_scale(scale, name: str) -> None:
++        if isinstance(scale, torch.Tensor):
++            if (
++                scale.numel() != 1
++                or not scale.is_cuda
++                or scale.device != cache_k.device
++            ):
++                raise ValueError(
++                    f"{name} tensor must be a CUDA scalar on the KV device"
++                )
++
++    _check_scale(k_scale, "k_scale")
++    _check_scale(v_scale, "v_scale")
++    k_is_tensor = isinstance(k_scale, torch.Tensor)
++    v_is_tensor = isinstance(v_scale, torch.Tensor)
++    k_arg = k_scale if k_scale is not None else cache_k
++    v_arg = v_scale if v_scale is not None else cache_v
++    row_size = heads * head_dim
++    _fp8_kv_store_kernel[(tokens, triton.cdiv(row_size, 256))](
++        cache_k,
++        cache_v,
++        k_buffer,
++        v_buffer,
++        loc,
++        k_arg,
++        v_arg,
++        row_size=row_size,
++        HAS_K_SCALE=k_scale is not None,
++        HAS_V_SCALE=v_scale is not None,
++        K_SCALE_IS_TENSOR=k_is_tensor,
++        V_SCALE_IS_TENSOR=v_is_tensor,
++        BLOCK=256,
++        num_warps=4,
++    )
+diff --git a/python/sglang/srt/mem_cache/memory_pool.py b/python/sglang/srt/mem_cache/memory_pool.py
+index c7670bdd1b..b013f7138e 100644
+--- a/python/sglang/srt/mem_cache/memory_pool.py
++++ b/python/sglang/srt/mem_cache/memory_pool.py
+@@ -2016,6 +2016,16 @@ class MHATokenToKVPool(KVCache):
+                     assert self.head_dim % self._kv_vector_x == 0
+                     assert self.v_head_dim % self._kv_vector_x == 0
+ 
++        # The fused NHD writer can store E4M3 directly. Native FP8 storage has
++        # the same bytes as the legacy uint8 view, and avoids a source view cast.
++        if (
++            envs.SGLANG_KV_FP8_FUSED_STORE.get()
++            and _is_cuda
++            and self.kv_cache_layout == "nhd"
++            and self.dtype == torch.float8_e4m3fn
++        ):
++            self.store_dtype = self.dtype
++
+         self.quant_method = (
+             quant_method if quant_method is not None else UnquantizedKVCacheMethod()
+         )
+@@ -2526,6 +2536,38 @@ class MHATokenToKVPool(KVCache):
+             )
+             return
+ 
++        if (
++            envs.SGLANG_KV_FP8_FUSED_STORE.get()
++            and self.dtype == torch.float8_e4m3fn
++            and self.store_dtype == self.dtype
++            and self.kv_cache_layout == "nhd"
++            and not self.use_hnd
++            and dcp_kv_mask is None
++            and cache_k.dim() == 3
++            and cache_v.shape == cache_k.shape
++            and 1 <= cache_k.shape[0] <= 64
++            and cache_k.dtype == torch.bfloat16
++            and cache_v.dtype == torch.bfloat16
++            and cache_k.is_contiguous()
++            and cache_v.is_contiguous()
++            and loc.dim() == 1
++            and loc.shape[0] == cache_k.shape[0]
++            and loc.dtype in (torch.int32, torch.int64)
++            and loc.is_contiguous()
++        ):
++            from sglang.srt.mem_cache.fp8_kv_store import fp8_kv_store
++
++            fp8_kv_store(
++                cache_k,
++                cache_v,
++                self.k_buffer[layer_id - self.start_layer],
++                self.v_buffer[layer_id - self.start_layer],
++                loc,
++                k_scale,
++                v_scale,
++            )
++            return
++
+         if cache_k.dtype != self.dtype:
+             if k_scale is not None:
+                 cache_k.div_(k_scale)
+diff --git a/python/sglang/srt/models/qwen2_moe.py b/python/sglang/srt/models/qwen2_moe.py
+index 8ea206ac55..e4e6152bb4 100644
+--- a/python/sglang/srt/models/qwen2_moe.py
++++ b/python/sglang/srt/models/qwen2_moe.py
+@@ -360,6 +360,11 @@ class Qwen2MoeSparseMoeBlock(nn.Module):
+             quant_config=gate_quant_config,
+             prefix=gate_prefix,
+         )
++        self._router_gemv_enabled = (
++            envs.SGLANG_ROUTER_GEMV.get()
++            and config.model_type in ("qwen4_exp_text", "qwen3_5_moe_text")
++            and gate_quant_config is None
++        )
+         # When enable_shared_expert_fusion, the shared expert runs inside the MoE kernel
+         # (via _append_shared_to_topk_output); a separate shared_expert MLP would
+         # double-count. If fusion is off (num_fused_shared_experts == 0), keep shared_expert.
+@@ -574,7 +579,7 @@ class Qwen2MoeSparseMoeBlock(nn.Module):
+         shared_output = None
+         if hidden_states.shape[0] > 0:
+             # router_logits: (num_tokens, n_experts)
+-            router_logits, _ = self.gate(hidden_states)
++            router_logits = self._forward_router_logits(hidden_states)
+             if enable_dual_stream:
+                 shared_output = shared_expert_on_independent_stream(
+                     hidden_states.clone(), self._forward_shared_experts
+@@ -616,9 +621,35 @@ class Qwen2MoeSparseMoeBlock(nn.Module):
+ 
+         return final_hidden_states
+ 
++    def _forward_router_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
++        weight = getattr(self.gate, "weight", None)
++        bias = getattr(self.gate, "bias", None)
++        if (
++            self._router_gemv_enabled
++            and weight is not None
++            and hidden_states.dim() == 2
++            and 1 <= hidden_states.shape[0] <= 16
++            and hidden_states.dtype == torch.bfloat16
++            and weight.dtype == torch.bfloat16
++            and hidden_states.shape[1] % 128 == 0
++            and weight.shape[0] % 32 == 0
++            and weight.shape[1] == hidden_states.shape[1]
++            and hidden_states.is_contiguous()
++            and weight.is_contiguous()
++            and (
++                bias is None
++                or (bias.dtype == torch.bfloat16 and bias.is_contiguous())
++            )
++        ):
++            from sglang.srt.layers.moe.router_gemv import router_gemv
++
++            return router_gemv(hidden_states, weight, bias)
++        router_logits, _ = self.gate(hidden_states)
++        return router_logits
++
+     def _forward_router_experts(self, hidden_states: torch.Tensor):
+         # router_logits: (num_tokens, n_experts)
+-        router_logits, _ = self.gate(hidden_states)
++        router_logits = self._forward_router_logits(hidden_states)
+         topk_output = self.topk(hidden_states, router_logits)
+         if self.enable_shared_expert_fusion and TopKOutputChecker.format_is_standard(
+             topk_output
+diff --git a/python/sglang/srt/models/qwen4_exp_mtp.py b/python/sglang/srt/models/qwen4_exp_mtp.py
+index fc40a6b210..9cdcb6df35 100644
+--- a/python/sglang/srt/models/qwen4_exp_mtp.py
++++ b/python/sglang/srt/models/qwen4_exp_mtp.py
+@@ -105,6 +105,35 @@ class Qwen4ExpForCausalLMMTP(Qwen3_5ForCausalLMMTP):
+     def _fuse_residual_linear_shared(
+         self, input_embeds: torch.Tensor, hidden_states: torch.Tensor
+     ) -> torch.Tensor:
++        fused_tensors = (
++            input_embeds,
++            hidden_states,
++            self.pre_fc_norm_embedding.weight,
++            self.pre_fc_norm_hidden.weight,
++            self.fc_embedding.weight,
++            self.fc_hidden.weight,
++        )
++        if (
++            envs.SGLANG_MTP_ENTRY_FUSED.get()
++            and self.hc_count == 4
++            and self.hidden_size == 2560
++            and input_embeds.dim() == 2
++            and hidden_states.shape == (input_embeds.shape[0], 4 * self.hidden_size)
++            and 1 <= input_embeds.shape[0] <= 16
++            and all(tensor.dtype == torch.bfloat16 for tensor in fused_tensors)
++            and all(tensor.is_contiguous() for tensor in fused_tensors)
++        ):
++            from sglang.srt.layers.mtp_entry import mtp_entry_fused
++
++            return mtp_entry_fused(
++                input_embeds,
++                hidden_states,
++                self.pre_fc_norm_embedding.weight,
++                self.pre_fc_norm_hidden.weight,
++                self.fc_embedding.weight,
++                self.fc_hidden.weight,
++                self.pre_fc_norm_embedding.variance_epsilon,
++            )
+         input_embeds = self.fc_embedding(self.pre_fc_norm_embedding(input_embeds))
+         orig_shape = hidden_states.shape
+         hidden_states = self.pre_fc_norm_hidden(hidden_states)
+diff --git a/test/srt/layers/test_glue_d.py b/test/srt/layers/test_glue_d.py
+new file mode 100644
+index 0000000000..9773ec9e48
+--- /dev/null
++++ b/test/srt/layers/test_glue_d.py
+@@ -0,0 +1,159 @@
++import pytest
++import torch
++import torch.nn.functional as F
++
++from sglang.srt.layers.moe.router_gemv import router_gemv
++from sglang.srt.layers.moe.topk import _get_zero_bias
++from sglang.srt.layers.mtp_entry import mtp_entry_fused
++from sglang.srt.mem_cache.fp8_kv_store import fp8_kv_store
++
++
++pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
++
++HIDDEN_SIZE = 2560
++HC = 4
++EXPERTS = 512
++EPS = 1e-6
++
++
++@pytest.mark.parametrize("rows", [1, 5, 16])
++def test_router_gemv_matches_linear(rows: int):
++    torch.manual_seed(1000 + rows)
++    x = torch.randn(rows, HIDDEN_SIZE, device="cuda", dtype=torch.bfloat16)
++    weight = (
++        torch.randn(EXPERTS, HIDDEN_SIZE, device="cuda", dtype=torch.bfloat16)
++        * 0.02
++    )
++    actual = router_gemv(x, weight)
++    expected = F.linear(x, weight).float()
++    assert actual.dtype == torch.float32
++    assert (actual - expected).abs().max().item() <= 2e-2
++
++
++def test_router_gemv_optional_bias_and_zero_bias_cache():
++    torch.manual_seed(1017)
++    x = torch.randn(1, HIDDEN_SIZE, device="cuda", dtype=torch.bfloat16)
++    weight = (
++        torch.randn(EXPERTS, HIDDEN_SIZE, device="cuda", dtype=torch.bfloat16)
++        * 0.02
++    )
++    bias = torch.randn(EXPERTS, device="cuda", dtype=torch.bfloat16) * 0.02
++    actual = router_gemv(x, weight, bias)
++    expected = F.linear(x, weight, bias).float()
++    assert (actual - expected).abs().max().item() <= 2e-2
++
++    first = _get_zero_bias(EXPERTS, x.device)
++    second = _get_zero_bias(EXPERTS, x.device)
++    assert first.data_ptr() == second.data_ptr()
++    assert torch.count_nonzero(first).item() == 0
++
++
++@pytest.mark.parametrize("tokens", [1, 16])
++@pytest.mark.parametrize("scale_kind", ["none", "float", "tensor"])
++def test_fp8_kv_store_matches_reference(tokens: int, scale_kind: str):
++    torch.manual_seed(2000 + tokens)
++    shape = (tokens, 4, 128)
++    cache_k = torch.randn(shape, device="cuda", dtype=torch.bfloat16)
++    cache_v = torch.randn(shape, device="cuda", dtype=torch.bfloat16)
++    loc = torch.randperm(64, device="cuda", dtype=torch.int64)[:tokens].contiguous()
++    k_buffer = torch.zeros(
++        (64, 4, 128), device="cuda", dtype=torch.float8_e4m3fn
++    )
++    v_buffer = torch.zeros_like(k_buffer)
++    ref_k = torch.zeros_like(k_buffer)
++    ref_v = torch.zeros_like(v_buffer)
++
++    if scale_kind == "none":
++        k_scale = v_scale = None
++    elif scale_kind == "float":
++        k_scale = v_scale = 0.7
++    else:
++        k_scale = torch.tensor(0.7, device="cuda")
++        v_scale = torch.tensor(0.7, device="cuda")
++
++    ref_k_values = cache_k.clone()
++    ref_v_values = cache_v.clone()
++    if k_scale is not None:
++        ref_k_values.div_(k_scale)
++        ref_v_values.div_(v_scale)
++    ref_k[loc] = ref_k_values.to(torch.float8_e4m3fn)
++    ref_v[loc] = ref_v_values.to(torch.float8_e4m3fn)
++
++    fp8_kv_store(cache_k, cache_v, k_buffer, v_buffer, loc, k_scale, v_scale)
++    assert torch.equal(k_buffer.view(torch.uint8), ref_k.view(torch.uint8))
++    assert torch.equal(v_buffer.view(torch.uint8), ref_v.view(torch.uint8))
++
++
++def _gemma_rms_norm(
++    x: torch.Tensor, weight: torch.Tensor, eps: float
++) -> torch.Tensor:
++    x_fp32 = x.float()
++    variance = x_fp32.square().mean(dim=-1, keepdim=True)
++    return (
++        x_fp32 * torch.rsqrt(variance + eps) * (1.0 + weight.float())
++    ).to(torch.bfloat16)
++
++
++def _mtp_reference(
++    input_embeds: torch.Tensor,
++    hidden_states: torch.Tensor,
++    embedding_norm_weight: torch.Tensor,
++    hidden_norm_weight: torch.Tensor,
++    embedding_proj_weight: torch.Tensor,
++    hidden_proj_weight: torch.Tensor,
++) -> torch.Tensor:
++    rows = input_embeds.shape[0]
++    embedding = F.linear(
++        _gemma_rms_norm(input_embeds, embedding_norm_weight, EPS),
++        embedding_proj_weight,
++    )
++    hidden = _gemma_rms_norm(hidden_states, hidden_norm_weight, EPS)
++    hidden = F.linear(hidden.view(rows, HC, HIDDEN_SIZE), hidden_proj_weight)
++    return (embedding.unsqueeze(1) + hidden).view_as(hidden_states)
++
++
++@pytest.mark.parametrize("rows", [1, 5, 16])
++def test_mtp_entry_fused_matches_reference(rows: int):
++    torch.manual_seed(3000 + rows)
++    input_embeds = torch.randn(
++        rows, HIDDEN_SIZE, device="cuda", dtype=torch.bfloat16
++    )
++    hidden_states = torch.randn(
++        rows, HC * HIDDEN_SIZE, device="cuda", dtype=torch.bfloat16
++    )
++    embedding_norm_weight = (
++        torch.randn(HIDDEN_SIZE, device="cuda", dtype=torch.bfloat16) * 0.02
++    )
++    hidden_norm_weight = (
++        torch.randn(HC * HIDDEN_SIZE, device="cuda", dtype=torch.bfloat16) * 0.02
++    )
++    embedding_proj_weight = (
++        torch.randn(
++            HIDDEN_SIZE, HIDDEN_SIZE, device="cuda", dtype=torch.bfloat16
++        )
++        * 0.02
++    )
++    hidden_proj_weight = (
++        torch.randn(
++            HIDDEN_SIZE, HIDDEN_SIZE, device="cuda", dtype=torch.bfloat16
++        )
++        * 0.02
++    )
++    expected = _mtp_reference(
++        input_embeds,
++        hidden_states,
++        embedding_norm_weight,
++        hidden_norm_weight,
++        embedding_proj_weight,
++        hidden_proj_weight,
++    )
++    actual = mtp_entry_fused(
++        input_embeds,
++        hidden_states,
++        embedding_norm_weight,
++        hidden_norm_weight,
++        embedding_proj_weight,
++        hidden_proj_weight,
++        EPS,
++    )
++    assert (actual.float() - expected.float()).abs().max().item() <= 6.5e-2  # 2 bf16 ulps at |value|~4-8
+-- 
+2.43.0
+

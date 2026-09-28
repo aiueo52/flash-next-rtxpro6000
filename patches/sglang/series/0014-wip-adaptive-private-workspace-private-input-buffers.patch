@@ -1,0 +1,116 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: aiueo52 <aiueo52@users.noreply.github.com>
+Date: Wed, 2 Sep 2026 12:42:36 +0900
+Subject: [PATCH 014/105] wip(adaptive): private workspace + private input
+ buffers while building extra runtime states (diagnostic; did not fix the
+ acceptance drop)
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+---
+ adaptive_3_7.json                             |  1 +
+ adaptive_single3.json                         |  1 +
+ .../srt/model_executor/input_buffers.py       | 13 ++++++++++
+ .../sglang/srt/speculative/eagle_worker_v2.py | 26 +++++++++++++++++--
+ 4 files changed, 39 insertions(+), 2 deletions(-)
+ create mode 100644 adaptive_3_7.json
+ create mode 100644 adaptive_single3.json
+
+diff --git a/adaptive_3_7.json b/adaptive_3_7.json
+new file mode 100644
+index 0000000000..80c0d8c5bd
+--- /dev/null
++++ b/adaptive_3_7.json
+@@ -0,0 +1 @@
++{"1": {"candidate_steps": [3, 7], "ema_alpha": 0.05, "update_interval": 20, "warmup_batches": 50, "down_hysteresis": -1.5, "up_hysteresis": 1.5}}
+diff --git a/adaptive_single3.json b/adaptive_single3.json
+new file mode 100644
+index 0000000000..b8d4a40983
+--- /dev/null
++++ b/adaptive_single3.json
+@@ -0,0 +1 @@
++{"1": {"candidate_steps": [3]}}
+diff --git a/python/sglang/srt/model_executor/input_buffers.py b/python/sglang/srt/model_executor/input_buffers.py
+index 15d74385fa..b330f716c7 100644
+--- a/python/sglang/srt/model_executor/input_buffers.py
++++ b/python/sglang/srt/model_executor/input_buffers.py
+@@ -11,6 +11,17 @@ from sglang.srt.utils import is_npu
+ # Process-wide pool keyed by (name, numel, dtype, device); see share_input_buffer.
+ _PoolKey = Tuple[str, int, torch.dtype, torch.device]
+ _forward_input_buffer_pool: Dict[_PoolKey, torch.Tensor] = {}
++# When set, share_input_buffer hands back private allocations instead of
++# aliasing the pool (used while building extra adaptive runtime states so their
++# graph capture cannot clobber buffers the initial state's graphs already own).
++_private_input_buffers: bool = False
++
++
++def set_private_input_buffers(enabled: bool) -> bool:
++    global _private_input_buffers
++    previous = _private_input_buffers
++    _private_input_buffers = enabled
++    return previous
+ 
+ 
+ def share_input_buffer(name: str, new_buffer: torch.Tensor) -> torch.Tensor:
+@@ -33,6 +44,8 @@ def share_input_buffer(name: str, new_buffer: torch.Tensor) -> torch.Tensor:
+     filled immediately before each replay and the forwards that use them are
+     sequential / mutually exclusive.
+     """
++    if _private_input_buffers:
++        return new_buffer
+     key: _PoolKey = (name, new_buffer.numel(), new_buffer.dtype, new_buffer.device)
+     canonical = _forward_input_buffer_pool.get(key, None)
+     if canonical is None:
+diff --git a/python/sglang/srt/speculative/eagle_worker_v2.py b/python/sglang/srt/speculative/eagle_worker_v2.py
+index 95d48aa79b..3203969a70 100644
+--- a/python/sglang/srt/speculative/eagle_worker_v2.py
++++ b/python/sglang/srt/speculative/eagle_worker_v2.py
+@@ -1490,8 +1490,24 @@ class EAGLEWorkerV2(BaseSpecWorker):
+             speculative_num_draft_tokens,
+             cuda_graph_bs=cuda_graph_bs,
+         ):
+-            self._draft_worker.init_attention_backend()
+-            self._draft_worker._capture_cuda_graphs()
++            # Extra runtime states must not share the draft runner's global
++            # FlashInfer/attention workspace: plans captured into a shared
++            # workspace by this state's graphs would overwrite the plan data
++            # the initial state's graphs read at replay.
++            draft_runner = self._draft_worker.draft_runner
++            backup_draft_ws = getattr(draft_runner, "init_new_workspace", False)
++            draft_runner.init_new_workspace = True
++            from sglang.srt.model_executor.input_buffers import (
++                set_private_input_buffers,
++            )
++
++            backup_private = set_private_input_buffers(True)
++            try:
++                self._draft_worker.init_attention_backend()
++                self._draft_worker._capture_cuda_graphs()
++            finally:
++                draft_runner.init_new_workspace = backup_draft_ws
++                set_private_input_buffers(backup_private)
+ 
+             # Build target attention backend and CUDA graph runner
+             target_model_runner = self._target_worker.model_runner
+@@ -1512,6 +1528,11 @@ class EAGLEWorkerV2(BaseSpecWorker):
+                     self.device, self.gpu_id
+                 )
+                 target_graph_tic = time.perf_counter()
++                from sglang.srt.model_executor.input_buffers import (
++                    set_private_input_buffers as _set_private,
++                )
++
++                _backup_private_t = _set_private(True)
+                 target_graph_runner = TargetGraphRunnerCls(
+                     target_model_runner,
+                     attn_backend=target_attn_backend,
+@@ -1522,6 +1543,7 @@ class EAGLEWorkerV2(BaseSpecWorker):
+                     attn_backend=target_attn_backend,
+                     capture_bs=target_graph_runner.capture_bs,
+                 )
++                _set_private(_backup_private_t)
+                 target_graph_after_mem = get_available_gpu_memory(
+                     self.device, self.gpu_id
+                 )
+-- 
+2.43.0
+

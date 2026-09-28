@@ -1,0 +1,56 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: aiueo52 <aiueo52@users.noreply.github.com>
+Date: Wed, 2 Sep 2026 11:27:27 +0900
+Subject: [PATCH 008/105] ngram_chain: implement create_future_map and fall
+ back to EAGLE enum helpers
+
+The SpeculativeAlgorithm enum gained create_future_map (used by the overlap
+scheduler) after NGRAM_CHAIN was written; CustomSpecAlgo did not provide it.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+---
+ .../srt/speculative/ngram_chain_worker.py     | 28 +++++++++++++++++++
+ 1 file changed, 28 insertions(+)
+
+diff --git a/python/sglang/srt/speculative/ngram_chain_worker.py b/python/sglang/srt/speculative/ngram_chain_worker.py
+index f32ac76b96..d8482c2df1 100644
+--- a/python/sglang/srt/speculative/ngram_chain_worker.py
++++ b/python/sglang/srt/speculative/ngram_chain_worker.py
+@@ -358,6 +358,34 @@ class NgramChainAlgorithm(CustomSpecAlgo):
+     def is_eagle(self) -> bool:
+         return True
+ 
++    def create_future_map(
++        self,
++        device,
++        req_to_token_pool,
++        needs_cpu_seq_lens: bool = True,
++        needs_confidence_relay: bool = False,
++    ):
++        from sglang.srt.managers.overlap_utils import FutureMap
++
++        return FutureMap(
++            device,
++            self,
++            req_to_token_pool,
++            needs_cpu_seq_lens,
++            needs_confidence_relay,
++        )
++
++    def __getattr__(self, name: str):
++        # The SpeculativeAlgorithm enum grows helper methods over time; NGRAM_CHAIN
++        # is EAGLE-shaped, so fall back to EAGLE's implementation for anything the
++        # custom-algorithm base class does not define.
++        if name.startswith("__"):
++            raise AttributeError(name)
++        eagle_attr = getattr(SpeculativeAlgorithm.EAGLE, name)
++        if callable(eagle_attr):
++            return eagle_attr
++        return eagle_attr
++
+     def supports_grammar_overlap(self) -> bool:
+         return True
+ 
+-- 
+2.43.0
+

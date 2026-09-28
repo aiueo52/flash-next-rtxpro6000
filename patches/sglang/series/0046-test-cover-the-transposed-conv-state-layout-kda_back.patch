@@ -1,0 +1,78 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: aiueo52 <aiueo52@users.noreply.github.com>
+Date: Sat, 5 Sep 2026 15:31:28 +0900
+Subject: [PATCH 046/105] test: cover the transposed conv-state layout
+ (kda_backend view)
+
+kda_backend passes conv_state / intermediate_conv_window as
+transpose(-1, -2) views, so the chain kernel's stride handling needs a
+case that is not the contiguous gdn layout.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+---
+ .../test_causal_conv1d_chain_parallel.py      | 52 +++++++++++++++++++
+ 1 file changed, 52 insertions(+)
+
+diff --git a/test/registered/kernels/ops/mamba/test_causal_conv1d_chain_parallel.py b/test/registered/kernels/ops/mamba/test_causal_conv1d_chain_parallel.py
+index e608fd8377..dda5bb2237 100644
+--- a/test/registered/kernels/ops/mamba/test_causal_conv1d_chain_parallel.py
++++ b/test/registered/kernels/ops/mamba/test_causal_conv1d_chain_parallel.py
+@@ -191,3 +191,55 @@ def test_decode_and_tree_paths_untouched():
+ 
+ if __name__ == "__main__":
+     raise SystemExit(pytest.main([__file__, "-q"]))
++
++
++def test_transposed_state_layout():
++    """kda_backend passes conv_state/intermediate window as transposed views;
++    the chain kernel must honour the strides the same way the serial one does."""
++    _skip_if_no_cuda()
++    bs, dim, seqlen, width = 2, 256, 8, 4
++    dtype = torch.bfloat16
++    ncl = 6
++    g = torch.Generator(device="cuda").manual_seed(11)
++    x = (
++        torch.randn((bs, seqlen, dim), generator=g, device="cuda", dtype=torch.float32)
++        .to(dtype)
++        .transpose(1, 2)
++    )
++    state_t = torch.randn(
++        (ncl, width - 1, dim), generator=g, device="cuda", dtype=torch.float32
++    ).to(dtype)
++    weight = torch.randn(
++        (dim, width), generator=g, device="cuda", dtype=torch.float32
++    ).to(dtype)
++    bias = torch.randn((dim,), generator=g, device="cuda", dtype=torch.float32).to(dtype)
++    idx = torch.tensor([0, 3], device="cuda", dtype=torch.int32)
++    iidx = torch.tensor([1, 4], device="cuda", dtype=torch.int32)
++
++    def go(chain):
++        st = state_t.clone()
++        inter = torch.zeros((ncl, seqlen, width - 1, dim), device="cuda", dtype=dtype)
++        out = torch.empty_like(x)
++        old = ccv._CHAIN_PARALLEL_ENABLED
++        ccv._CHAIN_PARALLEL_ENABLED = chain
++        try:
++            ccv.causal_conv1d_update(
++                x,
++                st.transpose(-1, -2),
++                weight,
++                bias,
++                "silu",
++                conv_state_indices=idx,
++                intermediate_conv_window=inter.transpose(-1, -2),
++                intermediate_state_indices=iidx,
++                out=out,
++            )
++        finally:
++            ccv._CHAIN_PARALLEL_ENABLED = old
++        torch.cuda.synchronize()
++        return out, st, inter
++
++    a, b = go(False), go(True)
++    assert torch.equal(a[0], b[0])
++    assert torch.equal(a[1], b[1])
++    assert torch.equal(a[2], b[2])
+-- 
+2.43.0
+

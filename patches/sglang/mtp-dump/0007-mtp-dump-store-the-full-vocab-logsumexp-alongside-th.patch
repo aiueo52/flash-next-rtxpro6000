@@ -1,0 +1,82 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: aiueo52 <aiueo52@users.noreply.github.com>
+Date: Fri, 4 Sep 2026 18:42:00 +0900
+Subject: [PATCH 7/9] mtp dump: store the full-vocab logsumexp alongside the
+ top-K
+
+With SGLANG_MTP_DUMP_TOPK=K the dump now also carries `lse` fp16 [T], the
+logsumexp of the full-vocabulary target logits computed in the same chunk
+loop.  Without it a soft-target consumer cannot tell how much probability
+mass lives outside the K stored entries; with it the true top-K mass is
+exp(logsumexp(topk_logits) - lse).
+
+Env-gated exactly like the top-K itself (nothing is allocated or computed
+when SGLANG_MTP_DUMP_TOPK is 0).
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+---
+ python/sglang/srt/models/mtp_dump.py | 21 ++++++++++++++++++---
+ 1 file changed, 18 insertions(+), 3 deletions(-)
+
+diff --git a/python/sglang/srt/models/mtp_dump.py b/python/sglang/srt/models/mtp_dump.py
+index 00e7f7e779..4d00e0564b 100644
+--- a/python/sglang/srt/models/mtp_dump.py
++++ b/python/sglang/srt/models/mtp_dump.py
+@@ -16,8 +16,13 @@ per token:
+                                     hidden through the target lm_head)
+     seq_offsets    int32 [S+1]      per-request slice boundaries
+     prefix_lens    int32 [S]        radix-cache prefix length per request
+-    top4_ids       int32 [T, K]     optional (SGLANG_MTP_DUMP_TOPK=K)
+-    top4_logits    fp16  [T, K]     optional
++    topk_ids       int32 [T, K]     optional (SGLANG_MTP_DUMP_TOPK=K)
++    topk_logits    fp16  [T, K]     optional
++    lse            fp16  [T]        optional, written with the top-K: the
++                                    logsumexp of the FULL-vocabulary target
++                                    logits, so a consumer can recover the
++                                    probability mass outside the top-K as
++                                    ``1 - exp(logsumexp(topk_logits) - lse)``
+ 
+ Design constraints:
+   * Decode / target-verify / draft forwards are never touched, so the CUDA
+@@ -175,20 +180,29 @@ class MTPDumper:
+         n = int(input_ids.shape[0])
+         argmax = torch.empty(n, dtype=torch.int32, device=mixed.device)
+         topk_ids = topk_vals = None
++        lse = None
+         if self.topk > 0:
+             topk_ids = torch.empty(n, self.topk, dtype=torch.int32, device=mixed.device)
+             topk_vals = torch.empty(
+                 n, self.topk, dtype=torch.float16, device=mixed.device
+             )
++            lse = torch.empty(n, dtype=torch.float16, device=mixed.device)
+         try:
+             for start in range(0, n, self.chunk):
+                 end = min(n, start + self.chunk)
+                 logits = project_lm_head(lm_head, mixed[start:end])
+                 argmax[start:end] = logits.argmax(dim=-1).to(torch.int32)
+                 if self.topk > 0:
+-                    vals, ids = torch.topk(logits.float(), self.topk, dim=-1)
++                    logits32 = logits.float()
++                    vals, ids = torch.topk(logits32, self.topk, dim=-1)
+                     topk_ids[start:end] = ids.to(torch.int32)
+                     topk_vals[start:end] = vals.to(torch.float16)
++                    # Full-vocabulary logsumexp, so the mass outside the top-K
++                    # is recoverable: p(top-K) = exp(logsumexp(topk) - lse).
++                    lse[start:end] = torch.logsumexp(logits32, dim=-1).to(
++                        torch.float16
++                    )
++                    del logits32
+                 del logits
+         except Exception as exc:  # noqa: BLE001
+             # target_argmax is the training label: a dump without it is useless,
+@@ -230,6 +244,7 @@ class MTPDumper:
+         if self.topk > 0:
+             tensors["topk_ids"] = topk_ids.cpu()
+             tensors["topk_logits"] = topk_vals.cpu()
++            tensors["lse"] = lse.cpu()
+ 
+         self.counter += 1
+         self.rows_written += n
+-- 
+2.43.0
+

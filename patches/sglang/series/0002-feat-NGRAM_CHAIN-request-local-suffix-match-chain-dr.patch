@@ -1,0 +1,860 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: aiueo52 <aiueo52@users.noreply.github.com>
+Date: Tue, 1 Sep 2026 15:51:42 +0900
+Subject: [PATCH 002/105] feat: NGRAM_CHAIN request-local suffix-match chain
+ draft provider
+
+Registers an EAGLE-family provider that drafts speculative_num_steps tokens
+by suffix-matching the request's own history (prompt + committed output) and
+skips the MTP draft forwards entirely on full-batch hits; any miss falls back
+to the unchanged NEXTN chain. One-hot draft_probs keep rejection sampling
+exact at temperature > 0.
+
+CPU-only unit tests; GPU validation checklist in NGRAM_CHAIN.md.
+Implemented by Codex (gpt-5.6-sol high) under supervisor review.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+---
+ .../sglang/srt/arg_groups/speculative_hook.py |   9 +-
+ python/sglang/srt/server_args.py              |  21 +-
+ python/sglang/srt/speculative/NGRAM_CHAIN.md  |  56 +++
+ .../srt/speculative/ngram_chain_worker.py     | 399 ++++++++++++++++++
+ python/sglang/srt/speculative/spec_info.py    |   5 +
+ serve-ngram-chain.sh                          |  62 +++
+ .../unit/spec/test_ngram_chain_worker.py      | 209 +++++++++
+ 7 files changed, 755 insertions(+), 6 deletions(-)
+ create mode 100644 python/sglang/srt/speculative/NGRAM_CHAIN.md
+ create mode 100644 python/sglang/srt/speculative/ngram_chain_worker.py
+ create mode 100755 serve-ngram-chain.sh
+ create mode 100644 test/registered/unit/spec/test_ngram_chain_worker.py
+
+diff --git a/python/sglang/srt/arg_groups/speculative_hook.py b/python/sglang/srt/arg_groups/speculative_hook.py
+index 4af8d2ec13..263bb0f18e 100644
+--- a/python/sglang/srt/arg_groups/speculative_hook.py
++++ b/python/sglang/srt/arg_groups/speculative_hook.py
+@@ -790,13 +790,12 @@ def _handle_eagle_family(server_args: ServerArgs) -> None:
+ 
+     if cfg.speculative_use_rejection_sampling:
+         # Resolved alias by now: NEXTN -> EAGLE, Gemma4 draft -> FROZEN_KV_MTP.
+-        # Only the EAGLE/EAGLE3 draft workers emit a target-vocab proposal that
+-        # the rejection-sampling kernel consumes; everything else (STANDALONE,
+-        # FROZEN_KV_MTP, NGRAM, DFLASH) is unsupported.
+-        if cfg.speculative_algorithm not in ("EAGLE", "EAGLE3"):
++        # EAGLE/EAGLE3 emit target-vocab proposals, and NGRAM_CHAIN emits a
++        # target-vocab delta proposal. Everything else is unsupported.
++        if cfg.speculative_algorithm not in ("EAGLE", "EAGLE3", "NGRAM_CHAIN"):
+             raise NotImplementedError(
+                 "--speculative-use-rejection-sampling is only supported for "
+-                "EAGLE / EAGLE3 / NEXTN, not "
++                "EAGLE / EAGLE3 / NEXTN / NGRAM_CHAIN, not "
+                 f"speculative_algorithm={cfg.speculative_algorithm}."
+             )
+         if cfg.speculative_eagle_topk != 1:
+diff --git a/python/sglang/srt/server_args.py b/python/sglang/srt/server_args.py
+index d76a5d91db..80e1cafaad 100644
+--- a/python/sglang/srt/server_args.py
++++ b/python/sglang/srt/server_args.py
+@@ -2152,7 +2152,7 @@ class ServerArgs:
+     # -------------------------------------------------------------------------
+     speculative_algorithm: A[
+         Optional[str],
+-        "Speculative algorithm. Builtins: EAGLE, EAGLE3, NEXTN, STANDALONE, NGRAM, DFLASH, DSPARK. Or any name registered via `SpeculativeAlgorithm.register`.",
++        "Speculative algorithm. Builtins: EAGLE, EAGLE3, NEXTN, STANDALONE, NGRAM, DFLASH, DSPARK. Registered providers include NGRAM_CHAIN.",
+         NS("spec"),
+     ] = None
+     speculative_draft_model_path: A[
+@@ -2429,6 +2429,25 @@ class ServerArgs:
+         NS("spec"),
+     ] = 10000000
+ 
++    # -------------------------------------------------------------------------
++    # Speculative decoding (request-local ngram chain)
++    # -------------------------------------------------------------------------
++    speculative_ngram_chain_min_size: A[
++        int,
++        "Minimum suffix n-gram size for NGRAM_CHAIN.",
++        NS("spec"),
++    ] = 4
++    speculative_ngram_chain_max_size: A[
++        int,
++        "Maximum suffix n-gram size for NGRAM_CHAIN.",
++        NS("spec"),
++    ] = 12
++    speculative_ngram_chain_window_size: A[
++        int,
++        "Maximum request-local history tokens retained by NGRAM_CHAIN.",
++        NS("spec"),
++    ] = 32768
++
+     # -------------------------------------------------------------------------
+     # Expert parallelism
+     # -------------------------------------------------------------------------
+diff --git a/python/sglang/srt/speculative/NGRAM_CHAIN.md b/python/sglang/srt/speculative/NGRAM_CHAIN.md
+new file mode 100644
+index 0000000000..666833a7d7
+--- /dev/null
++++ b/python/sglang/srt/speculative/NGRAM_CHAIN.md
+@@ -0,0 +1,56 @@
++# NGRAM_CHAIN
++
++`NGRAM_CHAIN` is an EAGLE-compatible speculative provider for Qwen4-Exp MTP.
++For each request it keeps a bounded host copy of the prompt and committed output,
++then looks up the request's current suffix from the largest configured n-gram to
++the smallest. A full match supplies the linear chain that followed the previous
++occurrence. The existing EAGLE tree builder, target verification, sampling, KV
++compaction, draft-extend, and GDN commit paths are unchanged.
++
++The index records an occurrence only once all `speculative_num_steps` following
++tokens exist. Consequently a partial continuation is a miss and falls back to
++MTP; NGRAM_CHAIN never pads or verifies a short chain. Accepted tokens are staged
++after verify and appended to the host index at the next draft boundary. Per-key
++position deques retain the last in-window occurrence while supporting incremental
++window eviction.
++
++## Flags
++
++- `--speculative-algorithm NGRAM_CHAIN`
++- `--speculative-ngram-chain-min-size` (default `4`)
++- `--speculative-ngram-chain-max-size` (default `12`)
++- `--speculative-ngram-chain-window-size` (default `32768` tokens)
++- `--speculative-num-steps` controls the full proposal width.
++
++NGRAM_CHAIN requires EAGLE `topk=1`; therefore
++`speculative_num_draft_tokens` is `speculative_num_steps + 1`. Its delta
++`draft_probs` place probability one on each proposed token, which is the exact
++proposal distribution used when rejection sampling is enabled at temperature
++greater than zero.
++
++## v0 limitations
++
++- The optimized target is batch size 1.
++- A batch bypasses MTP only when every request has a full-width hit. Mixed
++  hit/miss batches fall back to MTP as a whole.
++- Partial continuations are misses; there is no truncation or padding policy.
++- Adaptive speculative step counts are unsupported because index eligibility is
++  built for one fixed chain width.
++- Request state is released when its request leaves the active decode batch.
++
++## GPU validation checklist
++
++- Needle test: repeat a unique prompt/output span, confirm the expected 15-token
++  chain is drafted, and verify no MTP draft CUDA graph launches on the hit.
++- Record the acceptance-length histogram and tokens-per-verify for NGRAM_CHAIN,
++  then compare with a `NEXTN` baseline using the same requests and sampling args.
++- Measure per-step time against the `NEXTN` baseline and confirm
++  `_flush_pending_commits` does not stall the overlap scheduler with a fresh
++  `.cpu()` D2H of staged commit tensors. If it does, consume the result
++  processor's already-synchronized CPU token lists instead of issuing another
++  D2H transfer.
++- Repeat at temperature greater than zero with rejection sampling enabled;
++  confirm each draft-probability row sums to one and is nonzero only at the
++  proposed token, then compare output distributions against non-spec decoding.
++- Exercise batch size 1 misses and mixed batches, confirming unchanged MTP
++  fallback, KV compaction, and GDN cache commit behavior.
+diff --git a/python/sglang/srt/speculative/ngram_chain_worker.py b/python/sglang/srt/speculative/ngram_chain_worker.py
+new file mode 100644
+index 0000000000..f32ac76b96
+--- /dev/null
++++ b/python/sglang/srt/speculative/ngram_chain_worker.py
+@@ -0,0 +1,399 @@
++from __future__ import annotations
++
++from collections import defaultdict, deque
++from collections.abc import Iterable, Sequence
++
++import msgspec
++import torch
++from sglang.srt.arg_groups.overrides import declare_resolution, resolving_view
++from sglang.srt.runtime_context import get_device, get_schedule, get_spec
++from sglang.srt.speculative.base_spec_worker import BaseSpecWorker
++from sglang.srt.speculative.eagle_worker_common import (
++    build_eagle_verify_input,
++    prepare_for_draft,
++)
++from sglang.srt.speculative.eagle_worker_v2 import EagleDraftWorker, EAGLEWorkerV2
++from sglang.srt.speculative.spec_info import SpeculativeAlgorithm
++from sglang.srt.speculative.spec_registry import CustomSpecAlgo
++from sglang.srt.speculative.spec_utils import get_plan_stream
++
++
++class NgramChainMatch(msgspec.Struct, frozen=True):
++    tokens: tuple[int, ...]
++    ngram_size: int
++    position: int
++
++
++class RequestNgramChainIndex:
++    """Bounded request-local suffix index with full-width continuations only."""
++
++    def __init__(
++        self,
++        *,
++        min_size: int,
++        max_size: int,
++        window_size: int,
++        num_steps: int,
++    ) -> None:
++        if min_size <= 0 or max_size < min_size:
++            raise ValueError("ngram sizes must satisfy 0 < min_size <= max_size")
++        if window_size <= 0:
++            raise ValueError("window_size must be positive")
++        if num_steps <= 0:
++            raise ValueError("num_steps must be positive")
++
++        self.min_size = min_size
++        self.max_size = max_size
++        self.window_size = window_size
++        self.num_steps = num_steps
++        self._tokens: list[int] = []
++        self._storage_base = 0
++        self._active_base = 0
++        self._positions: dict[int, dict[tuple[int, ...], deque[int]]] = {
++            n: defaultdict(deque) for n in range(min_size, max_size + 1)
++        }
++
++    def __len__(self) -> int:
++        return self._end_position - self._active_base
++
++    @property
++    def tokens(self) -> tuple[int, ...]:
++        offset = self._active_base - self._storage_base
++        return tuple(self._tokens[offset:])
++
++    @property
++    def _end_position(self) -> int:
++        return self._storage_base + len(self._tokens)
++
++    def _slice(self, position: int, length: int) -> tuple[int, ...]:
++        offset = position - self._storage_base
++        return tuple(self._tokens[offset : offset + length])
++
++    def seed(self, tokens: Iterable[int]) -> None:
++        self.append(tokens)
++
++    def append(self, tokens: Iterable[int]) -> None:
++        for token in tokens:
++            self._tokens.append(int(token))
++            end = self._end_position
++
++            # An occurrence enters the lookup only after a complete continuation
++            # exists. Thus the newest suffix never shadows an older usable match.
++            for ngram_size in range(self.min_size, self.max_size + 1):
++                position = end - self.num_steps - ngram_size
++                if position < self._active_base:
++                    continue
++                key = self._slice(position, ngram_size)
++                self._positions[ngram_size][key].append(position)
++
++            self._evict_to_window()
++
++    def _evict_to_window(self) -> None:
++        while len(self) > self.window_size:
++            position = self._active_base
++            end = self._end_position
++            for ngram_size in range(self.min_size, self.max_size + 1):
++                if position + ngram_size + self.num_steps > end:
++                    continue
++                key = self._slice(position, ngram_size)
++                positions = self._positions[ngram_size].get(key)
++                if positions and positions[0] == position:
++                    positions.popleft()
++                    if not positions:
++                        del self._positions[ngram_size][key]
++            self._active_base += 1
++
++        dead_prefix = self._active_base - self._storage_base
++        if dead_prefix >= self.window_size:
++            self._tokens = self._tokens[dead_prefix:]
++            self._storage_base = self._active_base
++
++    def propose(self) -> NgramChainMatch | None:
++        end = self._end_position
++        for ngram_size in range(self.max_size, self.min_size - 1, -1):
++            if len(self) < ngram_size:
++                continue
++            key = self._slice(end - ngram_size, ngram_size)
++            positions = self._positions[ngram_size].get(key)
++            if not positions:
++                continue
++            position = positions[-1]
++            continuation = self._slice(position + ngram_size, self.num_steps)
++            if len(continuation) == self.num_steps:
++                return NgramChainMatch(continuation, ngram_size, position)
++        return None
++
++
++class _PendingCommits(msgspec.Struct):
++    request_ids: tuple[object, ...]
++    tokens: torch.Tensor
++    accept_lens: torch.Tensor
++    stride: int
++
++
++class NgramChainDraftWorker(EagleDraftWorker):
++    """EAGLE draft worker that bypasses MTP on full request-local matches."""
++
++    def __init__(self, *args, **kwargs) -> None:
++        super().__init__(*args, **kwargs)
++        spec = get_spec()
++        self.ngram_chain_min_size = spec.speculative_ngram_chain_min_size
++        self.ngram_chain_max_size = spec.speculative_ngram_chain_max_size
++        self.ngram_chain_window_size = spec.speculative_ngram_chain_window_size
++        self._request_indexes: dict[object, RequestNgramChainIndex] = {}
++        self._pending_commits: deque[_PendingCommits] = deque()
++
++    def clear_request_indexes(self) -> None:
++        self._request_indexes.clear()
++        self._pending_commits.clear()
++
++    def seed_requests(self, requests: Sequence[object]) -> None:
++        for request in requests:
++            if request.rid in self._request_indexes:
++                continue
++            index = self._new_index()
++            index.seed(request.origin_input_ids)
++            index.append(request.output_ids)
++            self._request_indexes[request.rid] = index
++
++    def stage_commits(
++        self,
++        requests: Sequence[object],
++        tokens: torch.Tensor,
++        accept_lens: torch.Tensor,
++        stride: int,
++    ) -> None:
++        self._pending_commits.append(
++            _PendingCommits(
++                request_ids=tuple(request.rid for request in requests),
++                tokens=tokens.detach().clone(),
++                accept_lens=accept_lens.detach().clone(),
++                stride=stride,
++            )
++        )
++
++    def _new_index(self) -> RequestNgramChainIndex:
++        return RequestNgramChainIndex(
++            min_size=self.ngram_chain_min_size,
++            max_size=self.ngram_chain_max_size,
++            window_size=self.ngram_chain_window_size,
++            num_steps=self.speculative_num_steps,
++        )
++
++    def _flush_pending_commits(self) -> None:
++        while self._pending_commits:
++            pending = self._pending_commits.popleft()
++            tokens = pending.tokens.cpu().tolist()
++            accept_lens = pending.accept_lens.cpu().tolist()
++            for row, (request_id, num_accept_tokens) in enumerate(
++                zip(pending.request_ids, accept_lens)
++            ):
++                index = self._request_indexes.get(request_id)
++                if index is None:
++                    continue
++                start = row * pending.stride
++                index.append(tokens[start : start + num_accept_tokens])
++
++    def _drop_departed_requests(self, requests: Sequence[object]) -> None:
++        active_ids = {request.rid for request in requests}
++        for request_id in self._request_indexes.keys() - active_ids:
++            del self._request_indexes[request_id]
++
++    def _find_batch_matches(
++        self, requests: Sequence[object]
++    ) -> list[NgramChainMatch] | None:
++        matches = []
++        for request in requests:
++            match = self._request_indexes[request.rid].propose()
++            if match is None:
++                return None
++            matches.append(match)
++        return matches
++
++    def _build_ngram_contract(
++        self,
++        proposals: Sequence[Sequence[int]],
++        *,
++        vocab_size: int,
++        device: torch.device | str | None = None,
++    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
++        device = self.device if device is None else device
++        draft_tokens = torch.tensor(proposals, dtype=torch.long, device=device)
++        if (
++            draft_tokens.ndim != 2
++            or draft_tokens.shape[1] != self.speculative_num_steps
++        ):
++            raise ValueError(
++                "NGRAM_CHAIN proposals must be a full [batch, speculative_num_steps] chain"
++            )
++        bs = draft_tokens.shape[0]
++        if bs > self._topk1_parents_prealloc.shape[0]:
++            raise ValueError("NGRAM_CHAIN batch exceeds topk=1 preallocation")
++        draft_probs = torch.zeros(
++            (bs, self.speculative_num_steps, vocab_size),
++            dtype=torch.float32,
++            device=device,
++        )
++        draft_probs.scatter_(2, draft_tokens.unsqueeze(-1), 1.0)
++        return (
++            self._topk1_parents_prealloc[:bs],
++            self._topk1_score_indices_prealloc[:bs],
++            draft_tokens,
++            draft_probs,
++        )
++
++    def _draft_mtp_chain(self, batch):
++        return super().draft(batch)
++
++    def draft(self, batch):
++        if batch.forward_mode.is_idle():
++            return self._draft_mtp_chain(batch)
++
++        self._flush_pending_commits()
++        self.seed_requests(batch.reqs)
++        self._drop_departed_requests(batch.reqs)
++        matches = self._find_batch_matches(batch.reqs)
++        if matches is None:
++            # v0 keeps one tree shape per batch: any miss (including a partial
++            # continuation) sends the whole mixed batch through unchanged MTP.
++            return self._draft_mtp_chain(batch)
++
++        draft_input = batch.spec_info
++        # Preserve the normal draft-cache location bookkeeping. No draft model
++        # forward or draft CUDA graph is executed on this path.
++        prepare_for_draft(
++            draft_input,
++            self.req_to_token_pool,
++            batch,
++            self.cuda_graph_runner,
++            self.draft_runner,
++            self.topk,
++            self.speculative_num_steps,
++        )
++        parent_list, top_scores_index, draft_tokens, draft_probs = (
++            self._build_ngram_contract(
++                [match.tokens for match in matches],
++                vocab_size=self.target_worker.model_config.vocab_size,
++            )
++        )
++        return build_eagle_verify_input(
++            batch,
++            draft_input,
++            parent_list,
++            top_scores_index,
++            draft_tokens,
++            draft_probs,
++            target_worker=self.target_worker,
++            topk=self.topk,
++            num_steps=self.speculative_num_steps,
++            num_draft_tokens=self.speculative_num_draft_tokens,
++            tree_mask_mode=self.tree_mask_mode,
++            device=self.device,
++        )
++
++
++class NgramChainWorkerV2(EAGLEWorkerV2):
++    def __init__(self, server_args, gpu_id, ps, nccl_port, target_worker) -> None:
++        # Mirror EAGLEWorkerV2 setup so only one draft model is constructed.
++        BaseSpecWorker.__init__(self)
++        self.server_args = server_args
++        self.topk = get_spec().speculative_eagle_topk
++        self.speculative_num_steps = get_spec().speculative_num_steps
++        self.speculative_num_draft_tokens = get_spec().speculative_num_draft_tokens
++        self.ps = ps
++        self.gpu_id = gpu_id
++        self.device = get_device().device
++        self._target_worker = target_worker
++        self.page_size = get_schedule().page_size
++        self.speculative_algorithm = SpeculativeAlgorithm.from_string(
++            get_spec().speculative_algorithm
++        )
++        self._draft_worker = NgramChainDraftWorker(
++            server_args, gpu_id, ps, nccl_port, target_worker
++        )
++        self.adaptive_controller = None
++        self.num_new_pages_per_topk = torch.empty(
++            (), dtype=torch.int64, device=self.device
++        )
++        self.extend_lens = torch.empty((), dtype=torch.int64, device=self.device)
++        self.plan_stream, self.plan_stream_ctx = get_plan_stream(self.device)
++
++    def clear_cache_pool(self):
++        super().clear_cache_pool()
++        self._draft_worker.clear_request_indexes()
++
++    def forward_batch_generation(self, batch, on_publish=None, grammar_barrier=None):
++        was_extend = batch.forward_mode.is_extend() or batch.is_extend_in_batch
++        was_idle = batch.forward_mode.is_idle()
++        if was_extend and not was_idle:
++            self._draft_worker.seed_requests(batch.reqs)
++
++        batch_output = super().forward_batch_generation(
++            batch, on_publish=on_publish, grammar_barrier=grammar_barrier
++        )
++        if was_idle:
++            return batch_output
++
++        if was_extend:
++            # Middle chunk outputs are not committed by the result processor.
++            accept_lens = torch.tensor(
++                [
++                    0 if request.inflight_middle_chunks > 0 else 1
++                    for request in batch.reqs
++                ],
++                dtype=torch.int32,
++                device=batch_output.next_token_ids.device,
++            )
++            stride = 1
++        else:
++            accept_lens = batch_output.accept_lens
++            stride = batch_output.speculative_num_draft_tokens
++        self._draft_worker.stage_commits(
++            batch.reqs, batch_output.next_token_ids, accept_lens, stride
++        )
++        return batch_output
++
++
++class NgramChainAlgorithm(CustomSpecAlgo):
++    def is_eagle(self) -> bool:
++        return True
++
++    def supports_grammar_overlap(self) -> bool:
++        return True
++
++    def carries_draft_hidden_states(self) -> bool:
++        return True
++
++    def handle_server_args(self, server_args) -> None:
++        from sglang.srt.arg_groups.speculative_hook import _handle_eagle_family
++
++        cfg = resolving_view(server_args)
++        if cfg.speculative_adaptive:
++            raise ValueError("NGRAM_CHAIN does not support adaptive speculative steps")
++        if cfg.speculative_eagle_topk is None:
++            declare_resolution(
++                server_args,
++                "NgramChainAlgorithm.handle_server_args",
++                speculative_eagle_topk=1,
++            )
++        elif cfg.speculative_eagle_topk != 1:
++            raise ValueError("NGRAM_CHAIN requires --speculative-eagle-topk 1")
++
++        _handle_eagle_family(server_args)
++        cfg = resolving_view(server_args)
++        if cfg.speculative_ngram_chain_min_size <= 0:
++            raise ValueError("--speculative-ngram-chain-min-size must be positive")
++        if cfg.speculative_ngram_chain_max_size < cfg.speculative_ngram_chain_min_size:
++            raise ValueError(
++                "--speculative-ngram-chain-max-size must be >= "
++                "--speculative-ngram-chain-min-size"
++            )
++        if cfg.speculative_ngram_chain_window_size <= 0:
++            raise ValueError("--speculative-ngram-chain-window-size must be positive")
++
++
++@SpeculativeAlgorithm.register(
++    "NGRAM_CHAIN", supports_overlap=True, spec_class=NgramChainAlgorithm
++)
++def _ngram_chain_worker_factory(server_args):
++    return NgramChainWorkerV2
+diff --git a/python/sglang/srt/speculative/spec_info.py b/python/sglang/srt/speculative/spec_info.py
+index 97ca92d31f..3a2cbb9aa7 100644
+--- a/python/sglang/srt/speculative/spec_info.py
++++ b/python/sglang/srt/speculative/spec_info.py
+@@ -55,6 +55,11 @@ class SpeculativeAlgorithm(Enum):
+             return cls[upper]
+         except KeyError:
+             pass
++        if upper == "NGRAM_CHAIN":
++            # Built as a registered EAGLE-like provider rather than an enum member.
++            # Import lazily to avoid loading the EAGLE worker for non-spec servers.
++            from sglang.srt.speculative import ngram_chain_worker  # noqa: F401
++
+         spec = _get_registered_spec(upper)
+         if spec is not None:
+             return spec
+diff --git a/serve-ngram-chain.sh b/serve-ngram-chain.sh
+new file mode 100755
+index 0000000000..0bacc17e1d
+--- /dev/null
++++ b/serve-ngram-chain.sh
+@@ -0,0 +1,62 @@
++#!/bin/bash
++# NGRAM_CHAIN experiment: request-local suffix hits bypass NEXTN draft forwards.
++# Derived from serve-local.sh; keeps its Qwen4-Exp runtime settings.
++# レビュー反映版の起動スクリプト (serve-flash-next.sh ベース)
++# 変更点: 127.0.0.1バインド / trust-remote-code除去 / NIXL・HiCache無効 /
++#         ctx 262144(YaRN外挿なし) / mem-fraction 0.92 / CUDAはmamba env
++set -euo pipefail
++REPO="$(cd "$(dirname "$0")" && pwd)"
++export CUDA_HOME=$HOME/tools/mamba/envs/cuda13
++export CUDACXX=$CUDA_HOME/bin/nvcc
++export PATH="$REPO/.venv/bin:$CUDA_HOME/bin:$PATH"
++# conda-layout CUDA: headers live under targets/, not $CUDA_HOME/include
++export CPATH="$CUDA_HOME/targets/x86_64-linux/include${CPATH:+:$CPATH}"
++export LIBRARY_PATH="$CUDA_HOME/lib${LIBRARY_PATH:+:$LIBRARY_PATH}"
++export CC=/usr/bin/gcc CXX=/usr/bin/g++ CUDAHOSTCXX=/usr/bin/g++
++export TORCH_CUDA_ARCH_LIST=12.0
++CACHE_BASE="$REPO/.cache"
++mkdir -p "$CACHE_BASE"
++export HF_HOME="$CACHE_BASE/hf" XDG_CACHE_HOME="$CACHE_BASE/xdg"
++export TRITON_CACHE_DIR="$CACHE_BASE/triton" SGLANG_JIT_CACHE_DIR="$CACHE_BASE/jit"
++TARGET_MODEL="${TARGET_MODEL:-$HOME/models/RadixArk/Qwen3.8-Flash-Next-NVFP4}"
++MEM_FRACTION="${MEM_FRACTION:-0.96}"
++CONTEXT_LENGTH="${CONTEXT_LENGTH:-262144}"
++PORT="${PORT:-8001}"
++# mambaステートプール: spec込みで1リクエスト=9スロット(S=5+D=4)。24=2並列分。
++# シングルユーザーなら10に絞ると0.8GBをKVプールへ回せる
++MAMBA_SLOTS="${MAMBA_SLOTS:-24}"
++# KVプールのトークン数直接指定(未指定=SGLang自動見積り。自動値はこの構成では39424と
++# 極端に保守的なので、長文が要るときは明示する。1トークン≈13.5KB)
++MAX_TOTAL_TOKENS="${MAX_TOTAL_TOKENS:-}"
++
++# 262144(ネイティブ上限)超は元フォークのqualified構成どおりfactor-2 YaRNで524288まで拡張
++EXTRA_ARGS=()
++if [ -n "$MAX_TOTAL_TOKENS" ]; then
++  EXTRA_ARGS+=(--max-total-tokens "$MAX_TOTAL_TOKENS")
++fi
++if [ "$CONTEXT_LENGTH" -gt 262144 ]; then
++  export SGLANG_ALLOW_OVERWRITE_LONGER_CONTEXT_LEN=1
++  EXTRA_ARGS+=(--json-model-override-args '{"text_config":{"rope_parameters":{"mrope_interleaved":true,"mrope_section":[11,11,10],"rope_type":"yarn","rope_theta":10000000,"partial_rotary_factor":0.25,"factor":2.0,"original_max_position_embeddings":262144}}}')
++fi
++
++exec "$REPO/.venv/bin/sglang" serve \
++  --model-path "$TARGET_MODEL" \
++  --load-format safetensors \
++  --served-model-name flash-next \
++  --host 127.0.0.1 --port "$PORT" --tp 1 \
++  --dtype bfloat16 --quantization modelopt_fp4 --kv-cache-dtype fp8_e4m3 \
++  --mem-fraction-static "$MEM_FRACTION" \
++  --context-length "$CONTEXT_LENGTH" \
++  --page-size 64 --max-running-requests 4 --sleep-on-idle \
++  --chunked-prefill-size 8192 \
++  --mamba-radix-cache-strategy extra_buffer --mamba-ssm-dtype bfloat16 \
++  --max-mamba-cache-size "$MAMBA_SLOTS" --gdn-mtp-cache-mode none \
++  --linear-attn-decode-backend flashinfer --linear-attn-prefill-backend flashinfer \
++  --ple-offload-embedding \
++  --chat-template "$TARGET_MODEL/chat_template.jinja" \
++  --reasoning-parser qwen3 --tool-call-parser qwen3_coder \
++  --default-chat-template-kwargs '{"enable_thinking":true,"preserve_thinking":true,"reasoning_effort":"medium"}' \
++  --speculative-algorithm NGRAM_CHAIN --speculative-num-steps 15 \
++  --speculative-eagle-topk 1 --speculative-num-draft-tokens 16 \
++  --speculative-draft-model-quantization unquant --watchdog-timeout 1800 \
++  ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"}
+diff --git a/test/registered/unit/spec/test_ngram_chain_worker.py b/test/registered/unit/spec/test_ngram_chain_worker.py
+new file mode 100644
+index 0000000000..8fa65f518c
+--- /dev/null
++++ b/test/registered/unit/spec/test_ngram_chain_worker.py
+@@ -0,0 +1,209 @@
++from collections import deque
++from types import SimpleNamespace
++from unittest.mock import MagicMock, patch
++
++import torch
++from sglang.srt.speculative.ngram_chain_worker import (
++    NgramChainAlgorithm,
++    NgramChainDraftWorker,
++    NgramChainMatch,
++    NgramChainWorkerV2,
++    RequestNgramChainIndex,
++)
++from sglang.srt.speculative.spec_info import SpeculativeAlgorithm
++from sglang.srt.speculative.spec_registry import (
++    CustomSpecAlgo,
++    _assert_custom_spec_algo_conforms,
++)
++from sglang.test.ci.ci_register import register_cpu_ci
++
++register_cpu_ci(est_time=5, suite="base-a-test-cpu")
++
++
++def _index(*, min_size=3, max_size=3, window_size=128, num_steps=3):
++    return RequestNgramChainIndex(
++        min_size=min_size,
++        max_size=max_size,
++        window_size=window_size,
++        num_steps=num_steps,
++    )
++
++
++def test_prompt_seed_and_repeated_span_proposal():
++    index = _index()
++    index.seed([1, 2, 3, 10, 11, 12, 1, 2, 3])
++
++    match = index.propose()
++
++    assert match == NgramChainMatch(tokens=(10, 11, 12), ngram_size=3, position=0)
++
++
++def test_incremental_append_enables_match():
++    index = _index()
++    index.seed([1, 2, 3, 10, 11, 12])
++    assert index.propose() is None
++
++    index.append([1, 2, 3])
++
++    assert index.propose().tokens == (10, 11, 12)
++
++
++def test_largest_ngram_is_preferred():
++    index = _index(min_size=2, max_size=4, num_steps=2)
++    index.seed([1, 2, 3, 4, 8, 9, 1, 2, 3, 4])
++
++    match = index.propose()
++
++    assert match.ngram_size == 4
++    assert match.tokens == (8, 9)
++
++
++def test_window_evicts_old_occurrence():
++    index = _index(min_size=2, max_size=2, window_size=6, num_steps=2)
++    index.seed([1, 2, 3, 4, 9, 9, 1, 2])
++
++    assert index.tokens == (3, 4, 9, 9, 1, 2)
++    assert index.propose() is None
++
++
++def test_no_match_below_min_size():
++    index = _index(min_size=3, max_size=4, num_steps=2)
++    index.seed([5, 6, 8, 9, 5, 6])
++
++    assert index.propose() is None
++
++
++def test_partial_continuation_is_a_miss():
++    index = _index(min_size=2, max_size=2, num_steps=4)
++    # The occurrence at zero has only three following tokens. The current
++    # suffix itself has no continuation, so neither is a full-width candidate.
++    index.seed([1, 2, 7, 1, 2])
++
++    assert index.propose() is None
++
++
++def test_topk1_contract_shapes_dtypes_and_delta_probs():
++    worker = object.__new__(NgramChainDraftWorker)
++    worker.device = torch.device("cpu")
++    worker.speculative_num_steps = 3
++    worker._topk1_parents_prealloc = torch.tensor(
++        [[-1, 0, 1], [-1, 0, 1]], dtype=torch.long
++    )
++    worker._topk1_score_indices_prealloc = torch.tensor(
++        [[0, 1, 2], [0, 1, 2]], dtype=torch.long
++    )
++
++    parents, score_indices, draft_tokens, draft_probs = worker._build_ngram_contract(
++        [[2, 4, 6], [1, 3, 5]], vocab_size=8, device="cpu"
++    )
++
++    assert parents.shape == score_indices.shape == draft_tokens.shape == (2, 3)
++    assert draft_probs.shape == (2, 3, 8)
++    assert parents.dtype == score_indices.dtype == draft_tokens.dtype == torch.long
++    assert draft_probs.dtype == torch.float32
++    assert torch.equal(draft_probs.sum(dim=-1), torch.ones((2, 3)))
++    assert torch.equal(
++        draft_probs.gather(2, draft_tokens.unsqueeze(-1)).squeeze(-1),
++        torch.ones((2, 3)),
++    )
++
++
++def test_verify_commits_append_only_each_accept_prefix():
++    worker = object.__new__(NgramChainDraftWorker)
++    first = _index(min_size=2, max_size=2, num_steps=2)
++    second = _index(min_size=2, max_size=2, num_steps=2)
++    first.seed([1, 2])
++    second.seed([3, 4])
++    worker._request_indexes = {"a": first, "b": second}
++    worker._pending_commits = deque()
++    requests = [SimpleNamespace(rid="a"), SimpleNamespace(rid="b")]
++
++    worker.stage_commits(
++        requests,
++        torch.tensor([10, 11, 99, 99, 20, 99, 99, 99]),
++        torch.tensor([2, 1]),
++        stride=4,
++    )
++    worker._flush_pending_commits()
++
++    assert first.tokens == (1, 2, 10, 11)
++    assert second.tokens == (3, 4, 20)
++
++
++def test_departed_request_index_is_freed():
++    worker = object.__new__(NgramChainDraftWorker)
++    worker._request_indexes = {"active": object(), "done": object()}
++
++    worker._drop_departed_requests([SimpleNamespace(rid="active")])
++
++    assert set(worker._request_indexes) == {"active"}
++
++
++def _decision_worker(match):
++    worker = object.__new__(NgramChainDraftWorker)
++    worker._flush_pending_commits = MagicMock()
++    worker.seed_requests = MagicMock()
++    worker._drop_departed_requests = MagicMock()
++    worker._find_batch_matches = MagicMock(return_value=match)
++    worker._draft_mtp_chain = MagicMock(return_value="mtp")
++    return worker
++
++
++def test_miss_invokes_mtp_path():
++    worker = _decision_worker(None)
++    batch = SimpleNamespace(
++        forward_mode=SimpleNamespace(is_idle=lambda: False), reqs=[SimpleNamespace()]
++    )
++
++    assert worker.draft(batch) == "mtp"
++    worker._draft_mtp_chain.assert_called_once_with(batch)
++
++
++def test_full_hit_skips_mtp_path():
++    match = NgramChainMatch(tokens=(7, 8, 9), ngram_size=3, position=0)
++    worker = _decision_worker([match])
++    worker.req_to_token_pool = object()
++    worker.cuda_graph_runner = object()
++    worker.draft_runner = object()
++    worker.topk = 1
++    worker.speculative_num_steps = 3
++    worker.speculative_num_draft_tokens = 4
++    worker.target_worker = SimpleNamespace(model_config=SimpleNamespace(vocab_size=16))
++    worker.tree_mask_mode = object()
++    worker.device = "cpu"
++    worker._build_ngram_contract = MagicMock(
++        return_value=("parents", "scores", "tokens", "probs")
++    )
++    batch = SimpleNamespace(
++        forward_mode=SimpleNamespace(is_idle=lambda: False),
++        reqs=[SimpleNamespace()],
++        spec_info=object(),
++    )
++
++    with (
++        patch("sglang.srt.speculative.ngram_chain_worker.prepare_for_draft") as prepare,
++        patch(
++            "sglang.srt.speculative.ngram_chain_worker.build_eagle_verify_input",
++            return_value="verify",
++        ),
++    ):
++        assert worker.draft(batch) == "verify"
++
++    prepare.assert_called_once()
++    worker._draft_mtp_chain.assert_not_called()
++
++
++def test_registration_routes_as_eagle_but_not_ngram():
++    algo = SpeculativeAlgorithm.from_string("NGRAM_CHAIN")
++
++    assert isinstance(algo, CustomSpecAlgo)
++    assert isinstance(algo, NgramChainAlgorithm)
++    assert algo.is_eagle()
++    assert not algo.is_ngram()
++    assert algo.supports_grammar_overlap()
++    assert algo.carries_draft_hidden_states()
++    assert (
++        algo.create_worker(SimpleNamespace(disable_overlap_schedule=False))
++        is NgramChainWorkerV2
++    )
++    _assert_custom_spec_algo_conforms(NgramChainAlgorithm)
+-- 
+2.43.0
+

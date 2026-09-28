@@ -1,0 +1,548 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: aiueo52 <aiueo52@users.noreply.github.com>
+Date: Thu, 3 Sep 2026 20:45:11 +0900
+Subject: [PATCH 030/105] gdn: strided q/k/v read at the full T=16 tile (patch
+ for the vendored WY wrapper)
+
+The vendored FlashInfer WY output-only wrapper .contiguous()-materialises q/k/v at
+T == T_KERNEL, which is three gmem->gmem copies per GDN layer (108 kernels /
+~200 us per W16 decode step, measured in prof/traces/gemv3b-w16-code-edit).  They
+exist only because the kernel's descriptor assumed a compact token stride, but the
+kernel reads q/k/v through raw base pointers plus strides it rebuilds itself, and it
+already has a `qkv_row_stride` knob used by the T in {4,8} native path.
+
+At T == T_KERNEL n_valid == T, so the plain (no smem-tail-zeroing) path runs and the
+only thing that changes is the gmem address arithmetic: the same values are read
+straight out of the fused conv-output column slices (token stride conv_dim = 10240
+for this model, features contiguous within a token).
+
+Delivered as bench/glue_e/gdn_wy_T16_strided.patch rather than an in-place edit: the
+file lives in the venv and a running server re-imports it.  The patch also tightens
+the guard (shared token stride, canonical head/feature/batch strides, 16 B alignment)
+and reuses it for the pre-existing native path, where it can only fall back to the
+copies, never change a result.
+
+test/srt/layers/test_gdn_wy_t16_strided.py applies the patch to a temp copy, imports
+it beside the installed module and proves bit-identical output at T=16 and T=4 on
+the real shapes (H=HK=16x128, HV=48x128, conv_dim 10240), plus a compile-cache probe
+so a silent fallback cannot make the bit-identity vacuous.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+---
+ bench/glue_e/_harness.py                   |  94 +++++++++
+ bench/glue_e/bench_gdn_wy_t16.py           |  84 ++++++++
+ bench/glue_e/gdn_wy_T16_strided.patch      |  90 +++++++++
+ test/srt/layers/test_gdn_wy_t16_strided.py | 212 +++++++++++++++++++++
+ 4 files changed, 480 insertions(+)
+ create mode 100644 bench/glue_e/_harness.py
+ create mode 100644 bench/glue_e/bench_gdn_wy_t16.py
+ create mode 100644 bench/glue_e/gdn_wy_T16_strided.patch
+ create mode 100644 test/srt/layers/test_gdn_wy_t16_strided.py
+
+diff --git a/bench/glue_e/_harness.py b/bench/glue_e/_harness.py
+new file mode 100644
+index 0000000000..235cfebbe4
+--- /dev/null
++++ b/bench/glue_e/_harness.py
+@@ -0,0 +1,94 @@
++"""Shared CUPTI plumbing for the glue-E benches.
++
++`capture` / `cupti_kernel_us` come from bench/w8a16v2/harness.py (byte-identical to
++the copy in ~/tools/sglang-qsa-ring that the spec names); `cupti_by_kernel` is the
++same measurement broken out per kernel name, which is what a "did the fused kernel
++replace two launches" claim needs.
++"""
++
++from __future__ import annotations
++
++import importlib.util
++import pathlib
++import statistics
++import sys
++
++import torch
++
++_HARNESS = pathlib.Path(__file__).resolve().parents[1] / "w8a16v2" / "harness.py"
++_spec = importlib.util.spec_from_file_location("_glue_e_w8a16_harness", _HARNESS)
++_h = importlib.util.module_from_spec(_spec)
++sys.modules[_spec.name] = _h
++_spec.loader.exec_module(_h)
++
++capture = _h.capture
++cupti_kernel_us = _h.cupti_kernel_us
++time_graph = _h.time_graph
++n_copies = _h.n_copies
++make_copies = _h.make_copies
++ClockSampler = _h.ClockSampler
++
++
++def cupti_by_kernel(call, args_list, min_seconds=0.2, spin_seconds=0.25, max_events=4000):
++    """{kernel name: (median us, launches per call)} over CUDA-graph replays.
++
++    Same protocol as `cupti_kernel_us`: replay a captured graph under continuous
++    load so the SMs stay at boost, then read CUPTI kernel durations. Also returns
++    the summed per-call device time, which is the number a "two launches became
++    one" claim lives or dies on.
++    """
++    from torch.autograd import DeviceType
++    from torch.profiler import ProfilerActivity, profile
++
++    g = capture(call, args_list)
++    start, end = torch.cuda.Event(True), torch.cuda.Event(True)
++    start.record()
++    g.replay()
++    end.record()
++    torch.cuda.synchronize()
++    per_replay = max(start.elapsed_time(end) / 1e3, 1e-6)
++    for _ in range(max(1, int(spin_seconds / per_replay))):
++        g.replay()
++    torch.cuda.synchronize()
++
++    reps = max(1, int(min_seconds / per_replay))
++    with profile(activities=[ProfilerActivity.CUDA]) as prof:
++        for _ in range(reps):
++            g.replay()
++        torch.cuda.synchronize()
++
++    by_name: dict[str, list[float]] = {}
++    for e in prof.events():
++        if e.device_type == DeviceType.CUDA:
++            by_name.setdefault(e.key, []).append(e.device_time)
++    del g
++
++    calls = reps * len(args_list)
++    out = {}
++    total = 0.0
++    for name, durs in by_name.items():
++        med = statistics.median(durs)
++        out[name] = (med, len(durs) / calls)
++        total += sum(durs) / calls
++    return out, total
++
++
++def report(tag: str, res, total: float) -> None:
++    print(f"  {tag:<34s} per-call device time = {total:8.2f} us")
++    for name, (med, n) in sorted(res.items(), key=lambda kv: -kv[1][0] * kv[1][1]):
++        print(f"      {name[:56]:<56s} n/call={n:4.1f} med={med:7.2f} us")
++
++
++def clocks_note() -> str:
++    import subprocess
++
++    try:
++        out = subprocess.run(
++            ["nvidia-smi", "--query-gpu=clocks.sm,clocks.max.sm", "--format=csv,noheader"],
++            capture_output=True,
++            text=True,
++            timeout=5,
++        ).stdout.strip()
++        return f"SM clock now/max: {out}"
++    except Exception:
++        return "SM clock: unknown"
+diff --git a/bench/glue_e/bench_gdn_wy_t16.py b/bench/glue_e/bench_gdn_wy_t16.py
+new file mode 100644
+index 0000000000..994781ea24
+--- /dev/null
++++ b/bench/glue_e/bench_gdn_wy_t16.py
+@@ -0,0 +1,84 @@
++#!/usr/bin/env python3
++"""glue-E item 1: GDN WY verify kernel reading q/k/v strided vs. .contiguous()-first.
++
++    python bench/glue_e/bench_gdn_wy_t16.py           # T=16 (W16 verify) and T=4
++
++Loads the installed vendored wrapper as the baseline and a patched copy (from
++bench/glue_e/gdn_wy_T16_strided.patch, applied in a temp dir - the venv file is
++never touched) with FLASHINFER_GDN_WY_STRIDED_QKV=1 as the candidate, then reports
++CUPTI per-call device time. The baseline's three q/k/v copies show up as separate
++elementwise kernels, which is exactly the cost the patch removes.
++"""
++
++from __future__ import annotations
++
++import pathlib
++import sys
++
++import torch
++
++sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
++sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2] / "test" / "srt" / "layers"))
++from _harness import clocks_note, cupti_by_kernel, report  # noqa: E402
++from test_gdn_wy_t16_strided import (  # noqa: E402
++    CONV_DIM,
++    HV,
++    K_DIM,
++    V_DIM,
++    _load_modules,
++    _make_inputs,
++)
++
++L2 = 128 << 20
++
++
++def build(B: int, T: int, copies: int):
++    sets = []
++    for i in range(copies):
++        sets.append(_make_inputs(B, T, seed=i))
++    return sets
++
++
++def main(cases):
++    ref, pat = _load_modules()
++    print(clocks_note())
++    for B, T in cases:
++        one = _make_inputs(B, T)
++        h0_bytes = one["initial_state_source"].numel() * 2
++        per_call = h0_bytes // one["initial_state_source"].shape[0] * B + B * T * CONV_DIM * 2
++        copies = max(8, min(160, -(-4 * L2 // max(per_call, 1))))
++        sets = build(B, T, copies)
++        ws_mb = copies * per_call / (1 << 20)
++        print(f"\n=== B={B} T={T}  working set x{copies} (~{ws_mb:.0f} MB, L2 is 128 MB)")
++
++        def run_ref(a):
++            kw = {k: v for k, v in a.items() if k != "conv_out"}
++            ref.gated_delta_rule_mtp(**kw)
++
++        def run_pat(a):
++            kw = {k: v for k, v in a.items() if k != "conv_out"}
++            pat.gated_delta_rule_mtp(**kw)
++
++        a0 = sets[0]
++        kw = {k: v for k, v in a0.items() if k != "conv_out"}
++        o_ref = ref.gated_delta_rule_mtp(**kw).clone()
++        o_pat = pat.gated_delta_rule_mtp(**kw).clone()
++        print(f"  bit-identical: {bool(torch.equal(o_ref, o_pat))}")
++
++        res_r, tot_r = cupti_by_kernel(run_ref, sets)
++        report("contiguous (3 copies + kernel)", res_r, tot_r)
++        res_p, tot_p = cupti_by_kernel(run_pat, sets)
++        report("strided (kernel only)", res_p, tot_p)
++        n_layers = 36  # GDN layers in Qwen3.8-Flash-Next (48 * 3/4)
++        print(
++            f"  delta = {tot_p - tot_r:+.2f} us/call  -> "
++            f"{(tot_p - tot_r) * n_layers:+.0f} us/step over {n_layers} GDN layers"
++        )
++
++
++if __name__ == "__main__":
++    if len(sys.argv) > 1:
++        cases = [tuple(int(x) for x in a.split("x")) for a in sys.argv[1:]]
++    else:
++        cases = [(1, 16), (1, 4)]
++    main(cases)
+diff --git a/bench/glue_e/gdn_wy_T16_strided.patch b/bench/glue_e/gdn_wy_T16_strided.patch
+new file mode 100644
+index 0000000000..41bcadba7e
+--- /dev/null
++++ b/bench/glue_e/gdn_wy_T16_strided.patch
+@@ -0,0 +1,90 @@
++--- a/flashinfer/gdn_kernels/gdn_decode_bf16_wy_output_only.py
+++++ b/flashinfer/gdn_kernels/gdn_decode_bf16_wy_output_only.py
++@@ -1974,8 +1974,54 @@
++ _NATIVE_T = _os.environ.get("FLASHINFER_GDN_WY_NATIVE_T", "1") != "0"
++ # (strided-qkv) read q/k/v directly from the fused conv-output column slices (token
++ # stride = conv_dim) instead of .contiguous()-materializing them. Removes the 3 big
++-# q/k/v copies from the verify region. Only valid on the native path (T in {4,8}).
+++# q/k/v copies from the verify region. Valid on the native path (T in {4,8}) and,
+++# since the T16-strided patch, on the full-tile path (T == T_KERNEL == 16, the W16
+++# NEXTN verify shape) where n_valid == T so no smem-tail zeroing is involved.
+++# NOTE: the strided read forces `mk_dyn` onto the fully-static descriptor fallback,
+++# so the compile cache key gains (B, pool_size) — one cute.compile per CUDA-graph
+++# batch bucket at warm-up instead of one for all of them.
++ _STRIDED_QKV = _os.environ.get("FLASHINFER_GDN_WY_STRIDED_QKV", "0") != "0"
+++
+++
+++def _strided_qkv_ok(q, k, v, n_valid, H, HK, HV, K_dim, V_dim):
+++    """True iff q/k/v can be read in place with one shared per-token row stride.
+++
+++    The kernel does not use the CuTe layouts of q/k/v at all: it takes their base
+++    pointers (``gQ.iterator.toint()``) and addresses every element with the strides
+++    rebuilt in ``_kernel_body`` as
+++
+++        base + b*(n_valid*rs) + t*rs + head*(K_DIM | V_DIM) + col
+++
+++    so the only stride it can absorb is the per-token one, and it must be the SAME
+++    for q, k and v.  Everything else has to already be the canonical compact value:
+++
+++      * feature stride 1 and head stride K_DIM / V_DIM (features stay contiguous
+++        inside a token in the conv-output column slices),
+++      * batch stride exactly ``n_valid * rs`` (checked only when B > 1; at B == 1
+++        the kernel multiplies it by pid_b == 0),
+++      * ``rs`` a multiple of 8 elements and every base pointer 16 B aligned, because
+++        the q/k/v loads are 16 B ``cp.async.ca`` (8 bf16) instructions.
+++
+++    The pre-existing native-short-T path only compared ``stride(1)``; a caller with
+++    a non-canonical head or batch stride would have been read as garbage.  Using
+++    this predicate there too can only turn the optimisation OFF (falling back to
+++    ``.contiguous()``), never change a result.
+++    """
+++    rs = q.stride(1)
+++    if k.stride(1) != rs or v.stride(1) != rs:
+++        return False
+++    if rs <= 0 or rs % 8 != 0:  # 16 B cp.async granularity
+++        return False
+++    for t, heads, feat in ((q, H, K_dim), (k, HK, K_dim), (v, HV, V_dim)):
+++        if t.stride(-1) != 1:
+++            return False
+++        if heads > 1 and t.stride(2) != feat:
+++            return False
+++        if t.shape[0] > 1 and t.stride(0) != n_valid * rs:
+++            return False
+++        if (t.data_ptr() % 16) != 0:
+++            return False
+++    return True
++ # (native-a/b) read a/b directly from the real [B, n_valid, HV] tensors instead of staging
++ # them into T_KERNEL-row zero-padded buffers (removes the 2 a/b staging copies). Bit-exact on
++ # the compact [B,T] output: gamma is a causal prefix-sum, so the unloaded tail rows (which get
++@@ -2135,9 +2181,19 @@
++         False  # True => a/b read native [B,n_valid,HV] (no staging); _NATIVE_AB
++     )
++     if T == T_KERNEL:
++-        q = q.contiguous()
++-        k = k.contiguous()
++-        v = v.contiguous()
+++        # (strided-qkv at the full tile) n_valid == T == T_KERNEL here, so the kernel
+++        # takes its plain path: every row is loaded, no smem tail zeroing, identical
+++        # MMA schedule. The ONLY thing the strided read changes is the gmem address
+++        # arithmetic for q/k/v (token stride `rs` instead of the compact H*K_DIM /
+++        # HV*V_DIM), so the loaded values — and therefore the output — are identical
+++        # to staging the same columns into a contiguous buffer first. This removes the
+++        # three big q/k/v copies (one per GDN layer) from the W16 verify region.
+++        if _STRIDED_QKV and _strided_qkv_ok(q, k, v, n_valid, H, HK, HV, K_dim, V_dim):
+++            _qkv_rs = q.stride(1)
+++        else:
+++            q = q.contiguous()
+++            k = k.contiguous()
+++            v = v.contiguous()
++         a = a.contiguous()
++         b = b.contiguous()
++     elif _native:
++@@ -2146,7 +2202,7 @@
++         # Strided-qkv: q/k/v are the fused conv-output column slices (token stride =
++         # conv_dim, features contiguous within a token). Pass that row stride to the
++         # kernel and skip the copies — bit-identical (same values, strided gmem read).
++-        if _STRIDED_QKV and q.stride(1) == k.stride(1) == v.stride(1):
+++        if _STRIDED_QKV and _strided_qkv_ok(q, k, v, n_valid, H, HK, HV, K_dim, V_dim):
++             _qkv_rs = q.stride(1)
++         else:
++             q = q.contiguous()
+diff --git a/test/srt/layers/test_gdn_wy_t16_strided.py b/test/srt/layers/test_gdn_wy_t16_strided.py
+new file mode 100644
+index 0000000000..515cbb9f22
+--- /dev/null
++++ b/test/srt/layers/test_gdn_wy_t16_strided.py
+@@ -0,0 +1,212 @@
++"""Offline proof that the T16-strided patch to the vendored FlashInfer GDN WY
++wrapper is bit-identical to the unpatched wrapper.
++
++The wrapper lives in the venv
++(``flashinfer/gdn_kernels/gdn_decode_bf16_wy_output_only.py``) and a server may be
++re-importing it at any time, so this test never touches it: it copies the file to a
++temp directory, applies ``bench/glue_e/gdn_wy_T16_strided.patch`` there, imports the
++copy under a private module name and compares against the installed module.
++
++Shapes are the ones the Qwen3.8-Flash-Next verify path actually passes
++(``srt/layers/attention/linear/gdn_backend.py`` -> ``kernels/gdn_flashinfer.py``):
++H = HK = 16 heads x 128, HV = 48 heads x 128, so the fused post-conv row is
++conv_dim = 2048 + 2048 + 6144 = 10240 elements and q/k/v are column slices of it
++with token stride 10240.
++
++Run:  python test/srt/layers/test_gdn_wy_t16_strided.py
++"""
++
++from __future__ import annotations
++
++import importlib.util
++import os
++import pathlib
++import shutil
++import subprocess
++import sys
++import tempfile
++import unittest
++
++import torch
++
++REPO = pathlib.Path(__file__).resolve().parents[3]
++PATCH = REPO / "bench" / "glue_e" / "gdn_wy_T16_strided.patch"
++
++# Real Qwen3.8-Flash-Next GDN shapes.
++H = HK = 16
++HV = 48
++K_DIM = V_DIM = 128
++Q_DIM = H * K_DIM  # 2048
++K_OFF = Q_DIM
++V_OFF = Q_DIM + HK * K_DIM  # 4096
++CONV_DIM = Q_DIM + HK * K_DIM + HV * V_DIM  # 10240
++POOL = 8
++
++ENV = "FLASHINFER_GDN_WY_STRIDED_QKV"
++
++
++def _vendored_path() -> pathlib.Path:
++    spec = importlib.util.find_spec(
++        "flashinfer.gdn_kernels.gdn_decode_bf16_wy_output_only"
++    )
++    assert spec is not None and spec.origin is not None, "flashinfer not importable"
++    return pathlib.Path(spec.origin)
++
++
++def _import_from(path: pathlib.Path, name: str):
++    spec = importlib.util.spec_from_file_location(name, path)
++    mod = importlib.util.module_from_spec(spec)
++    sys.modules[name] = mod
++    spec.loader.exec_module(mod)
++    return mod
++
++
++def _load_modules():
++    """(reference_module, patched_module). Reference has strided-qkv OFF."""
++    src = _vendored_path()
++
++    os.environ.pop(ENV, None)
++    ref = _import_from(src, "_glue_e_gdn_wy_ref")
++    assert ref._STRIDED_QKV is False
++
++    tmp = tempfile.mkdtemp(prefix="glue_e_gdn_")
++    dst = pathlib.Path(tmp) / "gdn_decode_bf16_wy_output_only_patched.py"
++    shutil.copy2(src, dst)
++    subprocess.run(
++        ["patch", "-p0", "-s", str(dst)],
++        stdin=open(PATCH, "rb"),
++        check=True,
++        cwd=tmp,
++    )
++    os.environ[ENV] = "1"
++    try:
++        pat = _import_from(dst, "_glue_e_gdn_wy_patched")
++    finally:
++        os.environ.pop(ENV, None)
++    assert pat._STRIDED_QKV is True
++    return ref, pat
++
++
++def _make_inputs(B: int, T: int, seed: int = 0):
++    """Post-conv fused row plus the strided q/k/v column slices the backend passes."""
++    g = torch.Generator(device="cuda").manual_seed(seed)
++    conv_out = torch.randn(
++        B * T, CONV_DIM, dtype=torch.bfloat16, device="cuda", generator=g
++    )
++    rows = conv_out.view(B, T, CONV_DIM)
++    q = rows[:, :, :K_OFF].view(B, T, H, K_DIM)
++    k = rows[:, :, K_OFF:V_OFF].view(B, T, HK, K_DIM)
++    v = rows[:, :, V_OFF:].view(B, T, HV, V_DIM)
++    assert not q.is_contiguous() and q.stride(1) == CONV_DIM
++    assert not k.is_contiguous() and k.stride(1) == CONV_DIM
++    assert not v.is_contiguous() and v.stride(1) == CONV_DIM
++
++    a = torch.randn(B, T, HV, dtype=torch.bfloat16, device="cuda", generator=g)
++    b = torch.randn(B, T, HV, dtype=torch.bfloat16, device="cuda", generator=g)
++    A_log = torch.randn(HV, dtype=torch.float32, device="cuda", generator=g)
++    dt_bias = torch.randn(HV, dtype=torch.float32, device="cuda", generator=g)
++    h0 = (
++        torch.randn(
++            POOL, HV, V_DIM, K_DIM, dtype=torch.float32, device="cuda", generator=g
++        )
++        .mul_(0.05)
++        .to(torch.bfloat16)
++    )
++    idx = torch.arange(B, dtype=torch.int32, device="cuda")
++    return dict(
++        A_log=A_log,
++        a=a,
++        dt_bias=dt_bias,
++        q=q,
++        k=k,
++        v=v,
++        b=b,
++        initial_state_source=h0,
++        initial_state_indices=idx,
++        disable_state_update=True,
++        use_qk_l2norm_in_kernel=True,
++        scale=None,
++        output=None,
++        conv_out=conv_out,
++    )
++
++
++def _run(mod, args):
++    kw = {k: v for k, v in args.items() if k != "conv_out"}
++    return mod.gated_delta_rule_mtp(**kw).clone()
++
++
++@unittest.skipUnless(torch.cuda.is_available(), "needs CUDA")
++class TestGdnWyT16Strided(unittest.TestCase):
++    @classmethod
++    def setUpClass(cls):
++        cls.ref, cls.pat = _load_modules()
++
++    def _check(self, B, T):
++        args = _make_inputs(B, T)
++        out_ref = _run(self.ref, args)
++        out_pat = _run(self.pat, args)
++        self.assertEqual(out_ref.shape, out_pat.shape)
++        self.assertTrue(torch.isfinite(out_ref.float()).all(), "reference is not finite")
++        same = torch.equal(out_ref, out_pat)
++        if not same:
++            d = (out_ref.float() - out_pat.float()).abs()
++            self.fail(
++                f"T={T} B={B}: not bit-identical, max|d|={d.max().item():.3e}, "
++                f"n_diff={(d > 0).sum().item()}/{d.numel()}"
++            )
++
++    def test_t16_bit_identical(self):
++        """T == T_KERNEL: the path this patch adds (W16 NEXTN verify)."""
++        self._check(B=1, T=16)
++
++    def test_t16_batch(self):
++        self._check(B=4, T=16)
++
++    def test_t4_bit_identical(self):
++        """T == 4 (W4 verify): the pre-existing native strided path, unchanged."""
++        self._check(B=1, T=4)
++
++    def test_t4_batch(self):
++        self._check(B=3, T=4)
++
++    def test_guard_rejects_non_canonical_layouts(self):
++        ok = self.pat._strided_qkv_ok
++        args = _make_inputs(1, 16)
++        q, k, v = args["q"], args["k"], args["v"]
++        self.assertTrue(ok(q, k, v, 16, H, HK, HV, K_DIM, V_DIM))
++        # a contiguous q (different token stride from k/v) must be rejected
++        self.assertFalse(ok(q.contiguous(), k, v, 16, H, HK, HV, K_DIM, V_DIM))
++        # a feature-minor (head-strided) q must be rejected: stride(-1) != 1
++        rows = args["conv_out"].view(1, 16, CONV_DIM)
++        q_bad = rows[:, :, :K_OFF].view(1, 16, K_DIM, H).transpose(2, 3)
++        self.assertEqual(tuple(q_bad.shape), tuple(q.shape))
++        self.assertFalse(ok(q_bad, k, v, 16, H, HK, HV, K_DIM, V_DIM))
++        # wrong n_valid => batch stride mismatch (only visible at B > 1)
++        args4 = _make_inputs(4, 16)
++        self.assertFalse(
++            ok(args4["q"], args4["k"], args4["v"], 8, H, HK, HV, K_DIM, V_DIM)
++        )
++
++    def test_patched_module_takes_the_strided_path(self):
++        """Guard against a silent fallback making the bit-identity vacuous.
++
++        ``cache_key[5]`` is ``_qkv_rs``: 0 on the copy path, the token row stride
++        (conv_dim) on the strided one, and the strided key additionally carries
++        ``(B, pool)``.
++        """
++        self._check(B=1, T=16)  # populates both caches
++        self.assertTrue(self.pat._CACHE, "patched module compiled nothing")
++        self.assertTrue(self.ref._CACHE, "reference module compiled nothing")
++        self.assertTrue(
++            any(key[5] == CONV_DIM and len(key) == 12 for key in self.pat._CACHE),
++            f"patched module never took the strided path: {list(self.pat._CACHE)}",
++        )
++        self.assertTrue(
++            all(key[5] == 0 and len(key) == 10 for key in self.ref._CACHE),
++            f"reference module took a strided path: {list(self.ref._CACHE)}",
++        )
++
++
++if __name__ == "__main__":
++    unittest.main(verbosity=2)
+-- 
+2.43.0
+

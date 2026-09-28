@@ -1,0 +1,124 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: aiueo52 <aiueo52@users.noreply.github.com>
+Date: Sat, 5 Sep 2026 18:32:51 +0900
+Subject: [PATCH 068/105] pdl: w8a16_gemv + w8a16_gemv_silu wait/trigger
+ (229+48 launches per W4 verify step)
+
+_w8a16_gemv_kernel is 229 of the ~1650 kernels in one W4 target-verify step
+(3.46 of 12.77 ms) and _w8a16_gemv_silu_kernel another 48 (0.87 ms). Both read
+their activation from the immediately preceding kernel, and their weight/scale
+loads all live inside the reduction loop, so the wait goes at the top of the
+body: what PDL buys here is the block-scheduling ramp overlapping the previous
+kernel's drain, not a prologue prefetch.
+
+The trigger sits after the last store on both exits (the SPLITS==1 early return
+and the split-K fixup). Triggering there is safe for the shared split-K
+scratch: the next launch's stores are behind its own gdc_wait, which waits for
+this grid's memory operations to be visible.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+---
+ .../srt/layers/quantization/w8a16_gemv.py       | 17 +++++++++++++++++
+ 1 file changed, 17 insertions(+)
+
+diff --git a/python/sglang/srt/layers/quantization/w8a16_gemv.py b/python/sglang/srt/layers/quantization/w8a16_gemv.py
+index 33b7e6cd8a..8f23bc5e78 100644
+--- a/python/sglang/srt/layers/quantization/w8a16_gemv.py
++++ b/python/sglang/srt/layers/quantization/w8a16_gemv.py
+@@ -33,6 +33,8 @@ import torch
+ import triton
+ import triton.language as tl
+ 
++from sglang.kernels.triton_pdl import PDL, pdl_trigger, pdl_wait
++
+ 
+ @triton.jit
+ def _store_split(
+@@ -108,6 +110,7 @@ def _w8a16_gemv_kernel(
+     EVEN_K: tl.constexpr,
+     W_KN: tl.constexpr,
+     USE_DOT: tl.constexpr,
++    USE_PDL: tl.constexpr,
+ ):
+     pid_n = tl.program_id(0)
+     pid_k = tl.program_id(1)
+@@ -116,6 +119,10 @@ def _w8a16_gemv_kernel(
+     offs_k = tl.arange(0, BLOCK_K)
+     n_mask = offs_n < N
+     m_mask = offs_m < M
++    # x comes from the previous kernel; the weight/scale loads below are all
++    # inside the reduction loop, so the wait sits at the top and what PDL buys
++    # here is the block-scheduling ramp overlapping the previous kernel's drain.
++    pdl_wait(USE_PDL)
+     acc = tl.zeros((M_PAD, BLOCK_N), dtype=tl.float32)
+     for k0 in range(pid_k * BLOCK_K, K, SPLITS * BLOCK_K):
+         kk = k0 + offs_k
+@@ -174,6 +181,7 @@ def _w8a16_gemv_kernel(
+             n_mask,
+             SPLIT_N,
+         )
++        pdl_trigger(USE_PDL)
+         return
+ 
+     # Split-K fixup, in this same launch. `.cg` keeps the partials out of the
+@@ -207,6 +215,7 @@ def _w8a16_gemv_kernel(
+         # Every increment for this N block has happened, so a plain store is enough to
+         # leave the counter at 0 for the next launch / graph replay.
+         tl.store(cnt_ptr + pid_n, 0)
++    pdl_trigger(USE_PDL)
+ 
+ 
+ # Split-K scratch, allocated once per device and reused: the fixup CTA leaves the
+@@ -452,6 +461,8 @@ def _launch(x, w, s, y, M, N, K, per_channel, cfg, y2=None, split_n=0):
+         EVEN_K=K % block_k == 0,
+         W_KN=(w.stride(0) == 1) if w_kn is None else w_kn,
+         USE_DOT=use_dot,
++        USE_PDL=PDL,
++        launch_pdl=PDL,
+         num_warps=num_warps,
+         num_stages=num_stages,
+     )
+@@ -590,6 +601,7 @@ def _w8a16_gemv_silu_kernel(
+     SPLITS: tl.constexpr,
+     EVEN_K: tl.constexpr,
+     USE_DOT: tl.constexpr,
++    USE_PDL: tl.constexpr,
+ ):
+     pid_n = tl.program_id(0)
+     pid_k = tl.program_id(1)
+@@ -598,6 +610,7 @@ def _w8a16_gemv_silu_kernel(
+     offs_k = tl.arange(0, BLOCK_K)
+     n_mask = offs_n < H
+     m_mask = offs_m < M
++    pdl_wait(USE_PDL)
+     acc_g = tl.zeros((M_PAD, BLOCK_N), dtype=tl.float32)
+     acc_u = tl.zeros((M_PAD, BLOCK_N), dtype=tl.float32)
+     wg_base = w_ptr + offs_n[:, None] * stride_wn
+@@ -636,6 +649,7 @@ def _w8a16_gemv_silu_kernel(
+         out = (g * tl.sigmoid(g)) * u
+         y_ptrs = y_ptr + offs_m[:, None] * stride_ym + offs_n[None, :] * stride_yn
+         tl.store(y_ptrs, out.to(tl.bfloat16), mask=m_mask[:, None] & n_mask[None, :])
++        pdl_trigger(USE_PDL)
+         return
+ 
+     # Same in-launch split-K fixup as _w8a16_gemv_kernel, with two partials per
+@@ -660,6 +674,7 @@ def _w8a16_gemv_silu_kernel(
+         y_ptrs = y_ptr + offs_m[:, None] * stride_ym + offs_n[None, :] * stride_yn
+         tl.store(y_ptrs, out.to(tl.bfloat16), mask=m_mask[:, None] & n_mask[None, :])
+         tl.store(cnt_ptr + pid_n, 0)
++    pdl_trigger(USE_PDL)
+ 
+ 
+ # Tiles for the fused variant, keyed (M bucket, N=2H, K). A CTA owns two weight
+@@ -754,6 +769,8 @@ def w8a16_gemv_silu_mul(
+         SPLITS=splits,
+         EVEN_K=K % block_k == 0,
+         USE_DOT=use_dot,
++        USE_PDL=PDL,
++        launch_pdl=PDL,
+         num_warps=num_warps,
+         num_stages=num_stages,
+     )
+-- 
+2.43.0
+

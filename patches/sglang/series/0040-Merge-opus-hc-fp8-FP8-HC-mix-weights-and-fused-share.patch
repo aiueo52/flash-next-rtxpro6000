@@ -1,0 +1,2369 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: aiueo52 <aiueo52@users.noreply.github.com>
+Date: Fri, 4 Sep 2026 05:20:17 +0900
+Subject: [PATCH 040/105] Merge opus/hc-fp8: FP8 HC mix weights and fused
+ shared-expert gate_up+silu
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+
+[linearised for this patch series: this commit is the net effect of merging a side branch; its side-branch commits were:]
+  - hc mix2 / gate_up: pin the swept tiles, measure, and bound the tests in bf16 ulps
+  - w8a16 gemv / hc mix2: no first-touch allocation inside a CUDA-graph capture
+  - w8a16 gemv: fuse the shared-expert gate_up with silu_and_mul, SGLANG_SHARED_GATEUP_FUSED=1
+  - hc mix2: FP8 e4m3 weights for the three-kernel norm+mix, SGLANG_HC_MIX2_FP8=1
+---
+ bench/hc_mix2/bench_hc_mix2_fp8.py            | 190 +++++++++++
+ bench/w8a16/baseline_w8a16.py                 |  70 +++++
+ bench/w8a16/bench_w8a16.py                    | 120 +++++++
+ bench/w8a16/harness.py                        |  70 +++++
+ bench/w8a16/shapes.py                         |  63 ++++
+ bench/w8a16/tune_w8a16.py                     | 119 +++++++
+ bench/w8a16/w8a16_gemv_tuned_attempt.py       | 296 ++++++++++++++++++
+ bench/w8a16v2/bench_gateup_fused.py           | 184 +++++++++++
+ python/sglang/srt/layers/hc_mix2_triton.py    | 174 ++++++++--
+ python/sglang/srt/layers/hyperconnection.py   | 113 ++++++-
+ python/sglang/srt/layers/quantization/fp8.py  |  15 +
+ .../srt/layers/quantization/w8a16_gemv.py     | 244 ++++++++++++++-
+ python/sglang/srt/models/qwen2_moe.py         |  70 +++++
+ test/srt/layers/test_hc_mix2.py               | 122 ++++++++
+ test/srt/layers/test_w8a16_gemv_silu.py       | 123 ++++++++
+ 15 files changed, 1939 insertions(+), 34 deletions(-)
+ create mode 100644 bench/hc_mix2/bench_hc_mix2_fp8.py
+ create mode 100644 bench/w8a16/baseline_w8a16.py
+ create mode 100644 bench/w8a16/bench_w8a16.py
+ create mode 100644 bench/w8a16/harness.py
+ create mode 100644 bench/w8a16/shapes.py
+ create mode 100644 bench/w8a16/tune_w8a16.py
+ create mode 100644 bench/w8a16/w8a16_gemv_tuned_attempt.py
+ create mode 100644 bench/w8a16v2/bench_gateup_fused.py
+ create mode 100644 test/srt/layers/test_w8a16_gemv_silu.py
+
+diff --git a/bench/hc_mix2/bench_hc_mix2_fp8.py b/bench/hc_mix2/bench_hc_mix2_fp8.py
+new file mode 100644
+index 0000000000..cbabfad0bf
+--- /dev/null
++++ b/bench/hc_mix2/bench_hc_mix2_fp8.py
+@@ -0,0 +1,190 @@
++#!/usr/bin/env python3
++"""CUPTI per-kernel medians for the three-kernel HC norm+mix, bf16 vs fp8 weights.
++
++Methodology (see bench/w8a16v2/harness.py): CUDA-graph replay under continuous
++load with a rotating weight working set >= 4x the 128 MB L2, and the reported
++number is the median CUPTI kernel duration -- the same metric the in-server
++torch profile shows. CUDA-event timing is ~25% higher because of launch gaps and
++is not comparable.
++
++  python bench/hc_mix2/bench_hc_mix2_fp8.py                 # bf16 vs fp8, M=1,16
++  python bench/hc_mix2/bench_hc_mix2_fp8.py --sweep down    # fp8 K1 geometry
++  python bench/hc_mix2/bench_hc_mix2_fp8.py --sweep up      # fp8 K2 geometry
++"""
++
++from __future__ import annotations
++
++import argparse
++import itertools
++import os
++import sys
++
++os.environ.setdefault("SGLANG_HC_FUSED", "0")
++os.environ.setdefault("SGLANG_HC_MIX2", "1")
++
++sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "w8a16v2"))
++
++import torch  # noqa: E402
++import triton  # noqa: E402
++from harness import cupti_kernel_us, n_copies  # noqa: E402
++
++from sglang.srt.layers.hc_mix2_triton import (  # noqa: E402
++    HCMix2Config,
++    _DEFAULT_CONFIG,
++    _DEFAULT_CONFIG_FP8,
++    hc_norm_mix2,
++    quantize_hc_mix2_weights_fp8,
++)
++
++HC = 4
++HS = 2560
++K = HC * HS
++LR = 320
++EPS = 1e-6
++
++KERNELS = ("_hc_branch_stats_kernel", "_hc_down_kernel", "_hc_up_kernel")
++LABEL = {"_hc_branch_stats_kernel": "K0", "_hc_down_kernel": "K1", "_hc_up_kernel": "K2"}
++
++
++def make_weight_set(fp8: bool):
++    """Rotating copies sized so the weights alone exceed 4x L2."""
++    per_call = LR * K + K * LR  # elements
++    bytes_per_call = per_call * (1 if fp8 else 2)
++    copies = n_copies(bytes_per_call)
++    sets = []
++    for i in range(copies):
++        torch.manual_seed(1000 + i)
++        norm_w = torch.randn(K, device="cuda", dtype=torch.bfloat16) * 0.02
++        w_down = torch.randn(LR, K, device="cuda", dtype=torch.bfloat16) * 0.02
++        w_up = torch.randn(K, LR, device="cuda", dtype=torch.bfloat16) * 0.02
++        if fp8:
++            wd, sd, wu, su = quantize_hc_mix2_weights_fp8(w_down, w_up)
++            sets.append((norm_w, wd, wu, sd, su))
++            del w_down, w_up
++        else:
++            sets.append((norm_w, w_down, w_up, None, None))
++    torch.cuda.empty_cache()
++    mb = copies * bytes_per_call / (1 << 20)
++    return sets, mb
++
++
++def call_fn(x, config):
++    def run(ws):
++        norm_w, w_down, w_up, sd, su = ws
++        return hc_norm_mix2(x, norm_w, EPS, w_down, w_up, HC, HS, config, sd, su)
++
++    return run
++
++
++def measure(x, sets, config, min_seconds=0.25, only=None):
++    """CUPTI medians per kernel; `only` restricts to one label (K0/K1/K2)."""
++    run = call_fn(x, config)
++    out = {}
++    for name in KERNELS:
++        if only is not None and LABEL[name] != only:
++            continue
++        us, n = cupti_kernel_us(run, sets, min_seconds=min_seconds, name_sub=name)
++        out[LABEL[name]] = us * 1e6
++    if only is None:
++        out["total"] = sum(out[LABEL[k]] for k in KERNELS)
++    return out
++
++
++def fmt(tag, r):
++    return (
++        f"{tag:<28} K0 {r['K0']:6.2f}  K1 {r['K1']:6.2f}  K2 {r['K2']:6.2f}"
++        f"  total {r['total']:6.2f} us"
++    )
++
++
++def main():
++    ap = argparse.ArgumentParser()
++    ap.add_argument("--rows", type=int, nargs="*", default=[16, 1])
++    ap.add_argument("--sweep", choices=["down", "up"], default=None)
++    ap.add_argument("--min-seconds", type=float, default=0.25)
++    args = ap.parse_args()
++
++    torch.cuda.init()
++    print(f"device: {torch.cuda.get_device_name(0)}")
++
++    if args.sweep is None:
++        for fp8 in (False, True):
++            sets, mb = make_weight_set(fp8)
++            cfg = _DEFAULT_CONFIG_FP8 if fp8 else _DEFAULT_CONFIG
++            print(
++                f"\n--- {'fp8' if fp8 else 'bf16'} weights, {len(sets)} copies, "
++                f"{mb:.0f} MB working set ---"
++            )
++            for rows in args.rows:
++                x = torch.randn(rows, K, device="cuda", dtype=torch.bfloat16)
++                r = measure(x, sets, cfg, args.min_seconds)
++                print(fmt(f"M={rows}", r))
++            del sets
++            torch.cuda.empty_cache()
++        return
++
++    sets, mb = make_weight_set(True)
++    print(f"fp8 sweep, {len(sets)} copies, {mb:.0f} MB working set")
++    base = _DEFAULT_CONFIG_FP8
++    configs = []
++    if args.sweep == "down":
++        for bn, bk, bg, w, st in itertools.product(
++            (16, 32, 64), (128, 256), (1, 2, 4), (4, 8), (2, 3, 4)
++        ):
++            if HS % (bk * bg) or LR % bn:
++                continue
++            configs.append(
++                HCMix2Config(
++                    block_n=bn,
++                    block_k=bk,
++                    block_g=bg,
++                    down_warps=w,
++                    down_stages=st,
++                    block_j=base.block_j,
++                    block_r=base.block_r,
++                    up_warps=base.up_warps,
++                    up_stages=base.up_stages,
++                )
++            )
++        key = "K1"
++    else:
++        for bj, br, w, st in itertools.product(
++            (8, 16, 32, 64), (64, 128, 256), (4, 8), (2, 4, 6)
++        ):
++            configs.append(
++                HCMix2Config(
++                    block_n=base.block_n,
++                    block_k=base.block_k,
++                    block_g=base.block_g,
++                    down_warps=base.down_warps,
++                    down_stages=base.down_stages,
++                    block_j=bj,
++                    block_r=br,
++                    up_warps=w,
++                    up_stages=st,
++                )
++            )
++        key = "K2"
++
++    for rows in args.rows:
++        x = torch.randn(rows, K, device="cuda", dtype=torch.bfloat16)
++        results = []
++        for cfg in configs:
++            try:
++                r = measure(x, sets, cfg, args.min_seconds, only=key)
++            except Exception as exc:  # OutOfResources / CompilationError / ...
++                print(f"  skip: {type(exc).__name__}")
++                continue
++            results.append((r[key], cfg, r))
++        results.sort(key=lambda t: t[0])
++        print(f"\n== M={rows} best {key} ==")
++        for us, cfg, r in results[:10]:
++            if args.sweep == "down":
++                tag = f"bn{cfg.block_n} bk{cfg.block_k} bg{cfg.block_g} w{cfg.down_warps} s{cfg.down_stages}"
++            else:
++                tag = f"bj{cfg.block_j} br{cfg.block_r} w{cfg.up_warps} s{cfg.up_stages}"
++            print(f"  {us:6.2f} us  {tag}")
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/bench/w8a16/baseline_w8a16.py b/bench/w8a16/baseline_w8a16.py
+new file mode 100644
+index 0000000000..ad43d2fe52
+--- /dev/null
++++ b/bench/w8a16/baseline_w8a16.py
+@@ -0,0 +1,70 @@
++# Frozen copy of the pre-optimization kernel (git HEAD at codex/perf-v1) used as the
++# "before" arm of bench_w8a16.py. Do not edit; it exists only for A/B comparison.
++"""Triton W8A16 skinny GEMM: y[M,N] = x[M,K](bf16) @ W[N,K](fp8 e4m3)^T * scale[N] (fp32).
++Targets decode/verify shapes (M <= 16). Weight-only FP8: no activation quantization.
++"""
++import torch, triton, triton.language as tl
++
++@triton.jit
++def _w8a16_gemv_kernel(x_ptr, w_ptr, s_ptr, y_ptr, M, N, K,
++                       stride_xm, stride_xk, stride_wn, stride_wk, stride_ym, stride_yn,
++                       PER_CHANNEL: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr, M_PAD: tl.constexpr):
++    pid = tl.program_id(0)
++    offs_n = pid * BLOCK_N + tl.arange(0, BLOCK_N)
++    offs_m = tl.arange(0, M_PAD)
++    offs_k = tl.arange(0, BLOCK_K)
++    n_mask = offs_n < N
++    m_mask = offs_m < M
++    acc = tl.zeros((M_PAD, BLOCK_N), dtype=tl.float32)
++    for k0 in range(0, K, BLOCK_K):
++        kk = k0 + offs_k
++        k_mask = kk < K
++        w = tl.load(w_ptr + offs_n[:, None] * stride_wn + kk[None, :] * stride_wk,
++                    mask=n_mask[:, None] & k_mask[None, :], other=0.0)          # [BLOCK_N, BLOCK_K] fp8
++        x = tl.load(x_ptr + offs_m[:, None] * stride_xm + kk[None, :] * stride_xk,
++                    mask=m_mask[:, None] & k_mask[None, :], other=0.0)          # [M_PAD, BLOCK_K] bf16
++        acc += tl.dot(x, tl.trans(w.to(tl.bfloat16)), out_dtype=tl.float32)
++    if PER_CHANNEL:
++        s = tl.load(s_ptr + offs_n, mask=n_mask, other=0.0)
++        acc = acc * s[None, :]
++    else:
++        s = tl.load(s_ptr)
++        acc = acc * s
++    y_ptrs = y_ptr + offs_m[:, None] * stride_ym + offs_n[None, :] * stride_yn
++    tl.store(y_ptrs, acc.to(tl.bfloat16), mask=m_mask[:, None] & n_mask[None, :])
++
++
++def w8a16_gemv(x: torch.Tensor, w: torch.Tensor, scale: torch.Tensor, block_n=32, block_k=256, num_warps=4):
++    """x: [M,K] bf16; w: [N,K] fp8_e4m3 (any strides); scale: [N] or [N,1] or scalar fp32."""
++    M, K = x.shape
++    N = w.shape[0]
++    assert w.shape[1] == K and M <= 16
++    y = torch.empty((M, N), dtype=torch.bfloat16, device=x.device)
++    per_channel = scale.numel() > 1
++    s = scale.reshape(-1).contiguous().float()
++    grid = (triton.cdiv(N, block_n),)
++    _w8a16_gemv_kernel[grid](x, w, s, y, M, N, K,
++                             x.stride(0), x.stride(1), w.stride(0), w.stride(1), y.stride(0), y.stride(1),
++                             PER_CHANNEL=per_channel, BLOCK_N=block_n, BLOCK_K=block_k, M_PAD=16, num_warps=num_warps)
++    return y
++
++
++_ONES = {}
++
++
++def bf16_gemv(x: torch.Tensor, w: torch.Tensor, block_n=32, block_k=512, num_warps=4):
++    """Skinny BF16 GEMM y = x @ w^T for tiny-N linears where cuBLAS picks a poor kernel.
++    x: [M,K] bf16 (M<=16); w: [N,K] bf16."""
++    M, K = x.shape
++    N = w.shape[0]
++    assert w.shape[1] == K and M <= 16
++    y = torch.empty((M, N), dtype=torch.bfloat16, device=x.device)
++    one = _ONES.get(x.device)
++    if one is None:
++        one = torch.ones(1, dtype=torch.float32, device=x.device)
++        _ONES[x.device] = one
++    grid = (triton.cdiv(N, block_n),)
++    _w8a16_gemv_kernel[grid](x, w, one, y, M, N, K,
++                             x.stride(0), x.stride(1), w.stride(0), w.stride(1), y.stride(0), y.stride(1),
++                             PER_CHANNEL=False, BLOCK_N=block_n, BLOCK_K=block_k, M_PAD=16, num_warps=num_warps)
++    return y
+diff --git a/bench/w8a16/bench_w8a16.py b/bench/w8a16/bench_w8a16.py
+new file mode 100644
+index 0000000000..362fc1877e
+--- /dev/null
++++ b/bench/w8a16/bench_w8a16.py
+@@ -0,0 +1,120 @@
++"""A/B benchmark for the W8A16 skinny GEMV: frozen baseline vs. the current dispatcher.
++
++Each measurement replays a CUDA graph that rotates over >=24 distinct weight copies
++(sized so the working set is ~4x the 128 MB L2), so the achieved TB/s is HBM traffic.
++
++Usage:
++  bench_w8a16.py                 # all shapes, all M
++  bench_w8a16.py --shapes shared_gate_up,shared_down --m 1,16
++"""
++
++import argparse, os, sys
++
++sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
++sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../python"))
++
++import torch
++import baseline_w8a16 as base
++from harness import make_copies, n_copies, require_idle_gpu, time_graph
++from shapes import DEFAULT_MS, MODES, SHAPE_MS, SHAPES, make_weight
++
++from sglang.srt.layers.quantization import w8a16_gemv as new
++
++
++def bench_one(name, N, K, tag, Ms, iters):
++    dev = "cuda"
++    w, scale, wref = make_weight(N, K, tag, dev)
++    esz = 1 if tag == "fp8" else 2
++    wbytes = N * K * esz
++    ncp = n_copies(wbytes)
++    copies = make_copies(w, ncp)
++    rows = []
++    for M in Ms:
++        x = (torch.randn(M, K, device=dev) * 0.5).to(torch.bfloat16)
++        ref = x.float() @ wref.t()
++        rowdata = {}
++        for label, mod in (("before", base), ("after", new)):
++            if tag == "fp8":
++                fn = lambda a, m=mod: m.w8a16_gemv(x, a, scale)
++            else:
++                fn = lambda a, m=mod: m.bf16_gemv(x, a)
++            y = fn(copies[0])
++            err = (y.float() - ref).abs().max().item()
++            rowdata[label] = (time_graph(fn, copies, iters=iters), err)
++            # Same graph shape, one weight: the draft steps re-read the same weights
++            # 3-14x per decode step, so those calls run L2-warm in the server.
++            rowdata[label + "_warm"] = (time_graph(fn, [copies[0]] * 24, iters=iters), err)
++        cfg = new._plan(M, N, K, w.stride(0) == 1, new._num_sms(dev), w.element_size())
++        rows.append((name, N, K, tag, M, wbytes, rowdata, cfg))
++        del x, ref
++    del copies, w, wref
++    torch.cuda.empty_cache()
++    return rows
++
++
++def fmt(rows):
++    hdr = (f"{'shape':<18}{'N':>7}{'K':>7}{'M':>3} {'before us':>10}{'after us':>10}"
++           f"{'speedup':>9}{'TB/s bef':>9}{'TB/s aft':>9}{'warm us':>9}  "
++           f"{'err bef':>9}{'err aft':>9}  config")
++    print(hdr)
++    print("-" * len(hdr))
++    for name, N, K, tag, M, wbytes, d, cfg in rows:
++        b, a, aw = d["before"], d["after"], d["after_warm"]
++        print(f"{name:<18}{N:>7}{K:>7}{M:>3} {b[0]*1e6:>10.2f}{a[0]*1e6:>10.2f}"
++              f"{b[0]/a[0]:>8.2f}x{wbytes/b[0]/1e12:>9.2f}{wbytes/a[0]/1e12:>9.2f}"
++              f"{aw[0]*1e6:>9.2f}  {b[1]:>9.2e}{a[1]:>9.2e}  {cfg}")
++
++
++def savings(rows):
++    """ms/step saved, using the verify-pass + draft-step call model in shapes.py.
++
++    "cold" charges every call the L2-defeating time. "mixed" is the closer model of the
++    server: the verify pass streams each weight once (cold), while the draft steps rerun
++    one MTP layer and the draft head n_draft times over weights that stay in L2 (warm).
++    """
++    by = {(r[0], r[4]): r[6] for r in rows}
++    print()
++    for mode, (spec_w, n_draft) in MODES.items():
++        for how, draft_key in (("cold ", ""), ("mixed", "_warm")):
++            tot_b = tot_a = 0.0
++            calls = 0
++            missing = []
++            for name, n_verify, n_draft_calls in ((s[0], s[4], s[5]) for s in SHAPES):
++                for M, c, key in ((spec_w, n_verify, ""), (1, n_draft_calls * n_draft, draft_key)):
++                    if c == 0:
++                        continue
++                    d = by.get((name, M))
++                    if d is None:
++                        missing.append((name, M))
++                        continue
++                    tot_b += d["before" + key][0] * c
++                    tot_a += d["after" + key][0] * c
++                    calls += c
++            print(f"{mode} {how}: spec_width={spec_w} draft_steps={n_draft} calls={calls}  "
++                  f"before {tot_b*1e3:.3f} -> after {tot_a*1e3:.3f} ms/step  "
++                  f"(saved {(tot_b-tot_a)*1e3:.3f} ms/step, {100*(tot_b-tot_a)/tot_b:.1f}%)")
++            if missing:
++                print(f"   (not measured, excluded: {missing})")
++
++
++if __name__ == "__main__":
++    ap = argparse.ArgumentParser()
++    ap.add_argument("--shapes", default="")
++    ap.add_argument("--m", default="")
++    ap.add_argument("--iters", type=int, default=50)
++    a = ap.parse_args()
++    require_idle_gpu()
++    torch.manual_seed(0)
++    print(f"device: {torch.cuda.get_device_name()}  "
++          f"SMs={torch.cuda.get_device_properties(0).multi_processor_count}")
++    want = set(a.shapes.split(",")) if a.shapes else None
++    forced = [int(v) for v in a.m.split(",")] if a.m else None
++    rows = []
++    for name, N, K, tag, _, _ in SHAPES:
++        if want and name not in want:
++            continue
++        Ms = forced or list(SHAPE_MS.get(name, DEFAULT_MS))
++        rows += bench_one(name, N, K, tag, Ms, a.iters)
++    fmt(rows)
++    if not want and not forced:
++        savings(rows)
+diff --git a/bench/w8a16/harness.py b/bench/w8a16/harness.py
+new file mode 100644
+index 0000000000..2de4cb41d7
+--- /dev/null
++++ b/bench/w8a16/harness.py
+@@ -0,0 +1,70 @@
++"""CUDA-graph replay timing for the W8A16 skinny GEMV.
++
++Every measurement rotates over enough distinct weight copies that the working set is
++several times the 128 MB L2, so the timing reflects HBM traffic and not a cache hit.
++"""
++
++import torch
++
++L2_BYTES = 128 << 20
++WORKING_SET_TARGET = 4 * L2_BYTES  # 512 MB: ~4x L2
++MEM_BUDGET = 6 << 30
++
++
++def n_copies(weight_bytes: int, lo: int = 24, hi: int = 128) -> int:
++    n = max(lo, -(-WORKING_SET_TARGET // weight_bytes))
++    n = min(n, hi, max(2, MEM_BUDGET // weight_bytes))
++    return int(n)
++
++
++def make_copies(w, n):
++    """n distinct byte-identical copies of w, preserving its stride layout."""
++    out = [w]
++    for _ in range(n - 1):
++        c = torch.empty_strided(w.shape, w.stride(), dtype=w.dtype, device=w.device)
++        c.copy_(w)
++        out.append(c)
++    return out
++
++
++def time_graph(call, args_list, iters=50, warmup=2):
++    """call(arg) once per element of args_list, captured in one graph, replayed `iters` times.
++
++    Returns seconds per call. Raises whatever the callable raises during warmup.
++    """
++    s = torch.cuda.Stream()
++    s.wait_stream(torch.cuda.current_stream())
++    with torch.cuda.stream(s):
++        for _ in range(warmup):
++            for a in args_list:
++                call(a)
++    torch.cuda.current_stream().wait_stream(s)
++    torch.cuda.synchronize()
++
++    g = torch.cuda.CUDAGraph()
++    with torch.cuda.graph(g):
++        for a in args_list:
++            call(a)
++    torch.cuda.synchronize()
++    g.replay()
++    torch.cuda.synchronize()
++
++    start, end = torch.cuda.Event(True), torch.cuda.Event(True)
++    start.record()
++    for _ in range(iters):
++        g.replay()
++    end.record()
++    torch.cuda.synchronize()
++    dt = start.elapsed_time(end) / 1e3 / (iters * len(args_list))
++    del g
++    return dt
++
++
++def require_idle_gpu():
++    import subprocess
++
++    out = subprocess.run(
++        ["nvidia-smi", "--query-compute-apps=pid", "--format=csv,noheader"],
++        capture_output=True, text=True).stdout.strip()
++    if out:
++        raise SystemExit(f"GPU busy (compute pids: {out.splitlines()}); refusing to benchmark.")
+diff --git a/bench/w8a16/shapes.py b/bench/w8a16/shapes.py
+new file mode 100644
+index 0000000000..71f2ab66c7
+--- /dev/null
++++ b/bench/w8a16/shapes.py
+@@ -0,0 +1,63 @@
++"""Decode-time skinny-GEMM shapes of Qwen3.8-Flash-Next (qwen4_exp), single GPU, TP=1.
++
++Derived from models/RadixArk/Qwen3.8-Flash-Next-NVFP4/config.json text_config:
++hidden=2560, linear_num_key_heads=16 * linear_key_head_dim=128 -> key_dim=2048,
++linear_num_value_heads=48 * linear_value_head_dim=128 -> value_dim=6144,
++num_attention_heads=24, head_dim=256, num_key_value_heads=2, attn_output_gate=True,
++shared_expert_intermediate_size=640, num_experts=512, vocab=248320.
++
++Weight layout matters for the kernel and is reproduced here:
++  fp8  (Fp8LinearMethod.apply) passes ``layer.weight.t()``: storage is [K, N]
++       contiguous, so the [N, K] view has stride (1, N) -- N is the contiguous axis.
++  bf16 (bf16_gemv) passes ``linear.weight``: [N, K] contiguous, stride (K, 1).
++"""
++
++import torch
++
++HIDDEN = 2560
++KEY_DIM = 16 * 128
++VALUE_DIM = 48 * 128
++QKV_OUT = (24 * 2) * 256 + 2 * 2 * 256  # q+gate, k, v with attn_output_gate
++SHARED_INTER = 640
++VOCAB = 248320
++
++# name, N, K, weight dtype tag, calls in the verify pass (M = spec width),
++# calls per draft step (M = 1). 229 verify + 5 per draft step reproduces the observed
++# 244 calls/step at W4 (3 draft steps) and ~304 at W16 (14 draft steps).
++SHAPES = [
++    ("shared_gate_up", 2 * SHARED_INTER, HIDDEN, "fp8", 48, 1),
++    ("shared_down", HIDDEN, SHARED_INTER, "fp8", 48, 1),
++    ("gdn_in_proj_qkvz", 2 * KEY_DIM + 2 * VALUE_DIM, HIDDEN, "fp8", 36, 0),
++    ("gdn_in_proj_ba", 2 * 48, HIDDEN, "bf16", 36, 0),
++    ("gdn_out_proj", HIDDEN, VALUE_DIM, "fp8", 36, 0),
++    ("attn_qkv", QKV_OUT, HIDDEN, "fp8", 12, 1),
++    ("attn_o", HIDDEN, 24 * 256, "fp8", 12, 1),
++    ("moe_router_gate", 512, HIDDEN, "bf16", 0, 0),  # measured, not in the call model
++    ("draft_head", 32768, HIDDEN, "fp8", 0, 1),
++    ("lm_head", VOCAB, HIDDEN, "fp8", 1, 0),
++]
++
++# M values that actually occur: 1 on draft steps, spec width on the verify pass.
++SHAPE_MS = {
++    "lm_head": (1, 4, 16),
++    "draft_head": (1,),
++}
++DEFAULT_MS = (1, 4, 16)
++
++# spec width on the verify pass, number of draft steps
++MODES = {"W16": (16, 14), "W4": (4, 3)}
++
++
++def make_weight(N, K, tag, device="cuda", seed=0):
++    """Return (w_view[N,K], scale, ref_w_fp32[N,K]) in the exact layout the server uses."""
++    g = torch.Generator(device=device).manual_seed(seed)
++    if tag == "bf16":
++        w = (torch.randn(N, K, device=device, generator=g) * 0.02).to(torch.bfloat16)
++        return w, torch.ones(1, dtype=torch.float32, device=device), w.float()
++    wb = (torch.randn(N, K, device=device, generator=g) * 0.02).float()
++    scale = (wb.abs().amax(dim=1).clamp(min=1e-8) / 448.0).contiguous()
++    q = (wb / scale[:, None]).clamp(-448, 448).to(torch.float8_e4m3fn)
++    # Server layout: fp8 weight is stored [K, N] and viewed transposed.
++    storage = q.t().contiguous()
++    w = storage.t()
++    return w, scale.reshape(N, 1), (w.float() * scale[:, None])
+diff --git a/bench/w8a16/tune_w8a16.py b/bench/w8a16/tune_w8a16.py
+new file mode 100644
+index 0000000000..1a8a34bac6
+--- /dev/null
++++ b/bench/w8a16/tune_w8a16.py
+@@ -0,0 +1,119 @@
++"""Config sweep for the W8A16 skinny GEMV. Prints _TUNED table entries.
++
++Usage: tune_w8a16.py <shape_name> [<shape_name> ...] [--m 1,16]
++Run one shape per process: a full sweep is dominated by Triton compilation.
++"""
++
++import argparse, os, sys, time
++
++sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
++sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../python"))
++
++import torch, triton
++from harness import make_copies, n_copies, require_idle_gpu, time_graph
++from shapes import SHAPES, make_weight
++
++from sglang.srt.layers.quantization import w8a16_gemv as mod
++
++
++def coarse_configs(M, N, K, contig_n, sms, w_bytes):
++    bns = [16, 32, 64, 128, 256] if contig_n else [8, 16, 32, 64, 128]
++    out = []
++    for bn in bns:
++        if M > 1 and bn < 16:
++            continue
++        if bn >= 2 * triton.next_power_of_2(N) and bn > 16:
++            continue
++        n_tiles = triton.cdiv(N, bn)
++        for bk in (64, 128, 256, 512):
++            if bn * bk > 65536 or bk > 2 * triton.next_power_of_2(K):
++                continue
++            if M == 1 and bn * bk > 16384:  # fp32 broadcast temp lives in registers
++                continue
++            if mod._stage_bytes(bn, bk, M, w_bytes) > mod._SMEM_PER_STAGE:
++                continue
++            n_kblk = triton.cdiv(K, bk)
++            for sk in (1, 2, 3, 4, 5, 6, 8, 10, 12, 16, 20, 24, 32, 40):
++                if n_kblk % sk or sk > n_kblk:
++                    continue
++                ctas = n_tiles * sk
++                if sk > 1 and not (sms // 2 <= ctas <= 6 * sms):
++                    continue
++                if sk == 1 and ctas < sms // 8:
++                    continue
++                out.append((bn, bk, sk, 4, min(4, max(2, n_kblk // sk))))
++    return out
++
++
++def refine_configs(base):
++    bn, bk, sk, _, ns0 = base
++    return [(bn, bk, sk, nw, ns) for nw in (2, 4, 8) for ns in {2, ns0, 4}]
++
++
++def run(name, N, K, tag, Ms, iters, budget_s):
++    dev = "cuda"
++    w, scale, wref = make_weight(N, K, tag, dev)
++    esz = 1 if tag == "fp8" else 2
++    ncp = n_copies(N * K * esz)
++    copies = make_copies(w, ncp)
++    sms = torch.cuda.get_device_properties(dev).multi_processor_count
++    contig_n = w.stride(0) == 1
++    gib = N * K * esz / 1e9
++    print(f"# {name}: N={N} K={K} {tag} contig_n={contig_n} copies={ncp} "
++          f"({ncp * N * K * esz / 1e6:.0f} MB)", flush=True)
++
++    for M in Ms:
++        x = (torch.randn(M, K, device=dev) * 0.5).to(torch.bfloat16)
++        ref = x.float() @ wref.t()
++        fn = (lambda a, s=scale: mod.w8a16_gemv(x, a, s, cfg=cfg)) if tag == "fp8" else \
++             (lambda a: mod.bf16_gemv(x, a, cfg=cfg))
++        results = []
++        t0 = time.time()
++        cands = coarse_configs(M, N, K, contig_n, sms, 1 if tag == 'fp8' else 2)
++        stage = "coarse"
++        i = 0
++        while i < len(cands):
++            cfg = cands[i]
++            i += 1
++            try:
++                y = fn(copies[0])
++                err = (y.float() - ref).abs().max().item()
++                if not (err == err):
++                    continue
++                dt = time_graph(fn, copies, iters=iters)
++            except Exception as e:
++                print(f"#   skip {cfg}: {type(e).__name__}: {str(e)[:90]}", flush=True)
++                continue
++            results.append((dt, cfg, err))
++            if stage == "coarse" and i == len(cands):
++                results.sort()
++                stage = "refine"
++                cands = cands + [c for b in results[:2] for c in refine_configs(b[1])]
++            if time.time() - t0 > budget_s:
++                print(f"#   (budget hit after {i} configs)", flush=True)
++                break
++        results.sort()
++        best = results[0]
++        for dt, cfg, err in results[:5]:
++            print(f"#   M={M:2d} {cfg} {dt*1e6:8.2f} us  {gib/dt/1e3:5.2f} TB/s  err={err:.3e}",
++                  flush=True)
++        print(f"    ({contig_n}, {mod._m_bucket(M)}, {N}, {K}): {best[1]},  "
++              f"# {name} M={M} {best[0]*1e6:.1f}us", flush=True)
++        del x, ref
++    del copies, w, wref
++    torch.cuda.empty_cache()
++
++
++if __name__ == "__main__":
++    ap = argparse.ArgumentParser()
++    ap.add_argument("names", nargs="+")
++    ap.add_argument("--m", default="1,16")
++    ap.add_argument("--iters", type=int, default=8)
++    ap.add_argument("--budget", type=float, default=45.0, help="seconds per (shape, M)")
++    a = ap.parse_args()
++    require_idle_gpu()
++    by_name = {s[0]: s for s in SHAPES}
++    Ms = [int(v) for v in a.m.split(",")]
++    for n in a.names:
++        _, N, K, tag, _, _ = by_name[n]
++        run(n, N, K, tag, Ms, a.iters, a.budget)
+diff --git a/bench/w8a16/w8a16_gemv_tuned_attempt.py b/bench/w8a16/w8a16_gemv_tuned_attempt.py
+new file mode 100644
+index 0000000000..609eb6937b
+--- /dev/null
++++ b/bench/w8a16/w8a16_gemv_tuned_attempt.py
+@@ -0,0 +1,296 @@
++"""Triton W8A16 skinny GEMM: y[M,N] = x[M,K](bf16) @ W[N,K](fp8 e4m3)^T * scale[N] (fp32).
++Targets decode/verify shapes (M <= 16). Weight-only FP8: no activation quantization.
++
++Two things decide throughput here, both measured in bench/w8a16/:
++
++- Weight layout. Fp8LinearMethod stores the weight [K, N] and hands over the [N, K]
++  transpose, so N is the contiguous axis and a [BLOCK_K, BLOCK_N] tile is the natural
++  load; bf16_gemv passes a [N, K] weight, where [BLOCK_N, BLOCK_K] is. Loading in the
++  wrong orientation costs 25% on large N and 3x on N=2560/K=6144.
++- Grid size. Small-N shapes (shared-expert gate_up/down, GDN out_proj, in_proj_ba)
++  launch far fewer CTAs than the machine has SMs when each CTA owns a whole K
++  reduction, so the dispatcher splits K across CTAs and reduces fp32 partials in a
++  second launch. That pays for the extra launch only while M is small.
++"""
++import functools
++
++import torch, triton, triton.language as tl
++
++@triton.jit
++def _w8a16_gemv_kernel(x_ptr, w_ptr, s_ptr, y_ptr, M, N, K,
++                       stride_xm, stride_xk, stride_wn, stride_wk, stride_ym, stride_yn,
++                       PER_CHANNEL: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
++                       M_PAD: tl.constexpr, SPLIT_K: tl.constexpr, EVEN_K: tl.constexpr,
++                       PARTIAL: tl.constexpr, W_KN: tl.constexpr):
++    pid_n = tl.program_id(0)
++    pid_k = tl.program_id(1)
++    offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
++    offs_m = tl.arange(0, M_PAD)
++    offs_k = tl.arange(0, BLOCK_K)
++    n_mask = offs_n < N
++    m_mask = offs_m < M
++    x_base = x_ptr + offs_m[:, None] * stride_xm
++    acc = tl.zeros((M_PAD, BLOCK_N), dtype=tl.float32)
++    for k0 in range(pid_k * BLOCK_K, K, SPLIT_K * BLOCK_K):
++        kk = k0 + offs_k
++        k_mask = kk < K
++        if EVEN_K:
++            x = tl.load(x_base + kk[None, :] * stride_xk, mask=m_mask[:, None], other=0.0)
++        else:
++            x = tl.load(x_base + kk[None, :] * stride_xk,
++                        mask=m_mask[:, None] & k_mask[None, :], other=0.0)
++        # W_KN: the [N,K] view has stride (1, N), so a [BLOCK_K, BLOCK_N] tile is the
++        # contiguous one and tl.dot takes it directly instead of transposing in smem.
++        if W_KN:
++            wp = w_ptr + kk[:, None] * stride_wk + offs_n[None, :] * stride_wn
++            wm = n_mask[None, :] if EVEN_K else (k_mask[:, None] & n_mask[None, :])
++            acc += tl.dot(x, tl.load(wp, mask=wm, other=0.0).to(tl.bfloat16),
++                          out_dtype=tl.float32)
++        else:
++            wp = w_ptr + offs_n[:, None] * stride_wn + kk[None, :] * stride_wk
++            wm = n_mask[:, None] if EVEN_K else (n_mask[:, None] & k_mask[None, :])
++            acc += tl.dot(x, tl.trans(tl.load(wp, mask=wm, other=0.0).to(tl.bfloat16)),
++                          out_dtype=tl.float32)
++    if PARTIAL:
++        # y_ptr is the fp32 [SPLIT_K, M_PAD, N] workspace; scale is applied by the reducer.
++        p = y_ptr + pid_k * (M_PAD * N) + offs_m[:, None] * N + offs_n[None, :]
++        tl.store(p, acc, mask=m_mask[:, None] & n_mask[None, :])
++        return
++    if PER_CHANNEL:
++        acc = acc * tl.load(s_ptr + offs_n, mask=n_mask, other=0.0)[None, :]
++    else:
++        acc = acc * tl.load(s_ptr)
++    y_ptrs = y_ptr + offs_m[:, None] * stride_ym + offs_n[None, :] * stride_yn
++    tl.store(y_ptrs, acc.to(tl.bfloat16), mask=m_mask[:, None] & n_mask[None, :])
++
++
++@triton.jit
++def _w8a16_gemv_m1_kernel(x_ptr, w_ptr, s_ptr, y_ptr, N, K,
++                          stride_wn, stride_wk, stride_xk, stride_yn,
++                          PER_CHANNEL: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
++                          SPLIT_K: tl.constexpr, EVEN_K: tl.constexpr, PARTIAL: tl.constexpr,
++                          W_KN: tl.constexpr):
++    """M == 1: broadcast-multiply + reduction instead of a 16-row tl.dot."""
++    pid_n = tl.program_id(0)
++    pid_k = tl.program_id(1)
++    offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
++    offs_k = tl.arange(0, BLOCK_K)
++    n_mask = offs_n < N
++    acc = tl.zeros((BLOCK_N,), dtype=tl.float32)
++    for k0 in range(pid_k * BLOCK_K, K, SPLIT_K * BLOCK_K):
++        kk = k0 + offs_k
++        k_mask = kk < K
++        if EVEN_K:
++            xv = tl.load(x_ptr + kk * stride_xk)
++        else:
++            xv = tl.load(x_ptr + kk * stride_xk, mask=k_mask, other=0.0)
++        if W_KN:
++            wp = w_ptr + kk[:, None] * stride_wk + offs_n[None, :] * stride_wn
++            wm = n_mask[None, :] if EVEN_K else (k_mask[:, None] & n_mask[None, :])
++            w = tl.load(wp, mask=wm, other=0.0)
++            acc += tl.sum(w.to(tl.float32) * xv[:, None].to(tl.float32), axis=0)
++        else:
++            wp = w_ptr + offs_n[:, None] * stride_wn + kk[None, :] * stride_wk
++            wm = n_mask[:, None] if EVEN_K else (n_mask[:, None] & k_mask[None, :])
++            w = tl.load(wp, mask=wm, other=0.0)
++            acc += tl.sum(w.to(tl.float32) * xv[None, :].to(tl.float32), axis=1)
++    if PARTIAL:
++        tl.store(y_ptr + pid_k * N + offs_n, acc, mask=n_mask)
++        return
++    if PER_CHANNEL:
++        acc = acc * tl.load(s_ptr + offs_n, mask=n_mask, other=0.0)
++    else:
++        acc = acc * tl.load(s_ptr)
++    tl.store(y_ptr + offs_n * stride_yn, acc.to(tl.bfloat16), mask=n_mask)
++
++
++@triton.jit
++def _w8a16_reduce_kernel(p_ptr, s_ptr, y_ptr, M, N, stride_ym, stride_yn,
++                         PER_CHANNEL: tl.constexpr, SPLIT_K: tl.constexpr,
++                         BLOCK_N: tl.constexpr, M_PAD: tl.constexpr):
++    pid = tl.program_id(0)
++    offs_n = pid * BLOCK_N + tl.arange(0, BLOCK_N)
++    offs_m = tl.arange(0, M_PAD)
++    n_mask = offs_n < N
++    mask = (offs_m < M)[:, None] & n_mask[None, :]
++    base = p_ptr + offs_m[:, None] * N + offs_n[None, :]
++    acc = tl.zeros((M_PAD, BLOCK_N), dtype=tl.float32)
++    for i in tl.static_range(SPLIT_K):
++        acc += tl.load(base + i * (M_PAD * N), mask=mask, other=0.0)
++    if PER_CHANNEL:
++        acc = acc * tl.load(s_ptr + offs_n, mask=n_mask, other=0.0)[None, :]
++    else:
++        acc = acc * tl.load(s_ptr)
++    tl.store(y_ptr + offs_m[:, None] * stride_ym + offs_n[None, :] * stride_yn,
++             acc.to(tl.bfloat16), mask=mask)
++
++
++_NUM_SMS = None
++
++
++def _num_sms(device) -> int:
++    global _NUM_SMS
++    if _NUM_SMS is None:
++        _NUM_SMS = torch.cuda.get_device_properties(device).multi_processor_count
++    return _NUM_SMS
++
++
++# Measured on RTX PRO 6000 Blackwell (sm_120, 188 SMs) for the Qwen3.8-Flash-Next decode
++# shapes; re-run bench/w8a16/tune_w8a16.py after a kernel or hardware change.
++# key: (contiguous_n, w_bytes, M_bucket, N, K)
++#   -> (BLOCK_N, BLOCK_K, SPLIT_K, num_warps, num_stages)
++_TUNED = {
++    # fp8 weight stored [K, N] (Fp8LinearMethod passes layer.weight.t())
++    (True, 1, 1, 1280, 2560): (64, 256, 10, 2, 2),    # shared_expert gate_up
++    (True, 1, 4, 1280, 2560): (64, 64, 8, 4, 4),
++    (True, 1, 16, 1280, 2560): (32, 64, 4, 4, 4),
++    (True, 1, 1, 2560, 640): (32, 512, 2, 4, 2),      # shared_expert down
++    (True, 1, 4, 2560, 640): (32, 64, 2, 4, 4),
++    (True, 1, 16, 2560, 640): (16, 64, 1, 4, 4),
++    (True, 1, 1, 2560, 6144): (64, 256, 12, 4, 2),    # GDN out_proj, attention o_proj
++    (True, 1, 4, 2560, 6144): (128, 64, 8, 8, 4),
++    (True, 1, 16, 2560, 6144): (64, 64, 4, 8, 4),
++    (True, 1, 1, 16384, 2560): (128, 128, 4, 2, 2),   # GDN in_proj_qkvz
++    (True, 1, 4, 16384, 2560): (64, 64, 1, 4, 4),
++    (True, 1, 16, 16384, 2560): (128, 64, 1, 4, 4),
++    (True, 1, 1, 13312, 2560): (128, 128, 4, 4, 4),   # attention qkv_proj (with output gate)
++    (True, 1, 4, 13312, 2560): (128, 64, 5, 2, 2),
++    (True, 1, 16, 13312, 2560): (256, 64, 2, 4, 4),
++    (True, 1, 1, 32768, 2560): (64, 256, 1, 2, 4),    # draft head
++    (True, 1, 1, 248320, 2560): (128, 128, 1, 2, 4),  # lm_head
++    (True, 1, 4, 248320, 2560): (128, 64, 1, 4, 4),
++    (True, 1, 16, 248320, 2560): (128, 64, 1, 4, 4),
++    # bf16 weight stored [N, K] (bf16_gemv passes linear.weight)
++    (False, 2, 1, 96, 2560): (8, 256, 10, 4, 2),      # GDN in_proj_ba
++    (False, 2, 4, 96, 2560): (16, 128, 20, 2, 2),
++    (False, 2, 16, 96, 2560): (16, 128, 20, 4, 2),
++    (False, 2, 1, 512, 2560): (8, 256, 10, 4, 2),     # MoE router gate
++    (False, 2, 4, 512, 2560): (16, 128, 5, 2, 4),
++    (False, 2, 16, 512, 2560): (16, 256, 1, 2, 4),
++}
++
++
++def _m_bucket(M: int) -> int:
++    return 1 if M == 1 else (4 if M <= 4 else 16)
++
++
++def _largest_divisor_le(n: int, cap: int) -> int:
++    d = 1
++    for c in range(1, min(n, cap) + 1):
++        if n % c == 0:
++            d = c
++    return d
++
++
++# One pipeline stage buffers the w tile plus the x tile in shared memory. sm_120 offers
++# 100 KB/CTA; cap a single stage well under that and derive the depth from what is left.
++_SMEM_PER_STAGE = 40960
++_SMEM_TOTAL = 98304
++
++
++def _stage_bytes(bn: int, bk: int, M: int, w_bytes: int) -> int:
++    return bk * (bn * w_bytes + (2 if M == 1 else 2 * 16))
++
++
++@functools.lru_cache(maxsize=None)
++def _plan(M: int, N: int, K: int, contig_n: bool, sms: int, w_bytes: int):
++    """Pick (BLOCK_N, BLOCK_K, SPLIT_K, num_warps, num_stages) for one call."""
++    tuned = _TUNED.get((contig_n, w_bytes, _m_bucket(M), N, K))
++    if tuned is not None and _stage_bytes(tuned[0], tuned[1], M, w_bytes) * tuned[4] <= _SMEM_TOTAL:
++        return tuned
++    min_n = 16 if (M > 1 or contig_n) else 8  # tl.dot needs a 16-wide tile
++    target = 2 * sms
++    best, best_score = None, -1.0
++    for bn in (128, 64, 32, 16, 8):
++        if bn < min_n or (bn > 16 and bn >= 2 * triton.next_power_of_2(N)):
++            continue
++        n_tiles = triton.cdiv(N, bn)
++        # Each split writes and re-reads M*N fp32; keep that under half the weight bytes.
++        want = max(1, min(target // n_tiles, K * w_bytes // (16 * M)))
++        for bk in (512, 256, 128, 64, 32, 16):
++            if bn * bk > (16384 if M == 1 else 65536) or bk > max(16, 2 * triton.next_power_of_2(K)):
++                continue
++            stage = _stage_bytes(bn, bk, M, w_bytes)
++            if stage > _SMEM_PER_STAGE:
++                continue
++            n_kblk = triton.cdiv(K, bk)
++            # SPLIT_K must divide the k-block count or the splits do unequal work.
++            sk = _largest_divisor_le(n_kblk, want)
++            ctas = n_tiles * sk
++            # One contiguous run per load is bn bytes for the fp8 [K,N] layout and
++            # 2*bk bytes for the bf16 [N,K] layout; 128 B is a full cache line.
++            run = bn if contig_n else 2 * bk
++            score = (min(ctas, target) / target) * (min(run, 128) / 128)
++            score *= 1.0 if sk == 1 else 0.93  # the reducer costs one extra launch
++            score *= 1.0 if n_kblk // sk > 1 else 0.9
++            score *= 1.0 if ctas <= 4 * sms else 0.9
++            if score > best_score:
++                best, best_score = (bn, bk, sk, n_kblk // sk), score
++    bn, bk, sk, iters = best
++    stages = min(4, max(2, _SMEM_TOTAL // _stage_bytes(bn, bk, M, w_bytes)), max(2, iters))
++    return (bn, bk, sk, 4, stages)
++
++
++def _launch(x, w, s, y, M, N, K, per_channel, cfg):
++    block_n, block_k, split_k, num_warps, num_stages = cfg
++    even_k = K % (block_k * split_k) == 0
++    grid = (triton.cdiv(N, block_n), split_k)
++    use_m1 = M == 1
++    m_pad = 1 if use_m1 else 16
++    if split_k > 1:
++        part = torch.empty((split_k, m_pad, N), dtype=torch.float32, device=x.device)
++        out, sy0, sy1, partial = part, 0, 0, True
++    else:
++        out, sy0, sy1, partial = y, y.stride(0), y.stride(1), False
++    if use_m1:
++        _w8a16_gemv_m1_kernel[grid](x, w, s, out, N, K,
++                                    w.stride(0), w.stride(1), x.stride(1), sy1,
++                                    PER_CHANNEL=per_channel, BLOCK_N=block_n, BLOCK_K=block_k,
++                                    SPLIT_K=split_k, EVEN_K=even_k, PARTIAL=partial,
++                                    W_KN=w.stride(0) == 1,
++                                    num_warps=num_warps, num_stages=num_stages)
++    else:
++        _w8a16_gemv_kernel[grid](x, w, s, out, M, N, K,
++                                 x.stride(0), x.stride(1), w.stride(0), w.stride(1), sy0, sy1,
++                                 PER_CHANNEL=per_channel, BLOCK_N=block_n, BLOCK_K=block_k,
++                                 M_PAD=16, SPLIT_K=split_k, EVEN_K=even_k, PARTIAL=partial,
++                                 W_KN=w.stride(0) == 1,
++                                 num_warps=num_warps, num_stages=num_stages)
++    if split_k > 1:
++        rblock = 256 if N >= 256 else triton.next_power_of_2(N)
++        _w8a16_reduce_kernel[(triton.cdiv(N, rblock),)](
++            part, s, y, M, N, y.stride(0), y.stride(1),
++            PER_CHANNEL=per_channel, SPLIT_K=split_k, BLOCK_N=rblock, M_PAD=m_pad, num_warps=4)
++    return y
++
++
++def w8a16_gemv(x: torch.Tensor, w: torch.Tensor, scale: torch.Tensor, cfg=None):
++    """x: [M,K] bf16; w: [N,K] fp8_e4m3 (any strides); scale: [N] or [N,1] or scalar fp32."""
++    M, K = x.shape
++    N = w.shape[0]
++    assert w.shape[1] == K and M <= 16
++    y = torch.empty((M, N), dtype=torch.bfloat16, device=x.device)
++    s = scale.reshape(-1)
++    per_channel = s.numel() > 1
++    if cfg is None:
++        cfg = _plan(M, N, K, w.stride(0) == 1, _num_sms(x.device), w.element_size())
++    return _launch(x, w, s, y, M, N, K, per_channel, cfg)
++
++
++_ONES = {}
++
++
++def bf16_gemv(x: torch.Tensor, w: torch.Tensor, cfg=None):
++    """Skinny BF16 GEMM y = x @ w^T for tiny-N linears where cuBLAS picks a poor kernel.
++    x: [M,K] bf16 (M<=16); w: [N,K] bf16."""
++    M, K = x.shape
++    N = w.shape[0]
++    assert w.shape[1] == K and M <= 16
++    y = torch.empty((M, N), dtype=torch.bfloat16, device=x.device)
++    one = _ONES.get(x.device)
++    if one is None:
++        one = torch.ones(1, dtype=torch.float32, device=x.device)
++        _ONES[x.device] = one
++    if cfg is None:
++        cfg = _plan(M, N, K, w.stride(0) == 1, _num_sms(x.device), w.element_size())
++    return _launch(x, w, one, y, M, N, K, False, cfg)
+diff --git a/bench/w8a16v2/bench_gateup_fused.py b/bench/w8a16v2/bench_gateup_fused.py
+new file mode 100644
+index 0000000000..75ae677cc9
+--- /dev/null
++++ b/bench/w8a16v2/bench_gateup_fused.py
+@@ -0,0 +1,184 @@
++#!/usr/bin/env python3
++"""Shared-expert gate_up: two-kernel (GEMV + act_and_mul) vs the fused GEMV.
++
++Same methodology as bench_w8a16v2.py: CUPTI kernel-duration medians over
++CUDA-graph replay with a rotating weight working set >= 4x the 128 MB L2.
++
++  python bench/w8a16v2/bench_gateup_fused.py            # head to head, M=1,4,16
++  python bench/w8a16v2/bench_gateup_fused.py --sweep    # fused-tile sweep
++"""
++
++from __future__ import annotations
++
++import argparse
++import itertools
++import os
++import sys
++
++sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
++
++import torch  # noqa: E402
++import triton  # noqa: E402
++from harness import cupti_kernel_us, make_copies, n_copies  # noqa: E402
++
++from sglang.srt.layers.quantization.w8a16_gemv import (  # noqa: E402
++    _fused_plan,
++    _num_sms,
++    _plan,
++    w8a16_gemv,
++    w8a16_gemv_silu_mul,
++)
++
++# (N, K) of the shared-expert gate_up in flash-next: [gate 640 | up 640] x 2560.
++SHAPES = [(1280, 2560)]
++
++
++def _act():
++    """The activation the unfused path actually launches."""
++    try:
++        from sglang.srt.layers.activation import silu_and_mul
++
++        return silu_and_mul
++    except Exception:  # pragma: no cover - CPU-only import failure
++        def _torch_silu_and_mul(inp, out=None):
++            h = inp.shape[-1] // 2
++            y = (
++                torch.nn.functional.silu(inp[..., :h].float()) * inp[..., h:].float()
++            ).to(inp.dtype)
++            return y if out is None else out.copy_(y)
++
++        return _torch_silu_and_mul
++
++
++def _weights(N, K, copies):
++    torch.manual_seed(7)
++    w = torch.randn(N, K, device="cuda", dtype=torch.float32) * 0.02
++    scale = (w.abs().amax(dim=1) / 448.0).clamp(min=1e-12).float().contiguous()
++    q = (w / scale[:, None]).clamp(-448.0, 448.0).to(torch.float8_e4m3fn).contiguous()
++    del w
++    return make_copies(q, copies), scale
++
++
++def bench(M, N, K, min_seconds=0.25, fused_cfg=None):
++    copies = n_copies(N * K)
++    ws, scale = _weights(N, K, copies)
++    x = torch.randn(M, K, device="cuda", dtype=torch.bfloat16)
++    silu_and_mul = _act()
++
++    def two_kernel(w):
++        return silu_and_mul(w8a16_gemv(x, w, scale))
++
++    def fused(w):
++        return w8a16_gemv_silu_mul(x, w, scale, cfg=fused_cfg)
++
++    def _m(call, name_sub):
++        try:
++            us, n = cupti_kernel_us(call, ws, min_seconds=min_seconds, name_sub=name_sub)
++            return us * 1e6, n
++        except RuntimeError as exc:
++            print(f"  !! no events for {name_sub!r}: {exc}")
++            return float("nan"), 0
++
++    gemv_us, _ = _m(two_kernel, "_w8a16_gemv_kernel")
++    all_us, n_all = _m(two_kernel, None)
++    act_us, n_act = _m(two_kernel, "act_and_mul")
++    if n_act == 0:  # kernel name differs; take the non-gemv events
++        act_us, n_act = _m(two_kernel, "and_mul")
++    fused_us, _ = _m(fused, "_w8a16_gemv_silu_kernel")
++    del ws
++    torch.cuda.empty_cache()
++    return {
++        "gemv": gemv_us,
++        "act": act_us,
++        "act_events": n_act,
++        "any": all_us,
++        "fused": fused_us,
++        "copies": copies,
++    }
++
++
++def main():
++    ap = argparse.ArgumentParser()
++    ap.add_argument("--rows", type=int, nargs="*", default=[1, 4, 16])
++    ap.add_argument("--sweep", action="store_true")
++    ap.add_argument("--min-seconds", type=float, default=0.25)
++    args = ap.parse_args()
++
++    torch.cuda.init()
++    print(f"device: {torch.cuda.get_device_name(0)}")
++
++    for N, K in SHAPES:
++        if not args.sweep:
++            for M in args.rows:
++                r = bench(M, N, K, args.min_seconds)
++                two = r["gemv"] + r["act"]
++                print(
++                    f"N={N} K={K} M={M:>2}  ({r['copies']} copies)  "
++                    f"gemv {r['gemv']:6.2f} + act {r['act']:6.2f} = {two:6.2f}  "
++                    f"->  fused {r['fused']:6.2f} us   "
++                    f"(saving {two - r['fused']:+6.2f} us/call)"
++                )
++                print(
++                    f"    plan unfused {_plan(M, N, K, False, 1, _num_sms('cuda'))}"
++                    f"  fused {_fused_plan(M, N, K, _num_sms('cuda'))}"
++                )
++            continue
++
++        copies = n_copies(N * K)
++        ws, scale = _weights(N, K, copies)
++        for M in args.rows:
++            x = torch.randn(M, K, device="cuda", dtype=torch.bfloat16)
++            use_dot = M > 1
++            m_pad = 16 if use_dot else 1
++
++            def try_cfg(cfg):
++                if 2 * triton.cdiv(N // 2, cfg[0]) * cfg[2] * m_pad * cfg[0] > (1 << 21):
++                    return None
++
++                def call(w, cfg=cfg):
++                    return w8a16_gemv_silu_mul(x, w, scale, cfg=cfg)
++
++                try:
++                    us, _ = cupti_kernel_us(
++                        call,
++                        ws,
++                        min_seconds=args.min_seconds,
++                        name_sub="_w8a16_gemv_silu_kernel",
++                    )
++                except (triton.runtime.errors.OutOfResources, RuntimeError):
++                    return None
++                return us * 1e6
++
++            # Stage 1: geometry at a fixed (warps, stages).
++            stage1 = []
++            for bn, bk, splits in itertools.product(
++                (16, 32, 64), (64, 128, 256), (1, 2, 5, 10)
++            ):
++                cfg = (bn, bk, splits, use_dot, None, 4, 3)
++                us = try_cfg(cfg)
++                if us is not None:
++                    stage1.append((us, cfg))
++            stage1.sort(key=lambda t: t[0])
++            print(f"\n== N={N} K={K} M={M} stage 1 (warps=4, stages=3) ==")
++            for us, cfg in stage1[:6]:
++                print(f"  {us:6.2f} us  {cfg}")
++
++            # Stage 2: warps/stages around the top 3 geometries.
++            stage2 = list(stage1[:3])
++            for _, cfg in stage1[:3]:
++                for warps, stages in itertools.product((2, 4, 8), (2, 3, 4)):
++                    if (warps, stages) == (4, 3):
++                        continue
++                    c = (cfg[0], cfg[1], cfg[2], use_dot, None, warps, stages)
++                    us = try_cfg(c)
++                    if us is not None:
++                        stage2.append((us, c))
++            stage2.sort(key=lambda t: t[0])
++            print(f"== N={N} K={K} M={M} best fused tiles ==")
++            for us, cfg in stage2[:8]:
++                print(f"  {us:6.2f} us  {cfg}")
++        del ws
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/python/sglang/srt/layers/hc_mix2_triton.py b/python/sglang/srt/layers/hc_mix2_triton.py
+index 6946e10c13..38980cd1e8 100644
+--- a/python/sglang/srt/layers/hc_mix2_triton.py
++++ b/python/sglang/srt/layers/hc_mix2_triton.py
+@@ -25,6 +25,13 @@ far slower at M=16. See bench/hc_mix2 for the numbers.
+ 
+ A CTA's whole column range must lie inside one branch, hence the
+ ``hs % (BLOCK_K * BLOCK_G) == 0`` requirement: one ``inv_rms`` per row suffices.
++
++The two mix weights (6.5 MB each in bf16) are the whole cost of K1 and K2 at
++decode widths, so they can be carried as fp8 e4m3 with one fp32 scale per output
++row (``quantize_hc_mix2_weights_fp8``); K1 scales its fp32 partial by the per-n
++scale before the atomic add and K2 scales the finished accumulator by the per-j
++scale, both exact w.r.t. the split. ``SGLANG_HC_MIX2_FP8=1`` turns it on in
++``GatedResidual``; ``normed`` is unaffected (bit-identical) either way.
+ """
+ 
+ from __future__ import annotations
+@@ -62,30 +69,60 @@ class HCMix2Config(msgspec.Struct, frozen=True):
+     stats_warps: int = 8
+ 
+ 
+-def _env_config() -> HCMix2Config:
+-    def _int(name: str, default: int) -> int:
+-        return int(os.environ.get(name, str(default)))
+-
+-    default = HCMix2Config()
++# FP8 (e4m3) weights halve the bytes each K1/K2 tile streams, so the geometry
++# that was bandwidth-optimal for bf16 is not optimal here. Swept with
++# bench/hc_mix2/bench_hc_mix2_fp8.py --sweep down/up (CUPTI medians, 82 weight
++# copies = 512 MB working set, RTX PRO 6000 Blackwell Max-Q):
++#
++#   K1  bf16 default tile (16,128,2,w8,s2) on fp8 weights   5.31 us
++#       [64, 128] x 4 k-groups, 8 warps, 4 stages           3.81 us   <- pinned
++#   K2  the bf16 tile is still the winner (16, 64, w4, s4)  4.64 us
++#
++# The wide n block is what fp8 buys: the same 2 KB tile now spans 64 lowrank
++# columns instead of 16, so K1 needs a quarter of the CTAs and each one keeps
++# four k-chunks in flight.
++_FP8_BASE = HCMix2Config(
++    block_n=64,
++    block_k=128,
++    block_g=4,
++    down_warps=8,
++    down_stages=4,
++    block_j=16,
++    block_r=64,
++    up_warps=4,
++    up_stages=4,
++)
++
++
++def _env_config(
++    default: HCMix2Config | None = None, prefix: str = "SGLANG_HC_MIX2_"
++) -> HCMix2Config:
++    def _int(name: str, value: int) -> int:
++        return int(os.environ.get(prefix + name, str(value)))
++
++    if default is None:
++        default = HCMix2Config()
+     return HCMix2Config(
+-        block_n=_int("SGLANG_HC_MIX2_BLOCK_N", default.block_n),
+-        block_k=_int("SGLANG_HC_MIX2_BLOCK_K", default.block_k),
+-        block_g=_int("SGLANG_HC_MIX2_BLOCK_G", default.block_g),
+-        block_s=_int("SGLANG_HC_MIX2_BLOCK_S", default.block_s),
+-        down_warps=_int("SGLANG_HC_MIX2_DOWN_WARPS", default.down_warps),
+-        down_stages=_int("SGLANG_HC_MIX2_DOWN_STAGES", default.down_stages),
+-        block_j=_int("SGLANG_HC_MIX2_BLOCK_J", default.block_j),
+-        block_r=_int("SGLANG_HC_MIX2_BLOCK_R", default.block_r),
+-        up_warps=_int("SGLANG_HC_MIX2_UP_WARPS", default.up_warps),
+-        up_stages=_int("SGLANG_HC_MIX2_UP_STAGES", default.up_stages),
+-        stats_mode=os.environ.get("SGLANG_HC_MIX2_STATS_MODE", default.stats_mode),
+-        stats_block=_int("SGLANG_HC_MIX2_STATS_BLOCK", default.stats_block),
+-        stats_warps=_int("SGLANG_HC_MIX2_STATS_WARPS", default.stats_warps),
++        block_n=_int("BLOCK_N", default.block_n),
++        block_k=_int("BLOCK_K", default.block_k),
++        block_g=_int("BLOCK_G", default.block_g),
++        block_s=_int("BLOCK_S", default.block_s),
++        down_warps=_int("DOWN_WARPS", default.down_warps),
++        down_stages=_int("DOWN_STAGES", default.down_stages),
++        block_j=_int("BLOCK_J", default.block_j),
++        block_r=_int("BLOCK_R", default.block_r),
++        up_warps=_int("UP_WARPS", default.up_warps),
++        up_stages=_int("UP_STAGES", default.up_stages),
++        stats_mode=os.environ.get(prefix + "STATS_MODE", default.stats_mode),
++        stats_block=_int("STATS_BLOCK", default.stats_block),
++        stats_warps=_int("STATS_WARPS", default.stats_warps),
+     )
+ 
+ 
+ _DEFAULT_CONFIG = _env_config()
+-
++# `SGLANG_HC_MIX2_FP8_BLOCK_N` etc. override the fp8 geometry only; the bare
++# `SGLANG_HC_MIX2_FP8` flag (read in hyperconnection.py) turns the path on.
++_DEFAULT_CONFIG_FP8 = _env_config(_FP8_BASE, "SGLANG_HC_MIX2_FP8_")
+ 
+ @triton.jit
+ def _hc_branch_stats_kernel(
+@@ -165,6 +202,7 @@ def _hc_down_kernel(
+     inv_rms_ptr,
+     normed_ptr,
+     t_raw_ptr,
++    s_down_ptr,
+     num_rows,
+     K,
+     HS,
+@@ -179,6 +217,7 @@ def _hc_down_kernel(
+     NUM_STAGES: tl.constexpr,
+     REDUNDANT_STATS: tl.constexpr,
+     READ_NORMED: tl.constexpr,
++    W_FP8: tl.constexpr,
+ ):
+     kg = tl.program_id(0)
+     nb = tl.program_id(1)
+@@ -236,7 +275,14 @@ def _hc_down_kernel(
+         w_down = tl.load(
+             w_down_ptr + n[:, None] * K + k[None, :], mask=mask_n[:, None], other=0.0
+         )
+-        acc = tl.dot(normed, tl.trans(w_down), acc)
++        if W_FP8:
++            acc = tl.dot(normed, tl.trans(w_down.to(tl.bfloat16)), acc)
++        else:
++            acc = tl.dot(normed, tl.trans(w_down), acc)
++    if W_FP8:
++        # One fp32 scale per output row n. The split-K partials are summed with
++        # atomics, and scaling is linear, so applying it here is exact.
++        acc = acc * tl.load(s_down_ptr + n, mask=mask_n, other=0.0)[None, :]
+     tl.atomic_add(
+         t_raw_ptr + offs_m[:, None] * LOWRANK + n[None, :],
+         acc,
+@@ -252,6 +298,7 @@ def _hc_up_kernel(
+     w_up_ptr,
+     t_raw_ptr,
+     out_ptr,
++    s_up_ptr,
+     num_rows,
+     K,
+     HS,
+@@ -262,6 +309,7 @@ def _hc_up_kernel(
+     BLOCK_J: tl.constexpr,
+     BLOCK_R: tl.constexpr,
+     NUM_STAGES: tl.constexpr,
++    W_FP8: tl.constexpr,
+ ):
+     jb = tl.program_id(0)
+     offs_m = tl.arange(0, ROWS)
+@@ -292,8 +340,16 @@ def _hc_up_kernel(
+             mask=mask_cj[:, None] & mask_r[None, :],
+             other=0.0,
+         )
+-        acc = tl.dot(t, tl.trans(w), acc)
++        if W_FP8:
++            acc = tl.dot(t, tl.trans(w.to(tl.bfloat16)), acc)
++        else:
++            acc = tl.dot(t, tl.trans(w), acc)
+ 
++    if W_FP8:
++        # One fp32 scale per output column (the flattened c*HS + j row of w_up);
++        # the whole r reduction for that column lives in this CTA, so scaling the
++        # finished accumulator is exact.
++        acc = acc * tl.load(s_up_ptr + cj, mask=mask_cj, other=0.0)[None, :]
+     gate = tl.sigmoid(tl.reshape(acc, (ROWS, HC, BLOCK_J)))
+     xg = tl.load(
+         normed_ptr
+@@ -311,6 +367,34 @@ def _hc_up_kernel(
+     )
+ 
+ 
++def quantize_hc_mix2_weights_fp8(
++    w_down: torch.Tensor, w_up: torch.Tensor
++) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
++    """Per-output-row FP8 E4M3 quantization of the mix2 weights.
++
++    Mirrors ``hc_mix_triton.quantize_hc_mix_weights_fp8`` but takes ``w_up`` in
++    the natural ``[hc * hs, lowrank]`` nn.Linear layout the three-kernel path
++    reads (no permute/pad). Returns ``(w_down_fp8[320, K], s_down[320],
++    w_up_fp8[K, 320], s_up[K])`` with fp32 scales.
++    """
++
++    def _q(w: torch.Tensor):
++        wf = w.float()
++        amax = wf.abs().amax(dim=1).clamp(min=1e-12)
++        scale = amax / 448.0
++        q = (wf / scale[:, None]).clamp(-448.0, 448.0).to(torch.float8_e4m3fn)
++        return q.contiguous(), scale.contiguous()
++
++    wd, sd = _q(w_down)
++    wu, su = _q(w_up)
++    return wd, sd, wu, su
++
++
++def dequantize_hc_mix2_weight(w_fp8: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
++    """bf16 view of an fp8 mix2 weight (for the prefill / fallback GEMM paths)."""
++    return (w_fp8.float() * scale[:, None]).to(torch.bfloat16)
++
++
+ def hc_norm_mix2_supported(
+     hyper_input: torch.Tensor,
+     norm_w: torch.Tensor,
+@@ -318,8 +402,14 @@ def hc_norm_mix2_supported(
+     w_up: torch.Tensor,
+     hc: int,
+     hs: int,
+-    config: HCMix2Config = _DEFAULT_CONFIG,
++    config: HCMix2Config | None = None,
+ ) -> bool:
++    if config is None:
++        config = (
++            _DEFAULT_CONFIG_FP8
++            if w_down.dtype == torch.float8_e4m3fn
++            else _DEFAULT_CONFIG
++        )
+     if not (
+         hyper_input.is_cuda
+         and hyper_input.dim() == 2
+@@ -331,12 +421,24 @@ def hc_norm_mix2_supported(
+         and w_down.shape[0] % config.block_n == 0
+     ):
+         return False
++    if not (
++        norm_w.is_cuda
++        and norm_w.device == hyper_input.device
++        and norm_w.dtype == torch.bfloat16
++        and norm_w.is_contiguous()
++    ):
++        return False
++    # The mix weights are either both bf16 or both fp8 e4m3 (weight-only, with
++    # per-output-row fp32 scales supplied by the caller).
++    w_dtype = w_down.dtype
++    if w_dtype not in (torch.bfloat16, torch.float8_e4m3fn):
++        return False
+     return all(
+         w.is_cuda
+         and w.device == hyper_input.device
+-        and w.dtype == torch.bfloat16
++        and w.dtype == w_dtype
+         and w.is_contiguous()
+-        for w in (norm_w, w_down, w_up)
++        for w in (w_down, w_up)
+     )
+ 
+ 
+@@ -348,14 +450,32 @@ def hc_norm_mix2(
+     w_up: torch.Tensor,
+     hc: int,
+     hs: int,
+-    config: HCMix2Config = _DEFAULT_CONFIG,
++    config: HCMix2Config | None = None,
++    s_down: torch.Tensor | None = None,
++    s_up: torch.Tensor | None = None,
+ ) -> tuple[torch.Tensor, torch.Tensor]:
+     """Per-branch Gemma RMSNorm followed by the gated low-rank mix.
+ 
+     Returns ``(mixed[M, hs], normed[M, hc * hs])`` in the input dtype. ``t_raw``
+     is accumulated with device-scope atomics, so the summation order of the
+     down projection is not reproducible across launches.
++
++    ``w_down``/``w_up`` may be fp8 e4m3 (weight-only), in which case ``s_down``
++    (one fp32 scale per lowrank row) and ``s_up`` (one per hc*hs row) are
++    required; ``normed`` is bit-identical to the bf16 path either way.
+     """
++    w_fp8 = w_down.dtype == torch.float8_e4m3fn
++    if config is None:
++        config = _DEFAULT_CONFIG_FP8 if w_fp8 else _DEFAULT_CONFIG
++    if w_fp8:
++        assert s_down is not None and s_up is not None
++        assert w_up.dtype == torch.float8_e4m3fn
++    else:
++        # W_FP8 is a constexpr, so the scale loads are not even traced on the
++        # bf16 path; pass the weights themselves rather than allocating a dummy
++        # buffer here (an allocation inside a CUDA-graph capture would come from
++        # the graph's private pool).
++        s_down, s_up = w_down, w_up
+     rows, k = hyper_input.shape
+     lowrank = w_down.shape[0]
+     device = hyper_input.device
+@@ -402,6 +522,7 @@ def hc_norm_mix2(
+         inv_rms,
+         normed,
+         t_raw,
++        s_down,
+         rows,
+         k,
+         hs,
+@@ -416,6 +537,7 @@ def hc_norm_mix2(
+         NUM_STAGES=config.down_stages,
+         REDUNDANT_STATS=redundant_stats,
+         READ_NORMED=read_normed,
++        W_FP8=w_fp8,
+         num_warps=config.down_warps,
+     )
+ 
+@@ -424,6 +546,7 @@ def hc_norm_mix2(
+         w_up,
+         t_raw,
+         mixed,
++        s_up,
+         rows,
+         k,
+         hs,
+@@ -434,6 +557,7 @@ def hc_norm_mix2(
+         BLOCK_J=config.block_j,
+         BLOCK_R=config.block_r,
+         NUM_STAGES=config.up_stages,
++        W_FP8=w_fp8,
+         num_warps=config.up_warps,
+     )
+     return mixed, normed
+diff --git a/python/sglang/srt/layers/hyperconnection.py b/python/sglang/srt/layers/hyperconnection.py
+index 5367ded575..05cbfc8099 100644
+--- a/python/sglang/srt/layers/hyperconnection.py
++++ b/python/sglang/srt/layers/hyperconnection.py
+@@ -17,6 +17,11 @@ _HC_FUSED = os.environ.get("SGLANG_HC_FUSED", "0") == "1"
+ # hc_combine_gate + hc_combine_apply pair (2 launches x 96 boundaries per step).
+ _HC_COMBINE_FUSED = os.environ.get("SGLANG_HC_COMBINE_FUSED", "0") == "1"
+ _HC_MIX2 = os.environ.get("SGLANG_HC_MIX2", "0") == "1"
++_HC_MIX2_FP8 = os.environ.get("SGLANG_HC_MIX2_FP8", "0") == "1"
++# The bf16 mix weights are only needed by the prefill / fallback GEMM path; with
++# this on they are dropped after quantization (-13 MB per GatedResidual) and that
++# path dequantizes on the fly instead.
++_HC_MIX2_FP8_DROP_BF16 = os.environ.get("SGLANG_HC_MIX2_FP8_DROP_BF16", "0") == "1"
+ _HC_MIX_FP8 = os.environ.get("SGLANG_HC_MIX_FP8", "0") == "1"
+ 
+ if TYPE_CHECKING:
+@@ -139,6 +144,13 @@ class GatedResidual(HyperConnectionBase):
+     ):
+         super().__init__(config, use_mix, use_combine, role)
+         self._quantized_mix = quant_config is not None
++        # (w_down_fp8, s_down, w_up_fp8, s_up), built once when both mix
++        # weights have been loaded (SGLANG_HC_MIX2_FP8=1); see
++        # _maybe_build_mix2_fp8. `_mix2_loaded` tracks the two weight_loader
++        # callbacks so a weight *update* rebuilds the fp8 copies too.
++        self._mix2_fp8 = None
++        self._mix2_bf16_dropped = False
++        self._mix2_loaded: set = set()
+ 
+         norm_dim = (
+             self.config.hidden_size * self.hc_count
+@@ -207,6 +219,15 @@ class GatedResidual(HyperConnectionBase):
+                 and not self._quantized_mix
+             )
+             self._mix_up_weight_padded = None
++            if _HC_MIX2 and _HC_MIX2_FP8 and quant_config is None:
++                # Quantize at weight-load time: the first eager forward is not
++                # guaranteed to precede CUDA-graph capture, and quantizing
++                # inside a capture would bake the quantizer into the graph.
++                for linear in (
++                    self.input_mix_weight_down,
++                    self.input_mix_weight_up,
++                ):
++                    linear.weight.weight_loader = self._mix2_weight_loader
+ 
+         if use_combine:
+             self.block_inject_weight = nn.Linear(
+@@ -290,6 +311,65 @@ class GatedResidual(HyperConnectionBase):
+             * hyper_input_normed.unflatten(-1, (self.hc_count, self.hidden_size))
+         ).mean(dim=-2)
+ 
++    def _mix2_weight_loader(self, param: torch.Tensor, loaded_weight: torch.Tensor):
++        assert param.size() == loaded_weight.size()
++        param.data.copy_(loaded_weight)
++        self._mix2_loaded.add(id(param))
++        if len(self._mix2_loaded) == 2:
++            self._mix2_loaded.clear()
++            self._mix2_fp8 = None
++            self._maybe_build_mix2_fp8()
++
++    def _maybe_build_mix2_fp8(self) -> None:
++        """Quantize the mix weights to fp8 once, outside CUDA-graph capture."""
++        if (
++            not _HC_MIX2_FP8
++            or self._mix2_fp8 is not None
++            or self._quantized_mix
++            or torch.cuda.is_current_stream_capturing()
++        ):
++            return
++        w_down = self.input_mix_weight_down.weight
++        w_up = self.input_mix_weight_up.weight
++        if not (
++            w_down.is_cuda
++            and w_down.dtype == torch.bfloat16
++            and w_up.dtype == torch.bfloat16
++        ):
++            return
++        from sglang.srt.layers.hc_mix2_triton import quantize_hc_mix2_weights_fp8
++
++        self._mix2_fp8 = quantize_hc_mix2_weights_fp8(w_down.data, w_up.data)
++        if _HC_MIX2_FP8_DROP_BF16:
++            empty = torch.empty(0, dtype=w_down.dtype, device=w_down.device)
++            self.input_mix_weight_down.weight.data = empty
++            self.input_mix_weight_up.weight.data = empty
++            self._mix2_bf16_dropped = True
++
++    def _mix2_weights(self):
++        """(w_down, w_up, s_down, s_up) for the three-kernel path."""
++        if self._mix2_fp8 is not None:
++            wd, sd, wu, su = self._mix2_fp8
++            return wd, wu, sd, su
++        return (
++            self.input_mix_weight_down.weight,
++            self.input_mix_weight_up.weight,
++            None,
++            None,
++        )
++
++    def _bf16_mix_weights(self):
++        """The bf16 mix weights, dequantized if the originals were dropped."""
++        if not self._mix2_bf16_dropped:
++            return (
++                self.input_mix_weight_down.weight,
++                self.input_mix_weight_up.weight,
++            )
++        from sglang.srt.layers.hc_mix2_triton import dequantize_hc_mix2_weight
++
++        wd, sd, wu, su = self._mix2_fp8
++        return dequantize_hc_mix2_weight(wd, sd), dequantize_hc_mix2_weight(wu, su)
++
+     def _mix2_supported(self, hyper_input: torch.Tensor) -> bool:
+         if not (
+             _HC_MIX2
+@@ -302,11 +382,12 @@ class GatedResidual(HyperConnectionBase):
+             return False
+         from sglang.srt.layers.hc_mix2_triton import hc_norm_mix2_supported
+ 
++        w_down, w_up, _, _ = self._mix2_weights()
+         return hc_norm_mix2_supported(
+             hyper_input,
+             self.hc_norm.weight,
+-            self.input_mix_weight_down.weight,
+-            self.input_mix_weight_up.weight,
++            w_down,
++            w_up,
+             self.hc_count,
+             self.hidden_size,
+         )
+@@ -316,6 +397,7 @@ class GatedResidual(HyperConnectionBase):
+             _HC_FUSED
+             and self.config.hc_per_branch_norm
+             and not self._quantized_mix
++            and not self._mix2_bf16_dropped
+             and hyper_input.is_cuda
+             and hyper_input.dtype == torch.bfloat16
+             and hyper_input.dim() == 2
+@@ -347,17 +429,24 @@ class GatedResidual(HyperConnectionBase):
+             )
+             return mixed_input, (hyper_input, hyper_input)
+ 
++        if _HC_MIX2_FP8 and _HC_MIX2 and self._mix2_fp8 is None:
++            self._maybe_build_mix2_fp8()
++
+         if self._mix2_supported(hyper_input):
+             from sglang.srt.layers.hc_mix2_triton import hc_norm_mix2
+ 
++            w_down, w_up, s_down, s_up = self._mix2_weights()
+             mixed_input, hyper_input_normed = hc_norm_mix2(
+                 hyper_input,
+                 self.hc_norm.weight,
+                 self.hc_norm.variance_epsilon,
+-                self.input_mix_weight_down.weight,
+-                self.input_mix_weight_up.weight,
++                w_down,
++                w_up,
+                 self.hc_count,
+                 self.hidden_size,
++                None,
++                s_down,
++                s_up,
+             )
+             return mixed_input, (hyper_input, hyper_input_normed)
+ 
+@@ -385,6 +474,17 @@ class GatedResidual(HyperConnectionBase):
+             mixed_input = self._mix_with_quantized_linears(hyper_input_normed).to(
+                 self.params_dtype
+             )
++        elif self._mix2_bf16_dropped:
++            # The bf16 originals are gone; only the dequantizing _mix_compute
++            # fallback below can serve this (prefill-width) call.
++            w_down_bf16, w_up_bf16 = self._bf16_mix_weights()
++            mixed_input = self._mix_compute(
++                hyper_input_normed,
++                w_down_bf16,
++                w_up_bf16,
++                self.hc_count,
++                self.hidden_size,
++            ).to(self.params_dtype)
+         elif (
+             self._jit_mix_ok
+             and hyper_input_normed.is_cuda
+@@ -451,10 +551,11 @@ class GatedResidual(HyperConnectionBase):
+                 self.hidden_size,
+             ).to(self.params_dtype)
+         else:
++            w_down_bf16, w_up_bf16 = self._bf16_mix_weights()
+             mixed_input = self._mix_compute(
+                 hyper_input_normed,
+-                self.input_mix_weight_down.weight,
+-                self.input_mix_weight_up.weight,
++                w_down_bf16,
++                w_up_bf16,
+                 self.hc_count,
+                 self.hidden_size,
+             ).to(self.params_dtype)
+diff --git a/python/sglang/srt/layers/quantization/fp8.py b/python/sglang/srt/layers/quantization/fp8.py
+index babc54d4dc..88b8c8a3bc 100644
+--- a/python/sglang/srt/layers/quantization/fp8.py
++++ b/python/sglang/srt/layers/quantization/fp8.py
+@@ -958,6 +958,21 @@ class Fp8LinearMethod(LinearMethodBase):
+             prepare_fp8_layer_for_marlin(layer, not self.block_quant)
+             # Activations not quantized for marlin.
+             del layer.input_scale
++            return
++
++        if (
++            _W8A16_GEMV_ENABLED
++            and not self.block_quant
++            and not self.use_mxfp8
++            and layer.weight.dtype == torch.float8_e4m3fn
++        ):
++            # Materialize the GEMV's per-device scratch here, before any CUDA
++            # graph is captured: warm-up runs at prefill widths where `apply`
++            # never reaches the GEMV, so the first split-K call would otherwise
++            # allocate inside a capture and land in that graph's private pool.
++            from sglang.srt.layers.quantization.w8a16_gemv import prealloc
++
++            prealloc(layer.weight.device)
+ 
+     def _w8a16_gemv_ok(self, layer: torch.nn.Module, x: torch.Tensor) -> bool:
+         """Whether `apply` would route this call through the W8A16 Triton GEMV."""
+diff --git a/python/sglang/srt/layers/quantization/w8a16_gemv.py b/python/sglang/srt/layers/quantization/w8a16_gemv.py
+index 48b8c17722..38386edb7f 100644
+--- a/python/sglang/srt/layers/quantization/w8a16_gemv.py
++++ b/python/sglang/srt/layers/quantization/w8a16_gemv.py
+@@ -157,6 +157,8 @@ _WS_FLOATS = 1 << 21
+ _WS_COUNTERS = 4096
+ _MAX_SPLITS = 32
+ _WS = {}
++# The scalar "scale" bf16_gemv passes for its (unquantized) weights.
++_ONES = {}
+ 
+ 
+ def _workspace(device):
+@@ -170,6 +172,19 @@ def _workspace(device):
+     return ws
+ 
+ 
++def prealloc(device) -> None:
++    """Materialize the per-device scratch before any CUDA graph is captured.
++
++    Warm-up runs at prefill widths, where every caller falls back to cuBLAS, so
++    without this the split-K scratch (and ``bf16_gemv``'s scale-of-one) would
++    first be allocated inside a capture and would live in that graph's private
++    memory pool. Called from ``Fp8LinearMethod.process_weights_after_loading``.
++    """
++    _workspace(device)
++    if device not in _ONES:
++        _ONES[device] = torch.ones(1, dtype=torch.float32, device=device)
++
++
+ _NUM_SMS = None
+ 
+ 
+@@ -386,9 +401,6 @@ def w8a16_gemv(
+     return _launch(x, w, s, y, M, N, K, s.numel() > 1, cfg)
+ 
+ 
+-_ONES = {}
+-
+-
+ def bf16_gemv(
+     x: torch.Tensor, w: torch.Tensor, cfg=None, out: Optional[torch.Tensor] = None
+ ):
+@@ -405,3 +417,229 @@ def bf16_gemv(
+     if cfg is None:
+         cfg = _plan(M, N, K, w.stride(0) == 1, w.element_size(), _num_sms(x.device))
+     return _launch(x, w, one, y, M, N, K, False, cfg)
++
++
++# ---------------------------------------------------------------------------
++# Fused gate_up + SiLU-and-mul (SGLANG_SHARED_GATEUP_FUSED=1)
++#
++# The shared expert issues w8a16_gemv for gate_up ([N=2H, K] fp8, N = [gate H |
++# up H]) and then act_and_mul over the [M, 2H] result -- 48 extra launches per
++# decode step (+14 in the W16 draft) whose only job is to read 2H bf16 values
++# and write H. Giving one CTA both column n and n + H lets the same k loop fill
++# two accumulators, so the activation becomes an epilogue: the [M, 2H]
++# intermediate is never written and the act kernel disappears.
++#
++# The weight bytes are unchanged (each column is still read once), so this is a
++# launch/traffic win on the activation, not on the GEMV itself.
++# ---------------------------------------------------------------------------
++
++
++@triton.jit
++def _w8a16_gemv_silu_kernel(
++    x_ptr,
++    w_ptr,
++    s_ptr,
++    y_ptr,
++    ws_ptr,
++    cnt_ptr,
++    M,
++    H,
++    K,
++    stride_xm,
++    stride_xk,
++    stride_wn,
++    stride_wk,
++    stride_ym,
++    stride_yn,
++    BLOCK_N: tl.constexpr,
++    BLOCK_K: tl.constexpr,
++    M_PAD: tl.constexpr,
++    SPLITS: tl.constexpr,
++    EVEN_K: tl.constexpr,
++    USE_DOT: tl.constexpr,
++):
++    pid_n = tl.program_id(0)
++    pid_k = tl.program_id(1)
++    offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
++    offs_m = tl.arange(0, M_PAD)
++    offs_k = tl.arange(0, BLOCK_K)
++    n_mask = offs_n < H
++    m_mask = offs_m < M
++    acc_g = tl.zeros((M_PAD, BLOCK_N), dtype=tl.float32)
++    acc_u = tl.zeros((M_PAD, BLOCK_N), dtype=tl.float32)
++    wg_base = w_ptr + offs_n[:, None] * stride_wn
++    wu_base = w_ptr + (offs_n + H)[:, None] * stride_wn
++    for k0 in range(pid_k * BLOCK_K, K, SPLITS * BLOCK_K):
++        kk = k0 + offs_k
++        koff = kk[None, :] * stride_wk
++        if EVEN_K:
++            wmask = n_mask[:, None]
++        else:
++            wmask = n_mask[:, None] & (kk < K)[None, :]
++        wg = tl.load(wg_base + koff, mask=wmask, other=0.0)
++        wu = tl.load(wu_base + koff, mask=wmask, other=0.0)
++        if USE_DOT:
++            xp = x_ptr + offs_m[:, None] * stride_xm + kk[None, :] * stride_xk
++            if EVEN_K:
++                x = tl.load(xp, mask=m_mask[:, None], other=0.0)
++            else:
++                x = tl.load(xp, mask=m_mask[:, None] & (kk < K)[None, :], other=0.0)
++            acc_g += tl.dot(x, tl.trans(wg.to(tl.bfloat16)), out_dtype=tl.float32)
++            acc_u += tl.dot(x, tl.trans(wu.to(tl.bfloat16)), out_dtype=tl.float32)
++        else:
++            if EVEN_K:
++                xv = tl.load(x_ptr + kk * stride_xk).to(tl.float32)
++            else:
++                xv = tl.load(x_ptr + kk * stride_xk, mask=kk < K, other=0.0).to(
++                    tl.float32
++                )
++            acc_g += tl.sum(wg.to(tl.float32) * xv[None, :], axis=1)[None, :]
++            acc_u += tl.sum(wu.to(tl.float32) * xv[None, :], axis=1)[None, :]
++
++    tile = M_PAD * BLOCK_N
++    if SPLITS == 1:
++        g = acc_g * tl.load(s_ptr + offs_n, mask=n_mask, other=0.0)[None, :]
++        u = acc_u * tl.load(s_ptr + offs_n + H, mask=n_mask, other=0.0)[None, :]
++        out = (g * tl.sigmoid(g)) * u
++        y_ptrs = y_ptr + offs_m[:, None] * stride_ym + offs_n[None, :] * stride_yn
++        tl.store(y_ptrs, out.to(tl.bfloat16), mask=m_mask[:, None] & n_mask[None, :])
++        return
++
++    # Same in-launch split-K fixup as _w8a16_gemv_kernel, with two partials per
++    # (n block, split) instead of one.
++    slot = offs_m[:, None] * BLOCK_N + tl.arange(0, BLOCK_N)[None, :]
++    base = ws_ptr + (pid_n * SPLITS) * (2 * tile)
++    part = base + pid_k * (2 * tile)
++    tl.store(part + slot, acc_g, cache_modifier=".cg")
++    tl.store(part + tile + slot, acc_u, cache_modifier=".cg")
++    tl.debug_barrier()
++    done = tl.atomic_add(cnt_ptr + pid_n, 1, sem="acq_rel", scope="gpu")
++    if done == SPLITS - 1:
++        tot_g = tl.zeros((M_PAD, BLOCK_N), dtype=tl.float32)
++        tot_u = tl.zeros((M_PAD, BLOCK_N), dtype=tl.float32)
++        for s in tl.static_range(SPLITS):
++            p = base + s * (2 * tile)
++            tot_g += tl.load(p + slot, cache_modifier=".cg")
++            tot_u += tl.load(p + tile + slot, cache_modifier=".cg")
++        g = tot_g * tl.load(s_ptr + offs_n, mask=n_mask, other=0.0)[None, :]
++        u = tot_u * tl.load(s_ptr + offs_n + H, mask=n_mask, other=0.0)[None, :]
++        out = (g * tl.sigmoid(g)) * u
++        y_ptrs = y_ptr + offs_m[:, None] * stride_ym + offs_n[None, :] * stride_yn
++        tl.store(y_ptrs, out.to(tl.bfloat16), mask=m_mask[:, None] & n_mask[None, :])
++        tl.store(cnt_ptr + pid_n, 0)
++
++
++# Tiles for the fused variant, keyed (M bucket, N=2H, K). A CTA owns two weight
++# tiles, so the right geometry is NOT the _BY_SHAPE* one: at M >= 4 the unfused
++# [16, 64] x 10-split tile measured 6.5 us fused, and halving the split while
++# doubling the n block (each CTA already carries two accumulators, so 5 splits
++# still fills the machine) took it to 5.0. Measured with
++# bench/w8a16v2/bench_gateup_fused.py --sweep (CUPTI medians, 164 weight copies
++# = 512 MB working set, RTX PRO 6000 Blackwell Max-Q).
++#
++#   M    inherited tile    tuned tile                     plain gemv + act
++#    1   4.64 us           4.42 us  (16, 256, 10, w4, s4)   4.26 + 1.66
++#    4   6.21 us           4.99 us  (32,  64,  5, w4, s4)   4.93 + 1.82
++#   16   6.53 us           4.96 us  (32,  64,  5, w4, s4)   5.09 + 1.98
++_FUSED_BY_SHAPE = {
++    (1, 1280, 2560): (16, 256, 10, False, None, 4, 4),
++    (4, 1280, 2560): (32, 64, 5, True, None, 4, 4),
++    (16, 1280, 2560): (32, 64, 5, True, None, 4, 4),
++}
++
++
++def _fused_plan(M: int, N: int, K: int, sms: int):
++    tuned = _FUSED_BY_SHAPE.get((_m_bucket(M), N, K))
++    if tuned is not None:
++        return _fit_fused(M, N // 2, tuned)
++    # Fall back to the unfused tile for the same shape, halving the n-block count
++    # (each CTA covers two columns now) and keeping its split-K choice.
++    cfg = _plan(M, N, K, False, 1, sms)
++    block_n, block_k, splits, use_dot, _w_kn, warps, stages = cfg
++    return _fit_fused(M, N // 2, (block_n, block_k, splits, use_dot, None, warps, stages))
++
++
++def _fit_fused(M: int, H: int, cfg):
++    block_n, block_k, splits, use_dot, w_kn, warps, stages = cfg
++    if splits == 1:
++        return cfg
++    m_pad = 16 if (use_dot or M > 1) else 1
++    n_blocks = triton.cdiv(H, block_n)
++    if (
++        splits > _MAX_SPLITS
++        or n_blocks > _WS_COUNTERS
++        or 2 * n_blocks * splits * m_pad * block_n > _WS_FLOATS
++    ):
++        return (block_n, block_k, 1, use_dot, w_kn, warps, stages)
++    return cfg
++
++
++def w8a16_gemv_silu_mul(
++    x: torch.Tensor, w: torch.Tensor, scale: torch.Tensor, cfg=None
++):
++    """silu(x @ w[:H].T * s[:H]) * (x @ w[H:].T * s[H:]) in one launch.
++
++    x: [M,K] bf16 (M<=16); w: [N,K] fp8_e4m3 with N = 2H and the gate half first
++    (the MergedColumnParallelLinear [gate|up] layout); scale: [N] or [N,1] fp32.
++    Returns [M, H] bf16. The activation is evaluated in fp32 on the unrounded
++    accumulators, so the result is at least as accurate as gemv-then-act_and_mul.
++    """
++    M, K = x.shape
++    N = w.shape[0]
++    assert w.shape[1] == K and M <= 16 and N % 2 == 0
++    H = N // 2
++    y = torch.empty((M, H), dtype=torch.bfloat16, device=x.device)
++    s = scale.reshape(-1)
++    if s.dtype != torch.float32 or not s.is_contiguous():
++        s = s.contiguous().float()
++    assert s.numel() == N, "fused gate_up needs a per-channel scale"
++    if cfg is None:
++        cfg = _fused_plan(M, N, K, _num_sms(x.device))
++    block_n, block_k, splits, use_dot, _w_kn, num_warps, num_stages = cfg
++    use_dot = use_dot or M > 1
++    m_pad = 16 if use_dot else 1
++    ws, cnt = _workspace(x.device)
++    _w8a16_gemv_silu_kernel[(triton.cdiv(H, block_n), splits)](
++        x,
++        w,
++        s,
++        y,
++        ws,
++        cnt,
++        M,
++        H,
++        K,
++        x.stride(0),
++        x.stride(1),
++        w.stride(0),
++        w.stride(1),
++        y.stride(0),
++        y.stride(1),
++        BLOCK_N=block_n,
++        BLOCK_K=block_k,
++        M_PAD=m_pad,
++        SPLITS=splits,
++        EVEN_K=K % block_k == 0,
++        USE_DOT=use_dot,
++        num_warps=num_warps,
++        num_stages=num_stages,
++    )
++    return y
++
++
++def w8a16_gemv_silu_mul_supported(
++    x: torch.Tensor, w: torch.Tensor, scale: torch.Tensor, max_m: int = 16
++) -> bool:
++    """Whether this (x, [N, K] fp8 weight, per-channel scale) can take the fused path."""
++    return (
++        x.is_cuda
++        and x.dim() == 2
++        and x.dtype == torch.bfloat16
++        and 1 <= x.shape[0] <= max_m
++        and w.dtype == torch.float8_e4m3fn
++        and w.dim() == 2
++        and w.shape[1] == x.shape[1]
++        and w.shape[0] % 2 == 0
++        and w.stride(1) == 1
++        and scale.numel() == w.shape[0]
++    )
+diff --git a/python/sglang/srt/models/qwen2_moe.py b/python/sglang/srt/models/qwen2_moe.py
+index 4a176816c8..f802bf69c3 100644
+--- a/python/sglang/srt/models/qwen2_moe.py
++++ b/python/sglang/srt/models/qwen2_moe.py
+@@ -19,6 +19,7 @@
+ """Inference-only Qwen2MoE model compatible with HuggingFace weights."""
+ 
+ import logging
++import os
+ from contextlib import nullcontext
+ from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
+ 
+@@ -122,6 +123,43 @@ _SGLANG_EXPERIMENTAL_LORA_OPTI = envs.SGLANG_EXPERIMENTAL_LORA_OPTI.get()
+ 
+ logger = logging.getLogger(__name__)
+ 
++# Fuse the shared expert's gate_up GEMV with its SiLU-and-mul epilogue: one CTA
++# owns columns n and n + intermediate_size, so the [M, 2*inter] intermediate is
++# never materialized and the separate act_and_mul launch disappears (48/step at
++# W4, 62 at W16). Requires the W8A16 Triton GEMV path (SGLANG_FP8_W8A16_GEMV=1).
++_SHARED_GATEUP_FUSED = os.environ.get("SGLANG_SHARED_GATEUP_FUSED", "0") == "1"
++_SHARED_GATEUP_FUSED_MAX_M = int(os.environ.get("SGLANG_FP8_W8A16_GEMV_MAX_M", "16"))
++
++
++def _gateup_fused_layer_ok(layer: MergedColumnParallelLinear) -> bool:
++    """True when `layer` is exactly the plain per-channel FP8 linear the unfused
++    path would have routed through w8a16_gemv (same math, same scales).
++
++    Anything else -- block-quantized, marlin, mxfp8, a bias, a non-FP8 quant
++    method, or the W8A16 GEMV path being off -- keeps the two-kernel path.
++    """
++    from sglang.srt.layers.quantization.fp8 import (
++        _W8A16_GEMV_ENABLED,
++        Fp8LinearMethod,
++    )
++
++    if not _W8A16_GEMV_ENABLED or not isinstance(layer, MergedColumnParallelLinear):
++        return False
++    # MergedColumnParallelLinear([inter] * 2): the local shard is
++    # [gate_local | up_local], so column n pairs with n + N/2.
++    if len(layer.output_sizes) != 2 or layer.output_sizes[0] != layer.output_sizes[1]:
++        return False
++    if layer.bias is not None or layer.skip_bias_add:
++        return False
++    method = layer.quant_method
++    return (
++        isinstance(method, Fp8LinearMethod)
++        and not method.block_quant
++        and not method.use_marlin
++        and not method.use_mxfp8
++    )
++
++
+ _is_cuda = is_cuda()
+ _is_cpu = is_cpu()
+ _is_cpu_amx_available = cpu_has_amx_support()
+@@ -219,6 +257,9 @@ class Qwen2MoeMLP(nn.Module):
+         # Lazily derived after weight load (input_scale_inv does not exist yet
+         # at construction time); the fused kernel requires a 1-D global scale.
+         self._down_input_scale_inv_1d = None
++        # Tri-state: None = not probed yet (the quant method's post-load state
++        # is not final at construction time), then True/False.
++        self._gateup_fused_ok = None
+ 
+     def _silu_fp4_quant_fused(self, gate_up: torch.Tensor) -> tuple:
+         from flashinfer import silu_and_mul_scaled_nvfp4_experts_quantize
+@@ -246,10 +287,39 @@ class Qwen2MoeMLP(nn.Module):
+         y_sf = y_sf.view(torch.uint8).permute(2, 4, 0, 1, 3, 5).reshape(m_padded, -1)
+         return y_fp4, y_sf
+ 
++    def _gateup_silu_fused(self, x: torch.Tensor):
++        """silu(gate) * up in the gate_up GEMV, or None if this call cannot use it."""
++        if not (
++            _SHARED_GATEUP_FUSED
++            and not self._enable_silu_fp4_quant_fusion
++            and isinstance(x, torch.Tensor)
++        ):
++            return None
++        if self._gateup_fused_ok is None:
++            self._gateup_fused_ok = _gateup_fused_layer_ok(self.gate_up_proj)
++        if not self._gateup_fused_ok:
++            return None
++        from sglang.srt.layers.quantization.w8a16_gemv import (
++            w8a16_gemv_silu_mul,
++            w8a16_gemv_silu_mul_supported,
++        )
++
++        # Fp8LinearMethod keeps the [K, N] transposed view on the layer; .t() is
++        # the [N, K]-contiguous weight the GEMV wants.
++        w = self.gate_up_proj.weight.t()
++        scale = self.gate_up_proj.weight_scale
++        if not w8a16_gemv_silu_mul_supported(x, w, scale, _SHARED_GATEUP_FUSED_MAX_M):
++            return None
++        return w8a16_gemv_silu_mul(x, w, scale)
++
+     def forward(
+         self,
+         x,
+     ):
++        fused = self._gateup_silu_fused(x)
++        if fused is not None:
++            out, _ = self.down_proj(fused)
++            return out
+         gate_up, _ = self.gate_up_proj(x)
+         if self._enable_silu_fp4_quant_fusion and not isinstance(gate_up, tuple):
+             x, _ = self.down_proj(self._silu_fp4_quant_fused(gate_up))
+diff --git a/test/srt/layers/test_hc_mix2.py b/test/srt/layers/test_hc_mix2.py
+index 4b1588099e..b94687126a 100644
+--- a/test/srt/layers/test_hc_mix2.py
++++ b/test/srt/layers/test_hc_mix2.py
+@@ -77,3 +77,125 @@ def test_hc_mix2_cuda_graph_replay():
+         for index, (mixed, normed) in enumerate(outputs):
+             ref_mixed, ref_normed = _reference(static_x[index], norm_w, w_down, w_up)
+             _assert_close(mixed, normed, ref_mixed, ref_normed)
++
++
++# --------------------------------------------------------------------------
++# FP8 (e4m3) weight-only variant: SGLANG_HC_MIX2_FP8=1
++# --------------------------------------------------------------------------
++
++
++def _fp8_weights(w_down, w_up):
++    from sglang.srt.layers.hc_mix2_triton import quantize_hc_mix2_weights_fp8
++
++    return quantize_hc_mix2_weights_fp8(w_down, w_up)
++
++
++def _dequant(w_fp8, scale):
++    from sglang.srt.layers.hc_mix2_triton import dequantize_hc_mix2_weight
++
++    return dequantize_hc_mix2_weight(w_fp8, scale)
++
++
++def _err_ulps(actual, expected):
++    """Error in bf16 ulps of the reference RMS.
++
++    Per-element relative error is useless here: `mixed` is a gated mean whose
++    outputs pass through zero, so a handful of near-zero elements dominate any
++    ratio. The output is bf16, so one ulp of its RMS is the smallest difference
++    that can exist at all -- measuring in those units says directly how many
++    representable steps the fp8 weights moved the gate.
++    """
++    ulp = expected.float().pow(2).mean().sqrt() / 128.0
++    return (actual.float() - expected.float()).abs() / ulp
++
++
++def _stats(e):
++    f = e.flatten()
++    return {
++        "max": f.max().item(),
++        "mean": f.mean().item(),
++        "p99": torch.quantile(f, 0.99).item(),
++    }
++
++
++@pytest.mark.parametrize("rows", [1, 5, 16])
++def test_hc_mix2_fp8_matches_dequantized_bf16_kernel(rows: int):
++    """The fp8 kernel must reproduce the bf16 kernel fed the SAME (dequantized)
++    weights: any difference beyond fp32-accumulation noise is a kernel bug, not
++    a quantization effect."""
++    norm_w, w_down, w_up = _make_weights(4321 + rows)
++    wd8, sd, wu8, su = _fp8_weights(w_down, w_up)
++    x = torch.randn(rows, K, device="cuda", dtype=torch.bfloat16)
++
++    ref_mixed, ref_normed = hc_norm_mix2(
++        x, norm_w, EPS, _dequant(wd8, sd), _dequant(wu8, su), HC, HS
++    )
++    mixed, normed = hc_norm_mix2(
++        x, norm_w, EPS, wd8, wu8, HC, HS, None, sd, su
++    )
++    # normed does not touch the mix weights at all.
++    assert torch.equal(normed, ref_normed)
++    # Not zero: the reference dequantizes to bf16 while the kernel keeps the
++    # fp32 scale on the fp32 accumulator, so the kernel is the more accurate of
++    # the two. Measured: >=93% of elements bit-identical, max 2 ulp of RMS.
++    stats = _stats(_err_ulps(mixed, ref_mixed))
++    assert stats["max"] <= 8.0, stats
++    assert stats["mean"] <= 0.5, stats
++
++
++@pytest.mark.parametrize("rows", [1, 5, 16])
++def test_hc_mix2_fp8_vs_bf16_weight_reference(rows: int):
++    """Error vs the bf16-weight reference chain, i.e. the quantization cost."""
++    norm_w, w_down, w_up = _make_weights(777 + rows)
++    wd8, sd, wu8, su = _fp8_weights(w_down, w_up)
++    x = torch.randn(rows, K, device="cuda", dtype=torch.bfloat16)
++
++    ref_mixed, ref_normed = _reference(x, norm_w, w_down, w_up)
++    mixed, normed = hc_norm_mix2(
++        x, norm_w, EPS, wd8, wu8, HC, HS, None, sd, su
++    )
++    normed_error = (normed.float() - ref_normed.float()).abs()
++    assert normed_error.max().item() <= 2e-2
++    # Measured on this data: max 2.0, p99 1.0, mean 0.17 ulp of the output RMS.
++    stats = _stats(_err_ulps(mixed, ref_mixed))
++    assert stats["max"] <= 8.0, stats
++    assert stats["p99"] <= 2.0, stats
++    assert stats["mean"] <= 0.5, stats
++
++
++def test_hc_mix2_fp8_cuda_graph_replay():
++    rows = 16
++    calls = 3
++    norm_w, w_down, w_up = _make_weights(1357)
++    wd8, sd, wu8, su = _fp8_weights(w_down, w_up)
++    static_x = [
++        torch.randn(rows, K, device="cuda", dtype=torch.bfloat16) for _ in range(calls)
++    ]
++
++    def run(x):
++        return hc_norm_mix2(x, norm_w, EPS, wd8, wu8, HC, HS, None, sd, su)
++
++    side = torch.cuda.Stream()
++    side.wait_stream(torch.cuda.current_stream())
++    with torch.cuda.stream(side):
++        for x in static_x:
++            run(x)
++    torch.cuda.current_stream().wait_stream(side)
++    torch.cuda.synchronize()
++
++    graph = torch.cuda.CUDAGraph()
++    with torch.cuda.graph(graph):
++        outputs = [run(x) for x in static_x]
++
++    for trial in range(2):
++        for index, x in enumerate(static_x):
++            x.copy_(
++                torch.randn(rows, K, device="cuda", dtype=torch.bfloat16)
++                * (1.0 + index + trial)
++            )
++        graph.replay()
++        torch.cuda.synchronize()
++        for index, (mixed, normed) in enumerate(outputs):
++            ref_mixed, ref_normed = _reference(static_x[index], norm_w, w_down, w_up)
++            assert (normed.float() - ref_normed.float()).abs().max().item() <= 2e-2
++            assert _stats(_err_ulps(mixed, ref_mixed))["mean"] <= 0.5
+diff --git a/test/srt/layers/test_w8a16_gemv_silu.py b/test/srt/layers/test_w8a16_gemv_silu.py
+new file mode 100644
+index 0000000000..d22aad7db0
+--- /dev/null
++++ b/test/srt/layers/test_w8a16_gemv_silu.py
+@@ -0,0 +1,123 @@
++"""Fused shared-expert gate_up GEMV + SiLU-and-mul (SGLANG_SHARED_GATEUP_FUSED=1)."""
++
++import pytest
++import torch
++
++from sglang.srt.layers.quantization.w8a16_gemv import (
++    w8a16_gemv,
++    w8a16_gemv_silu_mul,
++)
++
++pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
++
++# The flash-next shared expert: gate_up is [2 * 640, 2560] fp8, per-channel scale.
++SHAPES = [(1280, 2560), (2048, 4096)]
++
++
++def _fp8_weight(N: int, K: int, seed: int):
++    torch.manual_seed(seed)
++    w = torch.randn(N, K, device="cuda", dtype=torch.float32) * 0.02
++    scale = (w.abs().amax(dim=1) / 448.0).clamp(min=1e-12)
++    q = (w / scale[:, None]).clamp(-448.0, 448.0).to(torch.float8_e4m3fn)
++    return q.contiguous(), scale.contiguous().float()
++
++
++def _two_kernel_reference(x, w, scale):
++    """What the unfused path computes: bf16 gate_up, then act_and_mul in fp32."""
++    gate_up = w8a16_gemv(x, w, scale)
++    h = gate_up.shape[1] // 2
++    g = gate_up[:, :h].float()
++    u = gate_up[:, h:].float()
++    return (torch.nn.functional.silu(g) * u).to(torch.bfloat16)
++
++
++def _fp32_golden(x, w, scale):
++    """Exact-ish reference: fp32 GEMM on the dequantized weights, fp32 activation."""
++    wf = w.float() * scale[:, None]
++    y = x.float() @ wf.t()
++    h = y.shape[1] // 2
++    return (torch.nn.functional.silu(y[:, :h]) * y[:, h:]).to(torch.bfloat16)
++
++
++def _ulp_diff(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
++    """Difference in units of the last place of `b` (bf16 has 8 mantissa bits)."""
++    scale = b.float().abs().clamp(min=1e-30)
++    exp = torch.floor(torch.log2(scale))
++    ulp = torch.pow(2.0, exp - 7.0)
++    return (a.float() - b.float()).abs() / ulp
++
++
++@pytest.mark.parametrize("N,K", SHAPES)
++@pytest.mark.parametrize("M", [1, 4, 16])
++def test_fused_matches_two_kernel_path(M: int, N: int, K: int):
++    w, scale = _fp8_weight(N, K, 20260903 + M + N)
++    x = torch.randn(M, K, device="cuda", dtype=torch.bfloat16)
++
++    fused = w8a16_gemv_silu_mul(x, w, scale)
++    ref = _two_kernel_reference(x, w, scale)
++    golden = _fp32_golden(x, w, scale)
++
++    assert fused.shape == (M, N // 2)
++    assert fused.dtype == torch.bfloat16
++
++    # The fused kernel keeps gate/up in fp32 through the activation, so it is at
++    # least as close to the fp32 golden as the two-kernel path is.
++    err_fused = (fused.float() - golden.float()).abs()
++    err_ref = (ref.float() - golden.float()).abs()
++    assert err_fused.max().item() <= err_ref.max().item() * 1.5 + 1e-6, (
++        err_fused.max().item(),
++        err_ref.max().item(),
++    )
++    # ... and it stays within a couple of bf16 ulps of the two-kernel result.
++    # The two paths differ only in that the unfused one rounds gate and up to
++    # bf16 before the activation, so ~1/3 of outputs land one ulp apart.
++    ulps = _ulp_diff(fused, ref)
++    assert ulps.mean().item() <= 1.0, ulps.mean().item()
++    assert ulps.max().item() <= 4.0, ulps.max().item()
++
++
++@pytest.mark.parametrize("M", [1, 16])
++def test_fused_cuda_graph_replay(M: int):
++    N, K = 1280, 2560
++    calls = 3
++    w, scale = _fp8_weight(N, K, 4242)
++    static_x = [
++        torch.randn(M, K, device="cuda", dtype=torch.bfloat16) for _ in range(calls)
++    ]
++
++    side = torch.cuda.Stream()
++    side.wait_stream(torch.cuda.current_stream())
++    with torch.cuda.stream(side):
++        for x in static_x:
++            w8a16_gemv_silu_mul(x, w, scale)
++    torch.cuda.current_stream().wait_stream(side)
++    torch.cuda.synchronize()
++
++    graph = torch.cuda.CUDAGraph()
++    with torch.cuda.graph(graph):
++        outs = [w8a16_gemv_silu_mul(x, w, scale) for x in static_x]
++
++    for trial in range(3):
++        for i, x in enumerate(static_x):
++            x.copy_(
++                torch.randn(M, K, device="cuda", dtype=torch.bfloat16) * (1.0 + i + trial)
++            )
++        graph.replay()
++        torch.cuda.synchronize()
++        for i, out in enumerate(outs):
++            ref = _two_kernel_reference(static_x[i], w, scale)
++            assert _ulp_diff(out, ref).mean().item() <= 1.0
++
++
++@pytest.mark.parametrize("M", [1, 4, 16])
++def test_fused_split_k_configs_agree(M: int):
++    """Every split count must reproduce the SPLITS=1 result (the fixup is in-launch)."""
++    N, K = 1280, 2560
++    w, scale = _fp8_weight(N, K, 909)
++    x = torch.randn(M, K, device="cuda", dtype=torch.bfloat16)
++    use_dot = M > 1
++    base = w8a16_gemv_silu_mul(x, w, scale, cfg=(16, 128, 1, use_dot, None, 4, 3))
++    for splits in (2, 5, 10, 20):
++        got = w8a16_gemv_silu_mul(x, w, scale, cfg=(16, 128, splits, use_dot, None, 4, 3))
++        rel = (got.float() - base.float()).abs() / base.float().abs().clamp(min=1e-4)
++        assert rel.max().item() <= 2e-2, (splits, rel.max().item())
+-- 
+2.43.0
+

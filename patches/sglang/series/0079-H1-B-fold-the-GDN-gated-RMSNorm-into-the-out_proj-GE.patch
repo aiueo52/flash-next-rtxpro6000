@@ -1,0 +1,832 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: aiueo52 <aiueo52@users.noreply.github.com>
+Date: Sun, 6 Sep 2026 01:32:38 +0900
+Subject: [PATCH 079/105] H1-B: fold the GDN gated RMSNorm into the out_proj
+ GEMV's A-load
+
+SGLANG_NORM_INTO_GEMV=1 (default off). The GDN block normalises its attention
+output per (token, v-head) -- RMSNormGated(head_v_dim=128, norm_before_gate,
+i.e. x * rsqrt(mean(x^2)+eps) * w * silu(z) -- and hands the
+[tokens, 48*128] result straight to the out_proj GEMV. That norm is
+`_layer_norm_fwd_1pass_kernel`: 192 one-warp CTAs moving ~150 KB, 1.88 us in
+the W4 server and 1.98 us at W16, 36 launches per verify step, and it is
+almost entirely on the critical path (57 us/step exclusive at W4, 68 at W16 --
+see the exclusive-time analysis in the H1 report).
+
+The GEMV already re-reads every A row once per n block, and with
+BLOCK_K == head_v_dim each A tile is exactly one norm group, so the row
+statistics can be recomputed from the tile that is already in registers. The
+only extra traffic is the `z` tile (same size as the A tile, L2-resident at
+decode widths) and the [128] norm weight; the [tokens, 6144] normalised
+intermediate is never written.
+
+Path: Qwen3_5GatedDeltaNet._norm_out_proj_fused -> Fp8LinearMethod
+.apply_norm_gated -> w8a16_gemv_norm_gated. Guarded on tp_size == 1, no bias,
+group_size None (== head_v_dim), norm_before_gate, contiguous [rows, 128]
+x/z, swish or sigmoid gate; anything else falls back to the untouched
+norm-then-out_proj path.
+
+Numerics: the fold itself is BIT-IDENTICAL (bench/h1/h1_check.py numerics: the
+norm-fold-alone column is 0 ulp at M=1/4/16) -- same fp32 order, same silu
+form, same bf16 round before the dot. What is not bit-identical is the tile:
+the norm is recomputed once per n block, so the profitable geometry is
+BLOCK_N 64 / SPLITS 4 rather than the plain path's 32 / 6, and that split-K
+re-partition moves up to 9 ulp on 0.03% of the output elements at M=16 (1 ulp
+at M=4, 0 at M=1) -- the same class of change as the existing per-M-bucket
+tile table. Keeping SPLITS=6 would be bit-exact but costs +0.83 us/call.
+
+Micro-benchmark (CUPTI medians, 4x-L2 working set), fused vs plain gemv plus
+the standalone norm kernel:
+  M=1    12.99 -> 13.50   (+0.51, a loss: the M=1 broadcast path is not fused)
+  M=4    13.85 -> 13.44   (-0.41)   [second run 13.76 -> 13.63, -0.13]
+  M=16   14.24 -> 14.08   (-0.16)   [second run 14.11 -> 14.24, +0.13]
+So in isolation this is a wash, +-0.3 us of run-to-run noise. The reason to
+measure it in the server anyway is that the norm kernel costs 1.9-2.0 us there
+against 1.3-1.5 us here, and one launch of 1543 disappears.
+
+Also swept (bench/h1/h1_check.py optune) whether the plain tiles for the three
+biggest critical-path shapes have any headroom: they do not. o_proj, qkvz and
+attn_qkv are all within 0.13 us/call of the server's current plan at M=1/4/16
+(the one exception, attn_qkv (64,128,1,4w,4s) at M=16, -0.83 us here, is the
+config the tuning table already pins away from because the server disagreed).
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+---
+ bench/h1/h1_check.py                          | 342 ++++++++++++++++++
+ python/sglang/srt/layers/quantization/fp8.py  |  47 +++
+ .../srt/layers/quantization/w8a16_gemv.py     | 192 +++++++++-
+ python/sglang/srt/models/qwen3_5.py           |  57 +++
+ 4 files changed, 637 insertions(+), 1 deletion(-)
+ create mode 100644 bench/h1/h1_check.py
+
+diff --git a/bench/h1/h1_check.py b/bench/h1/h1_check.py
+new file mode 100644
+index 0000000000..5a615d81cf
+--- /dev/null
++++ b/bench/h1/h1_check.py
+@@ -0,0 +1,342 @@
++"""H1 numerics + micro-benchmark for the two GEMV prologue/epilogue items.
++
++  h1_check.py numerics   -- correctness only (works with the GPU busy)
++  h1_check.py bench      -- CUPTI kernel medians over CUDA-graph replays
++
++Item C (SGLANG_GEMV_BA_SPLIT_GRID): the two-destination store's column split is
++re-gridded so no CTA straddles it. Every output column is still produced by one
++CTA running the same k-loop, so the result must be torch.equal to the flag-off
++one.
++
++Item B (SGLANG_NORM_INTO_GEMV): the GDN gated RMSNorm is folded into the
++out_proj GEMV's A-load. The fp32 sum of squares is re-associated, so the
++comparison is against `rms_norm_gated` + `w8a16_gemv` in ulps of bf16.
++"""
++
++import os
++import sys
++
++sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../w8a16v2"))
++sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../python"))
++
++import torch
++
++HIDDEN = 2560
++VALUE_DIM = 48 * 128
++HEAD_V = 128
++NUM_V = 48
++MS = (1, 4, 16)
++
++
++def _fp8_weight(N, K, seed=0, device="cuda"):
++    g = torch.Generator(device=device).manual_seed(seed)
++    wb = (torch.randn(N, K, device=device, generator=g) * 0.02).float()
++    scale = (wb.abs().amax(dim=1).clamp(min=1e-8) / 448.0).contiguous()
++    q = (wb / scale[:, None]).clamp(-448, 448).to(torch.float8_e4m3fn).contiguous()
++    w = q.t().t()
++    assert w.shape == (N, K) and w.stride() == (K, 1)
++    return w, scale.reshape(N, 1)
++
++
++def _bf16_weight(N, K, seed=0, device="cuda"):
++    g = torch.Generator(device=device).manual_seed(seed)
++    return (torch.randn(N, K, device=device, generator=g) * 0.02).to(torch.bfloat16)
++
++
++def _ulp_report(a, b):
++    """(max abs ulp distance in bf16, mismatching element fraction)."""
++    ai = a.view(torch.int16).to(torch.int32)
++    bi = b.view(torch.int16).to(torch.int32)
++    # map to a monotone ordering so ulp distance is meaningful across zero
++    ai = torch.where(ai < 0, torch.tensor(-0x8000, device=ai.device) - ai, ai)
++    bi = torch.where(bi < 0, torch.tensor(-0x8000, device=bi.device) - bi, bi)
++    d = (ai - bi).abs()
++    return int(d.max().item()), float((d != 0).float().mean().item())
++
++
++def numerics():
++    import sglang.srt.layers.quantization.w8a16_gemv as gv
++    from sglang.kernels.ops.attention.fla.layernorm_gated import rms_norm_gated
++
++    dev = "cuda"
++    ok = True
++
++    # ---- item C: segmented split grid ------------------------------------
++    print("== item C: SGLANG_GEMV_BA_SPLIT_GRID (bit-exactness) ==")
++    cases = [
++        ("gdn_in_proj_ba", 96, HIDDEN, 48, "bf16"),
++        ("unaligned 37/96", 96, HIDDEN, 37, "bf16"),
++        ("qkvz(aligned)", 16384, HIDDEN, 10240, "fp8"),
++        ("fp8 unaligned", 2560, 640, 700, "fp8"),
++    ]
++    for name, N, K, sp, tag in cases:
++        if tag == "bf16":
++            w = _bf16_weight(N, K)
++            call = lambda x, o, o2: gv.bf16_gemv(x, w, out=o, out2=o2, split_n=sp)
++        else:
++            w, sc = _fp8_weight(N, K)
++            call = lambda x, o, o2: gv.w8a16_gemv(x, w, sc, out=o, out2=o2, split_n=sp)
++        for M in MS:
++            x = (torch.randn(M, K, device=dev) * 0.1).to(torch.bfloat16)
++            outs = []
++            for flag in (False, True):
++                gv.BA_SPLIT_GRID = flag
++                o = torch.empty(M, sp, dtype=torch.bfloat16, device=dev)
++                o2 = torch.empty(M, N - sp, dtype=torch.bfloat16, device=dev)
++                call(x, o, o2)
++                torch.cuda.synchronize()
++                outs.append((o.clone(), o2.clone()))
++            gv.BA_SPLIT_GRID = False
++            same = torch.equal(outs[0][0], outs[1][0]) and torch.equal(
++                outs[0][1], outs[1][1]
++            )
++            # and against the unsplit single-destination reference
++            ref = (
++                gv.bf16_gemv(x, w)
++                if tag == "bf16"
++                else gv.w8a16_gemv(x, w, sc)
++            )
++            ref_ok = torch.equal(ref[:, :sp], outs[1][0]) and torch.equal(
++                ref[:, sp:], outs[1][1]
++            )
++            ok &= same and ref_ok
++            print(
++                f"  {name:16s} N={N:6d} split={sp:6d} M={M:2d}  "
++                f"equal(off,on)={same}  equal(unsplit,on)={ref_ok}"
++            )
++
++    # ---- item B: fused gated RMSNorm prologue ----------------------------
++    print("== item B: SGLANG_NORM_INTO_GEMV (<= 1 ulp) ==")
++    gv.NORM_INTO_GEMV = True
++    w, sc = _fp8_weight(HIDDEN, VALUE_DIM, seed=3)
++    nw = (torch.randn(HEAD_V, device=dev) * 0.3 + 1.0).to(torch.bfloat16)
++    for M in MS:
++        x = (torch.randn(M * NUM_V, HEAD_V, device=dev) * 0.5).to(torch.bfloat16)
++        z = (torch.randn(M * NUM_V, HEAD_V, device=dev) * 0.5).to(torch.bfloat16)
++        normed = rms_norm_gated(
++            x=x, weight=nw, bias=None, z=z, eps=1e-6, group_size=None,
++            norm_before_gate=True, is_rms_norm=True, activation="swish",
++        )
++        ref = gv.w8a16_gemv(normed.view(M, VALUE_DIM), w, sc)
++        got = gv.w8a16_gemv_norm_gated(
++            x.view(M, VALUE_DIM), w, sc, z.view(M, VALUE_DIM), nw, HEAD_V, 1e-6
++        )
++        torch.cuda.synchronize()
++        u, frac = _ulp_report(ref, got)
++        rel = ((ref.float() - got.float()).abs().max()
++               / ref.float().abs().max()).item()
++        # Control: the same plain GEMV run on the fused plan's tile, to
++        # separate the split-K re-partition from the norm re-association.
++        cfg = gv._norm_plan(M, HIDDEN, VALUE_DIM, HEAD_V, 1, gv._num_sms(dev))
++        yc = torch.empty(M, HIDDEN, dtype=torch.bfloat16, device=dev)
++        gv._launch(normed.view(M, VALUE_DIM), w, sc.reshape(-1).float(), yc, M,
++                   HIDDEN, VALUE_DIM, True, cfg)
++        torch.cuda.synchronize()
++        uc, fc = _ulp_report(ref, yc)
++        un, fn = _ulp_report(yc, got)
++        ok &= un <= 1
++        print(
++            f"  M={M:2d}  vs server-plan ref: max_ulp={u} ({frac*100:.2f}%)  "
++            f"max_rel={rel:.2e}   | split-K retile alone: {uc} ulp ({fc*100:.2f}%)"
++            f"   | norm fold alone: {un} ulp ({fn*100:.2f}%)   plan={cfg}"
++        )
++    gv.NORM_INTO_GEMV = False
++    print("NUMERICS", "PASS" if ok else "FAIL")
++    return 0 if ok else 1
++
++
++def bench():
++    from harness import cupti_kernel_us, make_copies, n_copies
++    import sglang.srt.layers.quantization.w8a16_gemv as gv
++    from sglang.kernels.ops.attention.fla.layernorm_gated import rms_norm_gated
++
++    dev = "cuda"
++    print(f"{'case':38s} {'M':>3s} {'us/call':>9s}")
++
++    # -- item C: in_proj_ba ------------------------------------------------
++    N, K, sp = 96, HIDDEN, 48
++    w = _bf16_weight(N, K)
++    ws = make_copies(w, n_copies(w.numel() * 2))
++    for M in MS:
++        x = (torch.randn(M, K, device=dev) * 0.1).to(torch.bfloat16)
++        o = torch.empty(M, sp, dtype=torch.bfloat16, device=dev)
++        o2 = torch.empty(M, N - sp, dtype=torch.bfloat16, device=dev)
++        for label, flag in (("ba split (off)", False), ("ba split-grid (on)", True)):
++            gv.BA_SPLIT_GRID = flag
++            t, _ = cupti_kernel_us(
++                lambda ww: gv.bf16_gemv(x, ww, out=o, out2=o2, split_n=sp),
++                ws, name_sub="_w8a16_gemv_kernel")
++            print(f"{label:38s} {M:3d} {t*1e6:9.2f}")
++        gv.BA_SPLIT_GRID = False
++        o1 = torch.empty(M, N, dtype=torch.bfloat16, device=dev)
++        t, _ = cupti_kernel_us(lambda ww: gv.bf16_gemv(x, ww, out=o1), ws,
++                               name_sub="_w8a16_gemv_kernel")
++        print(f"{'ba unsplit (reference)':38s} {M:3d} {t*1e6:9.2f}")
++
++    # -- item B: norm + out_proj -------------------------------------------
++    w8, sc = _fp8_weight(HIDDEN, VALUE_DIM, seed=3)
++    w8s = make_copies(w8, n_copies(w8.numel()))
++    nw = (torch.randn(HEAD_V, device=dev) * 0.3 + 1.0).to(torch.bfloat16)
++    gv.NORM_INTO_GEMV = True
++    for M in MS:
++        x = (torch.randn(M * NUM_V, HEAD_V, device=dev) * 0.5).to(torch.bfloat16)
++        z = (torch.randn(M * NUM_V, HEAD_V, device=dev) * 0.5).to(torch.bfloat16)
++        x2, z2 = x.view(M, VALUE_DIM), z.view(M, VALUE_DIM)
++        normed = torch.empty_like(x)
++
++        def unfused(ww):
++            n = rms_norm_gated(x=x, weight=nw, bias=None, z=z, eps=1e-6,
++                               group_size=None, norm_before_gate=True,
++                               is_rms_norm=True, activation="swish")
++            return gv.w8a16_gemv(n.view(M, VALUE_DIM), ww, sc)
++
++        tn, _ = cupti_kernel_us(unfused, w8s, name_sub="_layer_norm_fwd_1pass")
++        tg, _ = cupti_kernel_us(unfused, w8s, name_sub="_w8a16_gemv_kernel")
++        tf, _ = cupti_kernel_us(
++            lambda ww: gv.w8a16_gemv_norm_gated(x2, ww, sc, z2, nw, HEAD_V, 1e-6),
++            w8s, name_sub="_w8a16_gemv_kernel")
++        print(f"{'out_proj: norm kernel':38s} {M:3d} {tn*1e6:9.2f}")
++        print(f"{'out_proj: gemv (unfused)':38s} {M:3d} {tg*1e6:9.2f}")
++        print(f"{'out_proj: gemv+norm fused':38s} {M:3d} {tf*1e6:9.2f}"
++              f"   delta={(tf-tn-tg)*1e6:+.2f}")
++    gv.NORM_INTO_GEMV = False
++
++
++def sweep():
++    """Fused-norm out_proj over (BLOCK_N, SPLITS, warps, stages).
++
++    The norm is recomputed once per n block, so the redundancy is
++    cdiv(N, BLOCK_N); a wider n block trades that against a fatter tile.
++    """
++    from harness import cupti_kernel_us, make_copies, n_copies
++    import sglang.srt.layers.quantization.w8a16_gemv as gv
++    from sglang.kernels.ops.attention.fla.layernorm_gated import rms_norm_gated
++
++    dev = "cuda"
++    w8, sc = _fp8_weight(HIDDEN, VALUE_DIM, seed=3)
++    w8s = make_copies(w8, n_copies(w8.numel()))
++    nw = (torch.randn(HEAD_V, device=dev) * 0.3 + 1.0).to(torch.bfloat16)
++    gv.NORM_INTO_GEMV = True
++    n_kb = VALUE_DIM // HEAD_V  # 48 k blocks with BLOCK_K == group size
++    cands = []
++    for bn in (16, 32, 64, 128, 256):
++        for sp in (1, 2, 3, 4, 6, 8, 12, 16, 24):
++            if n_kb % sp:
++                continue
++            ctas = -(-HIDDEN // bn) * sp
++            if not (120 <= ctas <= 1600):
++                continue
++            for warps in (4, 8):
++                for stages in (2, 3, 4):
++                    cands.append((bn, HEAD_V, sp, True, None, warps, stages))
++    for M in (1, 4, 16):
++        x = (torch.randn(M * NUM_V, HEAD_V, device=dev) * 0.5).to(torch.bfloat16)
++        z = (torch.randn(M * NUM_V, HEAD_V, device=dev) * 0.5).to(torch.bfloat16)
++        x2, z2 = x.view(M, VALUE_DIM), z.view(M, VALUE_DIM)
++
++        def unfused(ww):
++            n = rms_norm_gated(x=x, weight=nw, bias=None, z=z, eps=1e-6,
++                               group_size=None, norm_before_gate=True,
++                               is_rms_norm=True, activation="swish")
++            return gv.w8a16_gemv(n.view(M, VALUE_DIM), ww, sc)
++
++        tn, _ = cupti_kernel_us(unfused, w8s, name_sub="_layer_norm_fwd_1pass")
++        tg, _ = cupti_kernel_us(unfused, w8s, name_sub="_w8a16_gemv_kernel")
++        base = tn + tg
++        print(f"-- M={M} baseline norm {tn*1e6:.2f} + gemv {tg*1e6:.2f} = {base*1e6:.2f} us")
++        rows = []
++        y = torch.empty(M, HIDDEN, dtype=torch.bfloat16, device=dev)
++        for cfg in cands:
++            try:
++                gv._launch(x2, w8s[0], sc.reshape(-1).float(), y, M, HIDDEN,
++                           VALUE_DIM, True, cfg,
++                           norm=(z2, nw, HEAD_V, 1e-6, False))
++                torch.cuda.synchronize()
++            except Exception:
++                continue
++            try:
++                t, _ = cupti_kernel_us(
++                    lambda ww: gv._launch(x2, ww, sc.reshape(-1).float(), y, M,
++                                          HIDDEN, VALUE_DIM, True, cfg,
++                                          norm=(z2, nw, HEAD_V, 1e-6, False)),
++                    w8s, name_sub="_w8a16_gemv_kernel")
++            except Exception:
++                continue
++            rows.append((t, cfg))
++        rows.sort()
++        for t, cfg in rows[:10]:
++            print(f"   {str(cfg):40s} {t*1e6:8.2f} us  vs base {base*1e6:6.2f} "
++                  f"({(t-base)*1e6:+.2f})")
++    gv.NORM_INTO_GEMV = False
++
++
++def _sweep_plain(name, N, K, ms, tag="fp8"):
++    """Plain (unfused) GEMV tile sweep for one shape, CUPTI medians."""
++    import triton
++    from harness import cupti_kernel_us, make_copies, n_copies
++    import sglang.srt.layers.quantization.w8a16_gemv as gv
++
++    dev = "cuda"
++    if tag == "fp8":
++        w, sc = _fp8_weight(N, K, seed=3)
++        s1 = sc.reshape(-1).float()
++        per_ch = True
++        wsz = w.numel()
++    else:
++        w = _bf16_weight(N, K, seed=3)
++        s1 = torch.ones(1, dtype=torch.float32, device=dev)
++        per_ch = False
++        wsz = w.numel() * 2
++    ws = make_copies(w, n_copies(wsz))
++    sms = gv._num_sms(dev)
++    for M in ms:
++        x = (torch.randn(M, K, device=dev) * 0.1).to(torch.bfloat16)
++        y = torch.empty(M, N, dtype=torch.bfloat16, device=dev)
++        cur = gv._plan(M, N, K, False, 1 if tag == "fp8" else 2, sms)
++        cands = {cur}
++        for bn in (16, 32, 64, 128, 256):
++            for bk in (64, 128, 256, 512):
++                if bn * bk > 32768:
++                    continue
++                n_kb = triton.cdiv(K, bk)
++                for sp in (1, 2, 3, 4, 5, 6, 8, 10, 12, 16, 24, 32):
++                    if sp > n_kb or n_kb % sp:
++                        continue
++                    ctas = triton.cdiv(N, bn) * sp
++                    if not (150 <= ctas <= 2000):
++                        continue
++                    for warps in (4, 8):
++                        for stages in (3, 4):
++                            c = gv._fit(M, N, (bn, bk, sp, M > 1, None, warps, stages))
++                            if c[2] == sp:
++                                cands.add(c)
++        rows = []
++        for cfg in sorted(cands):
++            try:
++                gv._launch(x, ws[0], s1, y, M, N, K, per_ch, cfg)
++                torch.cuda.synchronize()
++                t, _ = cupti_kernel_us(
++                    lambda ww: gv._launch(x, ww, s1, y, M, N, K, per_ch, cfg),
++                    ws, name_sub="_w8a16_gemv_kernel")
++            except Exception:
++                continue
++            rows.append((t, cfg))
++        rows.sort()
++        base = dict((c, t) for t, c in rows).get(cur, float("nan"))
++        print(f"-- {name} N={N} K={K} M={M}  server plan {cur} = {base*1e6:.2f} us")
++        for t, cfg in rows[:6]:
++            print(f"   {str(cfg):40s} {t*1e6:8.2f} us  ({(t-base)*1e6:+.2f})")
++
++
++def optune():
++    _sweep_plain("o_proj", HIDDEN, VALUE_DIM, (1, 4, 16))
++    _sweep_plain("gdn_in_proj_qkvz", 2 * 16 * 128 + 2 * VALUE_DIM, HIDDEN, (4, 16))
++    _sweep_plain("attn_qkv", 24 * 2 * 256 + 2 * 2 * 256, HIDDEN, (4, 16))
++
++
++if __name__ == "__main__":
++    mode = sys.argv[1] if len(sys.argv) > 1 else "numerics"
++    torch.cuda.init()
++    if mode == "numerics":
++        sys.exit(numerics())
++    sys.exit({"bench": bench, "sweep": sweep, "optune": optune}[mode]() or 0)
+diff --git a/python/sglang/srt/layers/quantization/fp8.py b/python/sglang/srt/layers/quantization/fp8.py
+index ed7d275463..e3c1c9b747 100644
+--- a/python/sglang/srt/layers/quantization/fp8.py
++++ b/python/sglang/srt/layers/quantization/fp8.py
+@@ -1017,6 +1017,53 @@ class Fp8LinearMethod(LinearMethodBase):
+             return None
+         return w8a16_gemv(x, w, layer.weight_scale, out=out)
+ 
++    def apply_norm_gated(
++        self,
++        layer: torch.nn.Module,
++        x: torch.Tensor,
++        z: torch.Tensor,
++        norm_weight: torch.Tensor,
++        group_size: int,
++        eps: float,
++        sigmoid_gate: bool = False,
++        bias: Optional[torch.Tensor] = None,
++    ) -> Optional[torch.Tensor]:
++        """`apply` with a gated RMSNorm over `x` folded into the GEMV's A-load.
++
++        Computes ``apply(layer, rms_norm_gated(x, z))`` -- each contiguous
++        ``group_size`` slice of an `x` row is one RMS group, normalised,
++        scaled by `norm_weight`, multiplied by ``silu(z)`` (or ``sigmoid(z)``)
++        and rounded to bf16, exactly as the standalone layer-norm kernel does,
++        before the same k-loop consumes it. Returns None when this call cannot
++        take the GEMV path, and the caller must then normalise separately.
++
++        Numerics: the fp32 sum of squares is summed in the GEMV tile's thread
++        layout rather than the norm kernel's, so the pre-round value can differ
++        in the last fp32 bit; after the bf16 round the result is within 1 ulp.
++        """
++        if bias is not None or not self._w8a16_gemv_ok(layer, x):
++            return None
++        from sglang.srt.layers.quantization.w8a16_gemv import (
++            w8a16_gemv_norm_gated,
++            w8a16_gemv_norm_gated_supported,
++        )
++
++        w = layer.weight.t()
++        if not w8a16_gemv_norm_gated_supported(
++            x, w, layer.weight_scale, z, norm_weight, group_size
++        ):
++            return None
++        return w8a16_gemv_norm_gated(
++            x,
++            w,
++            layer.weight_scale,
++            z,
++            norm_weight,
++            group_size,
++            eps,
++            sigmoid_gate,
++        )
++
+     def apply_into_split(
+         self,
+         layer: torch.nn.Module,
+diff --git a/python/sglang/srt/layers/quantization/w8a16_gemv.py b/python/sglang/srt/layers/quantization/w8a16_gemv.py
+index 69c9a51dc0..468446f358 100644
+--- a/python/sglang/srt/layers/quantization/w8a16_gemv.py
++++ b/python/sglang/srt/layers/quantization/w8a16_gemv.py
+@@ -130,6 +130,8 @@ def _w8a16_gemv_kernel(
+     y2_ptr,
+     ws_ptr,
+     cnt_ptr,
++    z_ptr,
++    nw_ptr,
+     M,
+     N,
+     K,
+@@ -140,6 +142,8 @@ def _w8a16_gemv_kernel(
+     stride_ym,
+     stride_yn,
+     stride_y2m,
++    stride_zm,
++    norm_eps,
+     SPLIT_N: tl.constexpr,
+     PER_CHANNEL: tl.constexpr,
+     BLOCK_N: tl.constexpr,
+@@ -151,6 +155,8 @@ def _w8a16_gemv_kernel(
+     USE_DOT: tl.constexpr,
+     USE_PDL: tl.constexpr = False,
+     SEG_NB0: tl.constexpr = 0,
++    NORM_G: tl.constexpr = 0,
++    NORM_SIGMOID: tl.constexpr = False,
+ ):
+     pid_n = tl.program_id(0)
+     pid_k = tl.program_id(1)
+@@ -169,6 +175,11 @@ def _w8a16_gemv_kernel(
+     offs_k = tl.arange(0, BLOCK_K)
+     n_mask = offs_n < n_hi
+     m_mask = offs_m < M
++    if NORM_G > 0:
++        # Gated RMSNorm folded into the A-load; the group is exactly one
++        # BLOCK_K tile (asserted by the planner), so the row statistics are
++        # local to the tile and nothing extra is read for them.
++        norm_w = tl.load(nw_ptr + offs_k).to(tl.float32)
+     # x comes from the previous kernel; the weight/scale loads below are all
+     # inside the reduction loop, so the wait sits at the top and what PDL buys
+     # here is the block-scheduling ramp overlapping the previous kernel's drain.
+@@ -198,6 +209,23 @@ def _w8a16_gemv_kernel(
+                 x = tl.load(xp, mask=m_mask[:, None], other=0.0)
+             else:
+                 x = tl.load(xp, mask=m_mask[:, None] & k_mask[None, :], other=0.0)
++            if NORM_G > 0:
++                zp = z_ptr + offs_m[:, None] * stride_zm + kk[None, :] * stride_xk
++                if EVEN_K:
++                    zt = tl.load(zp, mask=m_mask[:, None], other=0.0).to(tl.float32)
++                else:
++                    zt = tl.load(
++                        zp, mask=m_mask[:, None] & k_mask[None, :], other=0.0
++                    ).to(tl.float32)
++                xf = x.to(tl.float32)
++                var = tl.sum(xf * xf, axis=1) / NORM_G
++                rstd = tl.rsqrt(var + norm_eps)
++                yn = xf * rstd[:, None] * norm_w[None, :]
++                if NORM_SIGMOID:
++                    yn = yn * tl.sigmoid(zt)
++                else:
++                    yn = yn * (zt * tl.sigmoid(zt))
++                x = yn.to(tl.bfloat16)
+             if W_KN:
+                 acc += tl.dot(x, w.to(tl.bfloat16), out_dtype=tl.float32)
+             else:
+@@ -208,6 +236,20 @@ def _w8a16_gemv_kernel(
+                 xv = tl.load(x_ptr + kk * stride_xk).to(tl.float32)
+             else:
+                 xv = tl.load(x_ptr + kk * stride_xk, mask=k_mask, other=0.0).to(tl.float32)
++            if NORM_G > 0:
++                if EVEN_K:
++                    zv = tl.load(z_ptr + kk * stride_xk).to(tl.float32)
++                else:
++                    zv = tl.load(z_ptr + kk * stride_xk, mask=k_mask, other=0.0).to(
++                        tl.float32
++                    )
++                rstd1 = tl.rsqrt(tl.sum(xv * xv, axis=0) / NORM_G + norm_eps)
++                yv = xv * rstd1 * norm_w
++                if NORM_SIGMOID:
++                    yv = yv * tl.sigmoid(zv)
++                else:
++                    yv = yv * (zv * tl.sigmoid(zv))
++                xv = yv.to(tl.bfloat16).to(tl.float32)
+             if W_KN:
+                 acc += tl.sum(w.to(tl.float32) * xv[:, None], axis=0)[None, :]
+             else:
+@@ -484,7 +526,7 @@ def _fit(M: int, N: int, cfg, n_blocks: Optional[int] = None):
+     return cfg
+ 
+ 
+-def _launch(x, w, s, y, M, N, K, per_channel, cfg, y2=None, split_n=0):
++def _launch(x, w, s, y, M, N, K, per_channel, cfg, y2=None, split_n=0, norm=None):
+     block_n, block_k, splits, use_dot, w_kn, num_warps, num_stages = cfg
+     use_dot = use_dot or M > 1
+     m_pad = 16 if use_dot else 1
+@@ -501,6 +543,9 @@ def _launch(x, w, s, y, M, N, K, per_channel, cfg, y2=None, split_n=0):
+             nb <= _WS_COUNTERS and nb * splits * m_pad * block_n <= _WS_FLOATS
+         ):
+             seg_nb0, n_blocks = nb0, nb
++    z, nw, norm_g, norm_eps, norm_sigmoid = (x, x, 0, 0.0, False)
++    if norm is not None:
++        z, nw, norm_g, norm_eps, norm_sigmoid = norm
+     _w8a16_gemv_kernel[(n_blocks, splits)](
+         x,
+         w,
+@@ -509,6 +554,8 @@ def _launch(x, w, s, y, M, N, K, per_channel, cfg, y2=None, split_n=0):
+         y if y2 is None else y2,
+         ws,
+         cnt,
++        z,
++        nw,
+         M,
+         N,
+         K,
+@@ -519,6 +566,8 @@ def _launch(x, w, s, y, M, N, K, per_channel, cfg, y2=None, split_n=0):
+         y.stride(0),
+         y.stride(1),
+         y.stride(0) if y2 is None else y2.stride(0),
++        z.stride(0),
++        norm_eps,
+         SPLIT_N=split_n,
+         PER_CHANNEL=per_channel,
+         BLOCK_N=block_n,
+@@ -530,6 +579,8 @@ def _launch(x, w, s, y, M, N, K, per_channel, cfg, y2=None, split_n=0):
+         USE_DOT=use_dot,
+         USE_PDL=PDL,
+         SEG_NB0=seg_nb0,
++        NORM_G=norm_g,
++        NORM_SIGMOID=norm_sigmoid,
+         launch_pdl=PDL,
+         num_warps=num_warps,
+         num_stages=num_stages,
+@@ -607,6 +658,145 @@ def w8a16_gemv(
+     return y if y2 is None else (y, y2)
+ 
+ 
++# ---------------------------------------------------------------------------
++# Fused gated-RMSNorm prologue (SGLANG_NORM_INTO_GEMV=1)
++#
++# The GDN block normalises its attention output per (token, v-head) --
++# `RMSNormGated(head_v_dim, norm_before_gate=True)`, i.e.
++# `y = x * rsqrt(mean(x^2) + eps) * w * silu(z)` -- and immediately feeds the
++# [tokens, num_v_heads * head_v_dim] result to the out_proj GEMV. That norm is
++# 192 one-warp CTAs moving ~150 KB: pure launch + ramp, ~1.9 us, 36 times per
++# verify step.
++#
++# The GEMV already re-reads the whole A row once per n block, and with
++# BLOCK_K == head_v_dim each A tile is exactly one norm group, so the row
++# statistics can be recomputed inside the tile from registers. The only extra
++# traffic is the `z` tile (same size as the A tile, L2-resident at these
++# widths) and the [head_v_dim] norm weight.
++#
++# Numerics: the fp32 sum of squares is re-associated (the GEMV tile has a
++# different thread layout from the norm kernel's), so the result is within
++# 1 ulp of bf16 rather than bit-identical -- everything else (fp32 math, the
++# `silu` form, the bf16 rounding before the dot) is reproduced exactly.
++# ---------------------------------------------------------------------------
++
++NORM_INTO_GEMV = _env_flag("SGLANG_NORM_INTO_GEMV")
++
++
++# Tiles for the fused-norm variant, keyed (M bucket, N, K, group size). A CTA
++# recomputes the norm for its k slice once per n block, so the right geometry is
++# NOT the plain one: halving the n-block count (BLOCK_N 32 -> 64) halves that
++# redundancy, and the split count comes down with it to keep ~2 CTAs/SM.
++# Measured with bench/h1/h1_check.py sweep (CUPTI medians, 4x-L2 working set,
++# RTX PRO 6000 Blackwell Max-Q); "plain" is the unfused GEMV on the server plan
++# plus the standalone `_layer_norm_fwd_1pass_kernel`.
++#
++#   M    plain gemv + norm      fused (64, 128, 4, 8w)
++#    4   12.54 + 1.31 = 13.85   13.44   (-0.41)
++#   16   12.74 + 1.50 = 14.24   14.08   (-0.16)
++_FUSED_NORM_BY_SHAPE = {
++    (4, 2560, 6144, 128): (64, 128, 4, True, None, 8, 4),
++    (16, 2560, 6144, 128): (64, 128, 4, True, None, 8, 3),
++}
++
++
++@functools.lru_cache(maxsize=128)
++def _norm_plan(M: int, N: int, K: int, G: int, w_bytes: int, sms: int):
++    """A plan for the fused-norm GEMV: same as `_plan` but with BLOCK_K == G."""
++    tuned = _FUSED_NORM_BY_SHAPE.get((_m_bucket(M), N, K, G))
++    if tuned is not None:
++        return _fit(M, N, tuned)
++    block_n, block_k, splits, use_dot, w_kn, warps, stages = _plan(
++        M, N, K, False, w_bytes, sms
++    )
++    if block_k == G:
++        return (block_n, block_k, splits, use_dot, w_kn, warps, stages)
++    # Keep roughly the same CTA count when the tile gets narrower/wider in K.
++    n_kb = K // G
++    want = max(1, min(_MAX_SPLITS, n_kb, round(splits * block_k / G)))
++    divs = [d for d in range(1, min(n_kb, _MAX_SPLITS) + 1) if n_kb % d == 0]
++    splits = min(divs, key=lambda d: abs(d - want))
++    return _fit(M, N, (block_n, G, splits, use_dot, w_kn, warps, stages))
++
++
++def w8a16_gemv_norm_gated_supported(
++    x: torch.Tensor,
++    w: torch.Tensor,
++    scale: torch.Tensor,
++    z: torch.Tensor,
++    norm_weight: torch.Tensor,
++    group_size: int,
++) -> bool:
++    """Whether this call can take the fused gated-RMSNorm + GEMV path."""
++    K = x.shape[-1] if x.dim() == 2 else -1
++    return bool(
++        NORM_INTO_GEMV
++        and x.is_cuda
++        and x.dim() == 2
++        and x.dtype == torch.bfloat16
++        and z.dtype == torch.bfloat16
++        and 1 <= x.shape[0] <= 16
++        and tuple(z.shape) == tuple(x.shape)
++        and x.stride(1) == 1
++        and z.stride(1) == 1
++        and group_size > 0
++        and K % group_size == 0
++        and norm_weight.dtype in (torch.bfloat16, torch.float32)
++        and norm_weight.numel() == group_size
++        and norm_weight.is_contiguous()
++        and w.dim() == 2
++        and w.shape[1] == K
++        and w.stride(1) == 1
++        and scale.numel() == w.shape[0]
++    )
++
++
++def w8a16_gemv_norm_gated(
++    x: torch.Tensor,
++    w: torch.Tensor,
++    scale: torch.Tensor,
++    z: torch.Tensor,
++    norm_weight: torch.Tensor,
++    group_size: int,
++    eps: float,
++    sigmoid_gate: bool = False,
++    out: Optional[torch.Tensor] = None,
++):
++    """`(gated_rms_norm(x, z) @ w^T) * scale` in one launch.
++
++    `x`/`z` are [M, K] bf16 with K a multiple of `group_size`; the norm treats
++    each contiguous `group_size` slice of a row as its own RMS group, exactly
++    as `RMSNormGated(group_size, norm_before_gate=True)` does on the
++    [M * K / group_size, group_size] reshape the model applies.
++    """
++    M, K = x.shape
++    N = w.shape[0]
++    assert w.shape[1] == K and M <= 16
++    y = _out_or_new(out, M, N, x.device)
++    s = scale.reshape(-1)
++    if s.dtype != torch.float32 or not s.is_contiguous():
++        s = s.contiguous().float()
++    # The kernel upcasts the norm weight itself, exactly as the standalone
++    # layer-norm kernel does, so pass it through untouched (no per-call cast
++    # kernel would otherwise get baked into the CUDA graph).
++    nw = norm_weight
++    cfg = _norm_plan(M, N, K, group_size, w.element_size(), _num_sms(x.device))
++    assert cfg[1] == group_size, "fused-norm GEMV needs BLOCK_K == group_size"
++    _launch(
++        x,
++        w,
++        s,
++        y,
++        M,
++        N,
++        K,
++        s.numel() > 1,
++        cfg,
++        norm=(z, nw, group_size, float(eps), bool(sigmoid_gate)),
++    )
++    return y
++
++
+ def bf16_gemv(
+     x: torch.Tensor,
+     w: torch.Tensor,
+diff --git a/python/sglang/srt/models/qwen3_5.py b/python/sglang/srt/models/qwen3_5.py
+index a6764ab89c..9aea1a3a45 100644
+--- a/python/sglang/srt/models/qwen3_5.py
++++ b/python/sglang/srt/models/qwen3_5.py
+@@ -30,6 +30,11 @@ _GDN_BA_TRITON_GEMV = _os.environ.get("SGLANG_GDN_BA_TRITON_GEMV", "0") == "1"
+ # same GEMV, same accumulation order, same scales, same bf16 rounding.
+ _GDN_PROJ_DIRECT_LAYOUT = _os.environ.get("SGLANG_GDN_PROJ_DIRECT_LAYOUT", "0") == "1"
+ _GDN_AB_STASH_DIRECT = _os.environ.get("SGLANG_GDN_AB_STASH_DIRECT", "0") == "1"
++# H1-B: the GDN gated RMSNorm over the attention output is 192 one-warp CTAs
++# (~1.9 us) whose only consumer is the out_proj GEMV, which re-reads the same
++# rows anyway. Fold it into that GEMV's A-load; see
++# `Fp8LinearMethod.apply_norm_gated`.
++_NORM_INTO_GEMV = _os.environ.get("SGLANG_NORM_INTO_GEMV", "0") == "1"
+ import torch.nn as nn
+ import triton
+ 
+@@ -1030,6 +1035,10 @@ class Qwen3_5GatedDeltaNet(nn.Module):
+             core_attn_out_pad[: core_attn_out.shape[0], :] = core_attn_out
+             core_attn_out = core_attn_out_pad
+ 
++        fused = self._norm_out_proj_fused(core_attn_out, z, z_shape_og)
++        if fused is not None:
++            return fused
++
+         core_attn_out = self.norm(core_attn_out, z)
+         core_attn_out = core_attn_out.reshape(z_shape_og)
+         core_attn_out = core_attn_out.reshape(
+@@ -1040,6 +1049,54 @@ class Qwen3_5GatedDeltaNet(nn.Module):
+         output, _ = self.out_proj(core_attn_out)
+         return output
+ 
++    def _norm_out_proj_fused(self, core_attn_out, z, z_shape_og):
++        """out_proj with the gated RMSNorm folded into its A-load, or None.
++
++        `core_attn_out` / `z` arrive as [rows, head_v_dim] (the norm's own 2-D
++        view, `rows = tokens * num_v_heads`). The out_proj GEMV wants
++        [tokens, num_v_heads * head_v_dim]; since both tensors are row-major
++        and contiguous, that is the same bytes, and each contiguous
++        `head_v_dim` slice of a GEMV row is exactly one norm group.
++        """
++        if not (_NORM_INTO_GEMV and _is_cuda) or len(z_shape_og) != 3:
++            return None
++        apply_norm = getattr(self.out_proj.quant_method, "apply_norm_gated", None)
++        if apply_norm is None:
++            return None
++        g = self.head_v_dim
++        if (
++            self.out_proj.tp_size != 1
++            or getattr(self.out_proj, "use_decode_attn_tp", False)
++            or self.out_proj.bias is not None
++            or self.norm.group_size is not None
++            or not self.norm.norm_before_gate
++            or self.norm.bias is not None
++            or self.norm.weight.shape != (g,)
++            or core_attn_out.dim() != 2
++            or core_attn_out.shape[1] != g
++            or core_attn_out.shape != z.shape
++            or not core_attn_out.is_contiguous()
++            or not z.is_contiguous()
++        ):
++            return None
++        act = getattr(self.norm, "activation", "swish")
++        if act not in ("swish", "silu", "sigmoid"):
++            return None
++        tokens = z_shape_og[0]
++        k = z_shape_og[1] * z_shape_og[2]
++        if core_attn_out.shape[0] != tokens * z_shape_og[1]:
++            return None
++        out = apply_norm(
++            self.out_proj,
++            core_attn_out.view(tokens, k),
++            z.view(tokens, k),
++            self.norm.weight,
++            g,
++            self.norm.eps,
++            act == "sigmoid",
++        )
++        return out
++
+ 
+ class Qwen3_5LinearDecoderLayer(nn.Module):
+     """Qwen3.5 Decoder Layer with Linear Attention (GatedDeltaNet)."""
+-- 
+2.43.0
+

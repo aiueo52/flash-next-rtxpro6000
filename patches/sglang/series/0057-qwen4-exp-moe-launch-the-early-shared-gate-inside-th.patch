@@ -1,0 +1,125 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: aiueo52 <aiueo52@users.noreply.github.com>
+Date: Sat, 5 Sep 2026 15:32:47 +0900
+Subject: [PATCH 057/105] qwen4-exp moe: launch the early shared gate inside
+ the dual-stream region
+
+Computing it before `alt_stream.wait_stream()` put the gate kernel ahead of
+the fork, so the routed experts waited on it and the launch stayed on the
+critical path -- the opposite of the point. Move it after the fork, next to
+the shared expert, which is the shorter of the two branches.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+---
+ python/sglang/srt/models/qwen2_moe.py | 57 ++++++++++++++++++---------
+ 1 file changed, 39 insertions(+), 18 deletions(-)
+
+diff --git a/python/sglang/srt/models/qwen2_moe.py b/python/sglang/srt/models/qwen2_moe.py
+index 591cec2e92..135e5ee60a 100644
+--- a/python/sglang/srt/models/qwen2_moe.py
++++ b/python/sglang/srt/models/qwen2_moe.py
+@@ -341,6 +341,8 @@ class Qwen2MoeSparseMoeBlock(nn.Module):
+     # Set by `forward` when SGLANG_SHARED_GATE_EARLY defers the shared-expert
+     # join to the caller's HC combine: (shared_output, fp32 gate per row).
+     _pending_shared_join = None
++    # Set by `_shared_expert_gate_early`, read once by the same forward.
++    _early_gate_value = None
+ 
+     def __init__(
+         self,
+@@ -703,6 +705,27 @@ class Qwen2MoeSparseMoeBlock(nn.Module):
+ 
+         return final_hidden_states
+ 
++    def _shared_gate_early_ok(
++        self, hidden_states: torch.Tensor, use_fused_gate: bool
++    ) -> bool:
++        """Whether the shared-expert join can be deferred to the HC combine."""
++        return bool(
++            _SHARED_GATE_EARLY
++            and use_fused_gate
++            and self.shared_expert is not None
++            and hidden_states.shape[0] > 0
++            and self.tp_size == 1
++            and get_moe_a2a_backend().is_none()
++            and hidden_states.dtype == torch.bfloat16
++            and hidden_states.is_contiguous()
++        )
++
++    def _shared_expert_gate_early(self, hidden_states: torch.Tensor) -> torch.Tensor:
++        self._early_gate_value = shared_expert_gate_sigmoid(
++            hidden_states, self.shared_expert_gate.weight.squeeze()
++        )
++        return self._early_gate_value
++
+     def _forward_router_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
+         weight = getattr(self.gate, "weight", None)
+         bias = getattr(self.gate, "bias", None)
+@@ -749,9 +772,14 @@ class Qwen2MoeSparseMoeBlock(nn.Module):
+         self,
+         hidden_states: torch.Tensor,
+         use_fused_gate: bool = False,
++        gate_early: bool = False,
+     ) -> torch.Tensor:
+         current_stream = torch.cuda.current_stream()
+         self.alt_stream.wait_stream(current_stream)
++        # R6: after the fork, so the routed experts on the alt stream do not
++        # wait for it; the shared expert next to it is the shorter branch.
++        if gate_early:
++            self._shared_expert_gate_early(hidden_states)
+         shared_output = (
+             self._forward_shared_experts(
+                 hidden_states.clone(), apply_gate=not use_fused_gate
+@@ -807,23 +835,11 @@ class Qwen2MoeSparseMoeBlock(nn.Module):
+             and not is_npu()
+         )
+         # R6 (SGLANG_SHARED_GATE_EARLY): the shared-expert gate depends only on
+-        # the MoE input, so compute it here -- it costs one small kernel on the
+-        # stream that carries the (short) shared expert while the routed
+-        # experts run on the alt stream -- and hand the join to the HC apply.
+-        early_gate = None
+-        if (
+-            _SHARED_GATE_EARLY
+-            and use_fused_gate
+-            and self.shared_expert is not None
+-            and hidden_states.shape[0] > 0
+-            and self.tp_size == 1
+-            and get_moe_a2a_backend().is_none()
+-            and hidden_states.dtype == torch.bfloat16
+-            and hidden_states.is_contiguous()
+-        ):
+-            early_gate = shared_expert_gate_sigmoid(
+-                hidden_states, self.shared_expert_gate.weight.squeeze()
+-            )
++        # the MoE input, so it can be computed alongside the shared expert and
++        # the join handed to the caller's HC combine. `_shared_gate_early_ok`
++        # only decides *whether*; the launch itself has to sit inside the
++        # parallel region, or the alt stream waits on it.
++        gate_early = self._shared_gate_early_ok(hidden_states, use_fused_gate)
+ 
+         if hidden_states.shape[0] == 0:
+             # M=0 guard for idle DP ranks: skip shared_experts and gate
+@@ -838,14 +854,19 @@ class Qwen2MoeSparseMoeBlock(nn.Module):
+             and not torch.compiler.is_compiling()
+         ):
+             final_hidden_states, shared_output = self.forward_normal_dual_stream(
+-                hidden_states, use_fused_gate=use_fused_gate
++                hidden_states,
++                use_fused_gate=use_fused_gate,
++                gate_early=gate_early,
+             )
+         else:
++            if gate_early:
++                self._shared_expert_gate_early(hidden_states)
+             shared_output = self._forward_shared_experts(
+                 hidden_states, apply_gate=not use_fused_gate
+             )
+             final_hidden_states = self._forward_router_experts(hidden_states)
+ 
++        early_gate = self._early_gate_value if gate_early else None
+         if shared_output is not None and early_gate is not None:
+             # Deferred: the caller (Qwen4Exp decoder layer) folds
+             # `final + gate * shared` into the HC combine's apply stage.
+-- 
+2.43.0
+

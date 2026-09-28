@@ -1,0 +1,81 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: aiueo52 <aiueo52@users.noreply.github.com>
+Date: Thu, 3 Sep 2026 20:23:50 +0900
+Subject: [PATCH 5/9] mtp dump: never crash the server when the draft lm_head
+ is quantized
+
+--qwen4-exp-dense-fp8 ...,mtp_dense gives the draft an FP8 lm_head, which a
+plain F.linear cannot apply.  Drop the logits for that run and keep the hidden
+states (what the parity comparison needs) instead of failing the forward.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+---
+ python/sglang/srt/models/mtp_dump.py | 36 ++++++++++++++++++----------
+ 1 file changed, 23 insertions(+), 13 deletions(-)
+
+diff --git a/python/sglang/srt/models/mtp_dump.py b/python/sglang/srt/models/mtp_dump.py
+index a674c7e088..e8e9a0e4d0 100644
+--- a/python/sglang/srt/models/mtp_dump.py
++++ b/python/sglang/srt/models/mtp_dump.py
+@@ -338,16 +338,24 @@ class MTPDraftDumper:
+         argmax = torch.empty(n, dtype=torch.int32, device=mixed.device)
+         topk_ids = torch.empty(n, self.topk, dtype=torch.int32, device=mixed.device)
+         topk_vals = torch.empty(n, self.topk, dtype=torch.float32, device=mixed.device)
+-        for start in range(0, n, self.chunk):
+-            end = min(n, start + self.chunk)
+-            logits = torch.nn.functional.linear(
+-                mixed[start:end].to(weight.dtype), weight
+-            ).float()
+-            argmax[start:end] = logits.argmax(dim=-1).to(torch.int32)
+-            vals, ids = torch.topk(logits, self.topk, dim=-1)
+-            topk_ids[start:end] = ids.to(torch.int32)
+-            topk_vals[start:end] = vals
+-            del logits
++        logits_ok = True
++        try:
++            for start in range(0, n, self.chunk):
++                end = min(n, start + self.chunk)
++                logits = torch.nn.functional.linear(
++                    mixed[start:end].to(weight.dtype), weight
++                ).float()
++                argmax[start:end] = logits.argmax(dim=-1).to(torch.int32)
++                vals, ids = torch.topk(logits, self.topk, dim=-1)
++                topk_ids[start:end] = ids.to(torch.int32)
++                topk_vals[start:end] = vals
++                del logits
++        except Exception as exc:  # noqa: BLE001
++            # A quantized lm_head (e.g. --qwen4-exp-dense-fp8 ...,mtp_dense)
++            # cannot be applied with a plain F.linear.  The hidden states are
++            # what the comparison needs; drop the logits rather than crash.
++            logits_ok = False
++            logger.warning("MTP draft dump: skipping logits (%s)", exc)
+ 
+         seq_lens = forward_batch.extend_seq_lens_cpu
+         if seq_lens is None and forward_batch.extend_seq_lens is not None:
+@@ -367,11 +375,12 @@ class MTPDraftDumper:
+             "input_hc": input_hc.to(torch.bfloat16).cpu(),
+             "own_hc": own_hc.to(torch.bfloat16).cpu(),
+             "mixed": mixed.to(torch.bfloat16).cpu(),
+-            "argmax": argmax.cpu(),
+-            "topk_ids": topk_ids.cpu(),
+-            "topk_logits": topk_vals.cpu(),
+             "seq_offsets": torch.tensor(offsets, dtype=torch.int32),
+         }
++        if logits_ok:
++            tensors["argmax"] = argmax.cpu()
++            tensors["topk_ids"] = topk_ids.cpu()
++            tensors["topk_logits"] = topk_vals.cpu()
+         if post_attn is not None and post_attn.shape[0] == n:
+             tensors["post_attn_hc"] = post_attn.to(torch.bfloat16).cpu()
+         self.counter += 1
+@@ -384,6 +393,7 @@ class MTPDraftDumper:
+             # topk_ids indices into the hot-token list, not the real vocabulary.
+             "lm_head_vocab": str(int(weight.shape[0])),
+             "lm_head_dtype": str(weight.dtype),
++            "has_logits": "1" if logits_ok else "0",
+         }
+         try:
+             self._queue.put((os.path.join(self.dir, name), tensors, meta), timeout=300)
+-- 
+2.43.0
+

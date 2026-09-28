@@ -1,0 +1,625 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: aiueo52 <aiueo52@users.noreply.github.com>
+Date: Sat, 5 Sep 2026 13:19:58 +0900
+Subject: [PATCH 044/105] mtp entry: precompute the embedding-side projection
+ per token (SGLANG_MTP_EMBED_TABLE)
+
+The Qwen4-Exp MTP entry fusion adds fc_embedding(pre_fc_norm_embedding(
+embed_tokens(id))) to fc_hidden(pre_fc_norm_hidden(hidden)). The first term
+depends only on the token id and on weights that never change after load, yet
+the draft recomputes it on every iteration -- 15 times per decode step at W16,
+3 at W4, plus draft_extend.
+
+SGLANG_MTP_EMBED_TABLE=1 materialises that term for the whole vocabulary once
+the embedding tensor is real (`set_embed_and_head`, or the end of a standalone
+`load_weights`), and the draft then replaces the gather + norm + GEMM with a
+single gather. The full table fits (248320 x 2560 bf16 = 1.18 GB), so there is
+no hot-id/cold-id split and no fallback branch: the reduced draft vocabulary
+(--speculative-token-map) constrains only the draft's *output* ids, while the
+first token of each chain comes from the target and can be anything.
+
+Rows are filled one at a time through the same call decode makes, because
+cuBLAS switches kernel -- and therefore low-order bits -- with M; a batched
+build is not bit-identical to the M=1 kernel a bs=1 draft step runs. The norm
+is a per-row reduction and stays batched. A post-build check compares 256
+random rows against the live path and drops the table if any differ, so an
+unexpected dispatch can only cost the optimisation, never correctness.
+
+Measured on Qwen3.8-Flash-Next-NVFP4 (same session, flag off vs on):
+
+  W16  draft busy 5.00/4.98 -> 4.76/4.72 ms/step, 745 -> 717 kernels
+  W4   draft busy 0.62/0.61 -> 0.59/0.58 ms/step, 119 -> 115 kernels
+
+  internal::gemvx::kernel [320,1,1]  14.0 -> 0.0 /step (-166 us) at W16
+                                      2.0 -> 0.0 /step  (-24 us) at W4
+  entry RMSNorm [1,1,1]              28.0 -> 14.0 /step (-31 us) at W16
+                                      5.0 ->  2.0 /step  (-7 us) at W4
+
+Build takes 2.2-2.8 s and reports 256/256 sampled rows bit-identical
+(max|diff| 0.000e+00). Acceptance and needle are unchanged: W16 code-edit
+10.49 / prose-en 3.02 / agent-loop 4.66, W4 3.91 / 2.49 / 3.04, needle PASS
+on both.
+
+The table is allocated after the KV pool is sized, so it comes out of the
+leftover headroom: at W4 the stock --mem-fraction-static 0.96 leaves only
+2.12 GB after capture and an 18.5k-token prefill then OOMs. Serving with the
+flag needs the fraction lowered by ~0.013 (W4: MEM_FRACTION=0.947 restores
+3.2-3.3 GB, matching the flag-off baseline); W16's 0.945 already has room
+(4.42 -> 3.40 GB). SGLANG_MTP_EMBED_TABLE_RESERVE_GB raises the free-memory
+floor below which the build is skipped.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+---
+ python/sglang/srt/models/qwen4_exp_mtp.py     | 311 ++++++++++++++++--
+ .../unit/models/test_qwen4_exp_mtp.py         | 154 +++++++++
+ 2 files changed, 429 insertions(+), 36 deletions(-)
+
+diff --git a/python/sglang/srt/models/qwen4_exp_mtp.py b/python/sglang/srt/models/qwen4_exp_mtp.py
+index 517e9ba52b..f55c4d61cc 100644
+--- a/python/sglang/srt/models/qwen4_exp_mtp.py
++++ b/python/sglang/srt/models/qwen4_exp_mtp.py
+@@ -3,6 +3,7 @@
+ import copy
+ import os
+ import logging
++import time
+ from contextlib import ExitStack
+ from typing import Callable, Iterable, Optional, Tuple
+ 
+@@ -30,6 +31,28 @@ logger = logging.getLogger(__name__)
+ _MTP_FC_GEMV = os.environ.get("SGLANG_MTP_FC_GEMV", "0") == "1"
+ 
+ 
++def _embed_table_enabled() -> bool:
++    """SGLANG_MTP_EMBED_TABLE=1: precompute the token-only half of the entry.
++
++    Read at table-build time rather than import time so a test (or a caller
++    that sets the variable after import) sees its own value.
++    """
++    return os.environ.get("SGLANG_MTP_EMBED_TABLE", "0") == "1"
++
++
++# Rows built per gather+norm batch. The projection itself is still issued one
++# row at a time (see `_fc_embedding_row`), so this only bounds the staging
++# buffer.
++_EMBED_TABLE_CHUNK = int(os.environ.get("SGLANG_MTP_EMBED_TABLE_CHUNK", "8192"))
++# Ids sampled after the build to prove table == live computation.
++_EMBED_TABLE_CHECK = int(os.environ.get("SGLANG_MTP_EMBED_TABLE_CHECK", "256"))
++# Device memory left free after the table; below this the build is skipped and
++# the live path stays in place.
++_EMBED_TABLE_RESERVE_GB = float(
++    os.environ.get("SGLANG_MTP_EMBED_TABLE_RESERVE_GB", "2.0")
++)
++
++
+ def _draft_vocab_weights_are_shared() -> bool:
+     """Whether this draft will be handed the target's embedding / lm_head.
+ 
+@@ -121,6 +144,9 @@ class Qwen4ExpForCausalLMMTP(Qwen3_5ForCausalLMMTP):
+         self.hidden_size = config.hidden_size
+         self.hc_count = config.hc_count
+         self._mtp_input_fusion = self._init_mtp_input_fusion(config)
++        # [vocab, hidden] fc_embedding(pre_fc_norm_embedding(embed_tokens(id))),
++        # built once the embedding table is in place (SGLANG_MTP_EMBED_TABLE=1).
++        self.fc_embed_table = None
+ 
+         self.skip_vocab_weights = _draft_vocab_weights_are_shared()
+         model_cls = _Qwen4ExpDraftModel if self.skip_vocab_weights else Qwen4ExpModel
+@@ -160,7 +186,11 @@ class Qwen4ExpForCausalLMMTP(Qwen3_5ForCausalLMMTP):
+                 for name, weight in weights
+                 if not _is_draft_vocab_weight(name)
+             )
+-        return super().load_weights(weights, is_mtp)
++            return super().load_weights(weights, is_mtp)
++        result = super().load_weights(weights, is_mtp)
++        # Standalone load: embed_tokens is final here (no `set_embed_and_head`).
++        self._build_fc_embed_table()
++        return result
+ 
+     def _init_pre_fc_norms(self, config: PretrainedConfig) -> None:
+         self.pre_fc_norm_embedding = GemmaRMSNorm(
+@@ -195,48 +225,61 @@ class Qwen4ExpForCausalLMMTP(Qwen3_5ForCausalLMMTP):
+         return self._fuse_residual_linear_shared
+ 
+     def _fuse_residual_linear_shared(
+-        self, input_embeds: torch.Tensor, hidden_states: torch.Tensor
++        self,
++        input_embeds: Optional[torch.Tensor],
++        hidden_states: torch.Tensor,
++        embed_proj: Optional[torch.Tensor] = None,
+     ) -> torch.Tensor:
+-        fused_tensors = (
+-            input_embeds,
+-            hidden_states,
+-            self.pre_fc_norm_embedding.weight,
+-            self.pre_fc_norm_hidden.weight,
+-            self.fc_embedding.weight,
+-            self.fc_hidden.weight,
+-        )
+-        if (
+-            envs.SGLANG_MTP_ENTRY_FUSED.get()
+-            and self.hc_count == 4
+-            and self.hidden_size == 2560
+-            and input_embeds.dim() == 2
+-            and hidden_states.shape == (input_embeds.shape[0], 4 * self.hidden_size)
+-            and 1 <= input_embeds.shape[0] <= 16
+-            and all(tensor.dtype == torch.bfloat16 for tensor in fused_tensors)
+-            and all(tensor.is_contiguous() for tensor in fused_tensors)
+-        ):
+-            from sglang.srt.layers.mtp_entry import mtp_entry_fused
+-
+-            return mtp_entry_fused(
++        """Entry fusion: fc_embedding(norm(embed)) + fc_hidden(norm(hidden)).
++
++        `embed_proj` is the first term already materialised (read straight out
++        of the precomputed per-token table); when it is given, `input_embeds`
++        is unused and both the embedding-side norm and GEMM are skipped.
++        """
++        if embed_proj is None:
++            fused_tensors = (
+                 input_embeds,
+                 hidden_states,
+                 self.pre_fc_norm_embedding.weight,
+                 self.pre_fc_norm_hidden.weight,
+                 self.fc_embedding.weight,
+                 self.fc_hidden.weight,
+-                self.pre_fc_norm_embedding.variance_epsilon,
+             )
+-        normed_embeds = self.pre_fc_norm_embedding(input_embeds)
++            if (
++                envs.SGLANG_MTP_ENTRY_FUSED.get()
++                and self.hc_count == 4
++                and self.hidden_size == 2560
++                and input_embeds.dim() == 2
++                and hidden_states.shape == (input_embeds.shape[0], 4 * self.hidden_size)
++                and 1 <= input_embeds.shape[0] <= 16
++                and all(tensor.dtype == torch.bfloat16 for tensor in fused_tensors)
++                and all(tensor.is_contiguous() for tensor in fused_tensors)
++            ):
++                from sglang.srt.layers.mtp_entry import mtp_entry_fused
++
++                return mtp_entry_fused(
++                    input_embeds,
++                    hidden_states,
++                    self.pre_fc_norm_embedding.weight,
++                    self.pre_fc_norm_hidden.weight,
++                    self.fc_embedding.weight,
++                    self.fc_hidden.weight,
++                    self.pre_fc_norm_embedding.variance_epsilon,
++                )
++            normed_embeds = self.pre_fc_norm_embedding(input_embeds)
++        else:
++            normed_embeds = None
+         orig_shape = hidden_states.shape
+         hidden_states = self.pre_fc_norm_hidden(hidden_states)
+         decoder_view = hidden_states.view(
+             *hidden_states.shape[:-1], self.hc_count, self.hidden_size
+         )
++        gate_rows = embed_proj if normed_embeds is None else normed_embeds
+         if (
+             _MTP_FC_GEMV
+-            and normed_embeds.dim() == 2
+-            and normed_embeds.shape[0] * self.hc_count <= 16
+-            and normed_embeds.dtype == torch.bfloat16
++            and gate_rows.dim() == 2
++            and gate_rows.shape[0] * self.hc_count <= 16
++            and gate_rows.dtype == torch.bfloat16
+             and self.fc_embedding.weight.dtype == torch.bfloat16
+             and self.fc_embedding.bias is None
+             and self.fc_hidden.bias is None
+@@ -245,23 +288,215 @@ class Qwen4ExpForCausalLMMTP(Qwen3_5ForCausalLMMTP):
+             # [<=16, 2560] x [2560, 2560] BF16 GEMMs; use the tuned skinny GEMV.
+             from sglang.srt.layers.quantization.w8a16_gemv import bf16_gemv
+ 
+-            input_embeds = bf16_gemv(normed_embeds, self.fc_embedding.weight)
++            if normed_embeds is not None:
++                embed_proj = bf16_gemv(normed_embeds, self.fc_embedding.weight)
+             rows = decoder_view.reshape(-1, self.hidden_size).contiguous()
+             encoder_inputs = bf16_gemv(rows, self.fc_hidden.weight).view(
+                 decoder_view.shape
+             )
+         else:
+-            input_embeds = self.fc_embedding(normed_embeds)
++            if normed_embeds is not None:
++                embed_proj = self.fc_embedding(normed_embeds)
+             encoder_inputs = self.fc_hidden(decoder_view)
+-        return (input_embeds.unsqueeze(-2) + encoder_inputs).view(orig_shape)
++        return (embed_proj.unsqueeze(-2) + encoder_inputs).view(orig_shape)
+ 
+     def _fuse_standard(
+-        self, input_embeds: torch.Tensor, hidden_states: torch.Tensor
++        self,
++        input_embeds: torch.Tensor,
++        hidden_states: torch.Tensor,
++        embed_proj: Optional[torch.Tensor] = None,
+     ) -> torch.Tensor:
++        # The single `fc` mixes both halves, so there is no token-only term to
++        # precompute; `_build_fc_embed_table` never arms the table here.
++        assert embed_proj is None
+         input_embeds = self.pre_fc_norm_embedding(input_embeds)
+         hidden_states = self.pre_fc_norm_hidden(hidden_states)
+         return self.fc(torch.cat((input_embeds, hidden_states), dim=-1))
+ 
++    # ------------------------------------------------------------------
++    # R3: per-token table for the embedding side of the entry fusion
++    # ------------------------------------------------------------------
++
++    def _fc_embedding_row(
++        self, normed_row: torch.Tensor, out: Optional[torch.Tensor] = None
++    ) -> torch.Tensor:
++        """`fc_embedding` on a single normalised row, decode's kernel exactly.
++
++        bs=1 draft steps hand `fc_embedding` an M=1 matrix and cuBLAS switches
++        kernel (and therefore low-order bits) with M, so the table has to be
++        filled one row at a time to come out bit-identical to the live path.
++        """
++        if (
++            _MTP_FC_GEMV
++            and normed_row.dtype == torch.bfloat16
++            and self.fc_embedding.weight.dtype == torch.bfloat16
++            and self.fc_embedding.bias is None
++        ):
++            from sglang.srt.layers.quantization.w8a16_gemv import bf16_gemv
++
++            result = bf16_gemv(normed_row, self.fc_embedding.weight)
++            return result if out is None else out.copy_(result)
++        if out is None:
++            return self.fc_embedding(normed_row)
++        # torch.mm(x, W.t()) is the kernel F.linear dispatches to for a 2-D
++        # input with no bias; the post-build check below proves it.
++        return torch.mm(normed_row, self.fc_embedding.weight.t(), out=out)
++
++    @torch.no_grad()
++    def _build_fc_embed_table(self) -> None:
++        """Materialise fc_embedding(pre_fc_norm_embedding(embed_tokens(id))).
++
++        Called once the draft's embedding tensor is real (shared in from the
++        target, or loaded from a standalone checkpoint). The term depends only
++        on the token id, yet the live path recomputes it on every draft
++        iteration; the table turns it into one gather.
++        """
++        self.fc_embed_table = None
++        if not _embed_table_enabled():
++            return
++        # Bound methods are rebuilt per access, so compare the underlying
++        # function rather than the bound object.
++        fusion = getattr(self._mtp_input_fusion, "__func__", self._mtp_input_fusion)
++        if fusion is not self.__class__._fuse_residual_linear_shared:
++            logger.info("MTP embed table: entry fusion has no token-only term; off")
++            return
++        if self.tp_size != 1:
++            logger.info("MTP embed table: unsupported at tp_size=%d; off", self.tp_size)
++            return
++        embed_tokens = getattr(self.model, "embed_tokens", None)
++        weight = getattr(embed_tokens, "weight", None)
++        if weight is None or weight.dim() != 2:
++            logger.info("MTP embed table: no usable embedding tensor; off")
++            return
++        rows = min(
++            int(weight.shape[0]),
++            int(getattr(embed_tokens, "num_embeddings", weight.shape[0])),
++        )
++        hidden = self.hidden_size
++        dtype = self.fc_embedding.weight.dtype
++        device = weight.device
++        nbytes = rows * hidden * dtype.itemsize
++        if device.type == "cuda":
++            free = torch.cuda.mem_get_info(device)[0]
++            reserve = int(_EMBED_TABLE_RESERVE_GB * (1 << 30))
++            if nbytes + reserve > free:
++                logger.warning(
++                    "MTP embed table: %.2f GB table + %.2f GB reserve exceeds "
++                    "%.2f GB free; keeping the live path",
++                    nbytes / (1 << 30),
++                    reserve / (1 << 30),
++                    free / (1 << 30),
++                )
++                return
++
++        start_time = time.perf_counter()
++        try:
++            table = torch.empty((rows, hidden), dtype=dtype, device=device)
++            chunk = max(1, _EMBED_TABLE_CHUNK)
++            for lo in range(0, rows, chunk):
++                hi = min(lo + chunk, rows)
++                ids = torch.arange(lo, hi, device=device, dtype=torch.int64)
++                # The norm is a per-row reduction, so it is bit-exact batched;
++                # only the projection is sensitive to M.
++                normed = self.pre_fc_norm_embedding(embed_tokens(ids))
++                for i in range(hi - lo):
++                    self._fc_embedding_row(
++                        normed[i : i + 1], out=table[lo + i : lo + i + 1]
++                    )
++            if device.type == "cuda":
++                torch.cuda.synchronize(device)
++        except torch.cuda.OutOfMemoryError:
++            logger.warning("MTP embed table: OOM while building; keeping the live path")
++            table = None
++            if device.type == "cuda":
++                torch.cuda.empty_cache()
++            return
++        build_s = time.perf_counter() - start_time
++
++        checked, exact, max_abs = self._check_fc_embed_table(table, embed_tokens)
++        if checked and exact != checked:
++            logger.warning(
++                "MTP embed table: %d/%d sampled rows are not bit-identical to the "
++                "live path (max|diff| %.3e); keeping the live path",
++                checked - exact,
++                checked,
++                max_abs,
++            )
++            del table
++            if device.type == "cuda":
++                torch.cuda.empty_cache()
++            return
++        self.fc_embed_table = table
++        logger.info(
++            "MTP embed table: %d x %d %s (%.2f GB) built in %.1fs via %s; "
++            "sampled rows bit-exact %s, max|diff| %s; %.2f GB device memory free",
++            rows,
++            hidden,
++            str(dtype).replace("torch.", ""),
++            nbytes / (1 << 30),
++            build_s,
++            "bf16_gemv" if _MTP_FC_GEMV else "cuBLAS (M=1)",
++            "n/a" if checked == 0 else f"{exact}/{checked}",
++            "n/a" if max_abs is None else f"{max_abs:.3e}",
++            (
++                torch.cuda.mem_get_info(device)[0] / (1 << 30)
++                if device.type == "cuda"
++                else float("nan")
++            ),
++        )
++
++    @torch.no_grad()
++    def _check_fc_embed_table(
++        self, table: torch.Tensor, embed_tokens: nn.Module
++    ) -> Tuple[int, int, Optional[float]]:
++        """Compare a sample of table rows against the live M=1 computation.
++
++        Returns (rows checked, rows bit-identical, max abs difference).
++        """
++        n = min(_EMBED_TABLE_CHECK, table.shape[0])
++        if n <= 0:
++            return 0, 0, None
++        device = table.device
++        ids = torch.randint(0, table.shape[0], (n,), device=device, dtype=torch.int64)
++        live = torch.empty((n, table.shape[1]), dtype=table.dtype, device=device)
++        for i in range(n):
++            row_ids = ids[i : i + 1]
++            normed = self.pre_fc_norm_embedding(embed_tokens(row_ids))
++            live[i] = self._fc_embedding_row(normed)[0]
++        got = table.index_select(0, ids)
++        exact = int((got == live).all(dim=1).sum().item())
++        max_abs = (got.float() - live.float()).abs().max().item()
++        return n, exact, max_abs
++
++    def _table_embed_proj(
++        self,
++        input_ids: torch.Tensor,
++        forward_batch: ForwardBatch,
++        input_embeds: Optional[torch.Tensor],
++    ) -> Optional[torch.Tensor]:
++        """The entry's embedding-side term straight out of the table.
++
++        Shape-agnostic (decode, draft_extend and prefill all just gather), and
++        CUDA-graph safe: one `index_select` with no host sync and no branch on
++        device data.
++        """
++        table = self.fc_embed_table
++        if table is None:
++            return None
++        if input_embeds is not None or forward_batch.mm_input_embeds is not None:
++            return None
++        ids = input_ids
++        if ids.dtype not in (torch.int32, torch.int64):
++            ids = ids.long()
++        out = torch.index_select(table, 0, ids.reshape(-1))
++        if ids.dim() != 1:
++            out = out.view(*ids.shape, table.shape[1])
++        return out
++
++    def set_embed_and_head(self, embed, head):
++        super().set_embed_and_head(embed, head)
++        self._build_fc_embed_table()
++
+     def _npu_quant_context(self):
+         exit_stack = ExitStack()
+         if (
+@@ -334,12 +569,16 @@ class Qwen4ExpForCausalLMMTP(Qwen3_5ForCausalLMMTP):
+         **kwargs,
+     ):
+         with self._npu_quant_context():
+-            input_embeds = self._prepare_input_embeds(
+-                input_ids, forward_batch, input_embeds
+-            )
++            embed_proj = self._table_embed_proj(input_ids, forward_batch, input_embeds)
++            if embed_proj is None:
++                input_embeds = self._prepare_input_embeds(
++                    input_ids, forward_batch, input_embeds
++                )
+             hidden_states = forward_batch.spec_info.hidden_states
+             if not forward_batch.forward_mode.is_idle():
+-                hidden_states = self._mtp_input_fusion(input_embeds, hidden_states)
++                hidden_states = self._mtp_input_fusion(
++                    input_embeds, hidden_states, embed_proj
++                )
+ 
+             with get_global_expert_distribution_recorder().disable_this_region():
+                 model_output = self.model(
+diff --git a/test/registered/unit/models/test_qwen4_exp_mtp.py b/test/registered/unit/models/test_qwen4_exp_mtp.py
+index e60e4575a9..4ed4dcd44c 100644
+--- a/test/registered/unit/models/test_qwen4_exp_mtp.py
++++ b/test/registered/unit/models/test_qwen4_exp_mtp.py
+@@ -1,7 +1,11 @@
++import os
+ import unittest
+ from types import SimpleNamespace
+ from unittest.mock import patch
+ 
++import torch
++
++from sglang.srt.models import qwen4_exp_mtp
+ from sglang.srt.models.qwen4_exp_mtp import Qwen4ExpForCausalLMMTP
+ from sglang.test.ci.ci_register import register_cpu_ci
+ from sglang.test.test_utils import CustomTestCase
+@@ -42,5 +46,155 @@ class TestQwen4ExpMTPRuntimeContext(CustomTestCase):
+         self.assertTrue(lm_head.call_args.kwargs["use_attn_tp_group"])
+ 
+ 
++class _Embedder(torch.nn.Module):
++    """Stand-in for the draft's VocabParallelEmbedding at tp_size == 1."""
++
++    def __init__(self, vocab: int, hidden: int) -> None:
++        super().__init__()
++        self.num_embeddings = vocab
++        self.weight = torch.nn.Parameter(torch.randn(vocab, hidden))
++
++    def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
++        return torch.nn.functional.embedding(input_ids.long(), self.weight)
++
++
++class TestQwen4ExpMTPEmbedTable(CustomTestCase):
++    """SGLANG_MTP_EMBED_TABLE: the token-only half of the entry fusion."""
++
++    VOCAB = 48
++    HIDDEN = 8
++    HC = 4
++
++    def _make_head(self) -> Qwen4ExpForCausalLMMTP:
++        torch.manual_seed(0)
++        config = SimpleNamespace(
++            hc_count=self.HC,
++            hidden_size=self.HIDDEN,
++            rms_norm_eps=1e-6,
++            vocab_size=self.VOCAB,
++        )
++        parallel = SimpleNamespace(
++            tp_size=1,
++            config=SimpleNamespace(enable_dp_lm_head=False),
++        )
++        with (
++            patch(
++                "sglang.srt.models.qwen4_exp_mtp.get_parallel",
++                return_value=parallel,
++            ),
++            patch("sglang.srt.models.qwen4_exp_mtp.get_pp_group"),
++            patch("sglang.srt.models.qwen4_exp_mtp.Qwen4ExpModel"),
++            patch("sglang.srt.models.qwen4_exp_mtp.ParallelLMHead"),
++            patch("sglang.srt.models.qwen4_exp_mtp.LogitsProcessor"),
++        ):
++            head = Qwen4ExpForCausalLMMTP(config)
++
++        head.model = SimpleNamespace(embed_tokens=_Embedder(self.VOCAB, self.HIDDEN))
++        for norm in (head.pre_fc_norm_embedding, head.pre_fc_norm_hidden):
++            # Pin the pure-torch reference: this test runs on CPU tensors even
++            # when the box happens to have a GPU.
++            norm._forward_method = norm.forward_native
++            with torch.no_grad():
++                norm.weight.normal_(0, 0.1)
++                norm.gemma_weight.copy_(norm.weight + 1.0)
++        with torch.no_grad():
++            head.fc_embedding.weight.normal_(0, 0.1)
++            head.fc_hidden.weight.normal_(0, 0.1)
++        return head
++
++    @staticmethod
++    def _build(head: Qwen4ExpForCausalLMMTP) -> None:
++        with patch.dict(os.environ, {"SGLANG_MTP_EMBED_TABLE": "1"}):
++            head._build_fc_embed_table()
++
++    def _live_row(self, head: Qwen4ExpForCausalLMMTP, token_id: int) -> torch.Tensor:
++        ids = torch.tensor([token_id])
++        embeds = head.model.embed_tokens(ids)
++        return head.fc_embedding(head.pre_fc_norm_embedding(embeds))[0]
++
++    def test_table_rows_are_bit_exact(self):
++        head = self._make_head()
++        self._build(head)
++        self.assertIsNotNone(head.fc_embed_table)
++        self.assertEqual(tuple(head.fc_embed_table.shape), (self.VOCAB, self.HIDDEN))
++        for token_id in range(self.VOCAB):
++            self.assertTrue(
++                torch.equal(
++                    head.fc_embed_table[token_id], self._live_row(head, token_id)
++                ),
++                msg=f"table row {token_id} differs from the live computation",
++            )
++
++    def test_table_is_off_by_default(self):
++        head = self._make_head()
++        with patch.dict(os.environ, {}, clear=False):
++            os.environ.pop("SGLANG_MTP_EMBED_TABLE", None)
++            head._build_fc_embed_table()
++        self.assertIsNone(head.fc_embed_table)
++
++    def _fuse_both_ways(self, head, ids, hidden_states):
++        live = head._fuse_residual_linear_shared(
++            head.model.embed_tokens(ids), hidden_states
++        )
++        embed_proj = head._table_embed_proj(
++            ids, SimpleNamespace(mm_input_embeds=None), None
++        )
++        tabled = head._fuse_residual_linear_shared(None, hidden_states, embed_proj)
++        self.assertEqual(live.shape, tabled.shape)
++        return live, tabled
++
++    def test_fusion_matches_the_live_path_at_decode_width(self):
++        """bs=1 draft steps: the table is built at that same M, so it is exact."""
++        head = self._make_head()
++        self._build(head)
++        for token_id in (0, 5, self.VOCAB - 1):
++            ids = torch.tensor([token_id])
++            hidden_states = torch.randn(1, self.HC * self.HIDDEN)
++            live, tabled = self._fuse_both_ways(head, ids, hidden_states)
++            torch.testing.assert_close(live, tabled, rtol=0, atol=0)
++
++    def test_fusion_matches_the_live_path_when_batched(self):
++        """Wider batches (draft_extend, prefill) only match to GEMM tolerance.
++
++        The live path's own result already moves with M — BLAS picks a
++        different kernel — so the table cannot be bit-identical to every
++        width at once; it is pinned to the M=1 decode width.
++        """
++        head = self._make_head()
++        self._build(head)
++        ids = torch.tensor([3, 17, 41])
++        hidden_states = torch.randn(ids.numel(), self.HC * self.HIDDEN)
++        live, tabled = self._fuse_both_ways(head, ids, hidden_states)
++        torch.testing.assert_close(live, tabled, rtol=1e-5, atol=1e-6)
++
++    def test_gather_is_shape_agnostic_and_yields_to_explicit_embeds(self):
++        head = self._make_head()
++        self._build(head)
++        forward_batch = SimpleNamespace(mm_input_embeds=None)
++
++        for shape in [(1,), (7,), (2, 5)]:
++            ids = torch.randint(0, self.VOCAB, shape)
++            proj = head._table_embed_proj(ids, forward_batch, None)
++            self.assertEqual(tuple(proj.shape), (*shape, self.HIDDEN))
++
++        ids = torch.tensor([1, 2])
++        explicit = torch.zeros(2, self.HIDDEN)
++        self.assertIsNone(head._table_embed_proj(ids, forward_batch, explicit))
++        self.assertIsNone(
++            head._table_embed_proj(
++                ids, SimpleNamespace(mm_input_embeds=explicit), None
++            )
++        )
++
++        head.fc_embed_table = None
++        self.assertIsNone(head._table_embed_proj(ids, forward_batch, None))
++
++    def test_build_is_skipped_when_the_fusion_has_no_token_only_term(self):
++        head = self._make_head()
++        head._mtp_input_fusion = head._fuse_standard
++        self._build(head)
++        self.assertIsNone(head.fc_embed_table)
++
++
+ if __name__ == "__main__":
+     unittest.main()
+-- 
+2.43.0
+

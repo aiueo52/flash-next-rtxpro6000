@@ -1,0 +1,71 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: aiueo52 <aiueo52@users.noreply.github.com>
+Date: Sat, 5 Sep 2026 18:40:07 +0900
+Subject: [PATCH 073/105] pdl: default USE_PDL to False so the bench/ direct
+ callers keep working
+
+bench/w8a16/{baseline_w8a16,w8a16_gemv_tuned_attempt}.py launch
+_w8a16_gemv_kernel by hand and do not pass the new constexpr.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+---
+ python/sglang/srt/layers/hc_mix2_triton.py          | 6 +++---
+ python/sglang/srt/layers/quantization/w8a16_gemv.py | 4 ++--
+ 2 files changed, 5 insertions(+), 5 deletions(-)
+
+diff --git a/python/sglang/srt/layers/hc_mix2_triton.py b/python/sglang/srt/layers/hc_mix2_triton.py
+index 59b6610ab8..1a6a414ee1 100644
+--- a/python/sglang/srt/layers/hc_mix2_triton.py
++++ b/python/sglang/srt/layers/hc_mix2_triton.py
+@@ -156,7 +156,7 @@ def _hc_branch_stats_kernel(
+     FUSE_GATE: tl.constexpr,
+     FUSE_APPLY: tl.constexpr,
+     PREV_SPLITS: tl.constexpr,
+-    USE_PDL: tl.constexpr,
++    USE_PDL: tl.constexpr = False,
+ ):
+     pid = tl.program_id(0)
+     m = pid // HC
+@@ -276,7 +276,7 @@ def _hc_down_kernel(
+     REDUNDANT_STATS: tl.constexpr,
+     READ_NORMED: tl.constexpr,
+     W_FP8: tl.constexpr,
+-    USE_PDL: tl.constexpr,
++    USE_PDL: tl.constexpr = False,
+ ):
+     kg = tl.program_id(0)
+     nb = tl.program_id(1)
+@@ -371,7 +371,7 @@ def _hc_up_kernel(
+     BLOCK_R: tl.constexpr,
+     NUM_STAGES: tl.constexpr,
+     W_FP8: tl.constexpr,
+-    USE_PDL: tl.constexpr,
++    USE_PDL: tl.constexpr = False,
+ ):
+     jb = tl.program_id(0)
+     pdl_wait(USE_PDL)
+diff --git a/python/sglang/srt/layers/quantization/w8a16_gemv.py b/python/sglang/srt/layers/quantization/w8a16_gemv.py
+index 8f23bc5e78..e48d529320 100644
+--- a/python/sglang/srt/layers/quantization/w8a16_gemv.py
++++ b/python/sglang/srt/layers/quantization/w8a16_gemv.py
+@@ -110,7 +110,7 @@ def _w8a16_gemv_kernel(
+     EVEN_K: tl.constexpr,
+     W_KN: tl.constexpr,
+     USE_DOT: tl.constexpr,
+-    USE_PDL: tl.constexpr,
++    USE_PDL: tl.constexpr = False,
+ ):
+     pid_n = tl.program_id(0)
+     pid_k = tl.program_id(1)
+@@ -601,7 +601,7 @@ def _w8a16_gemv_silu_kernel(
+     SPLITS: tl.constexpr,
+     EVEN_K: tl.constexpr,
+     USE_DOT: tl.constexpr,
+-    USE_PDL: tl.constexpr,
++    USE_PDL: tl.constexpr = False,
+ ):
+     pid_n = tl.program_id(0)
+     pid_k = tl.program_id(1)
+-- 
+2.43.0
+

@@ -1,0 +1,191 @@
+--- a/flashinfer/data/csrc/fused_moe/cutlass_backend/cutlass_fused_moe_kernels.cuh	2026-09-06 00:00:19.581569834 +0900
++++ b/flashinfer/data/csrc/fused_moe/cutlass_backend/cutlass_fused_moe_kernels.cuh	2026-09-06 00:00:19.599897599 +0900
+@@ -1553,6 +1553,16 @@
+ #endif
+ }
+ 
++// G2-1: FLASHINFER_MOE_FOLD_MEMSET=0 keeps the fused-finalize output zeroing as its own
++// cudaMemsetAsync launch instead of folding it into doActivationKernel's grid.
++inline bool foldMemsetEnabled() {
++  static bool const enabled = [] {
++    char const* v = std::getenv("FLASHINFER_MOE_FOLD_MEMSET");
++    return !(v && v[0] == '0' && v[1] == '\0');
++  }();
++  return enabled;
++}
++
+ // FLASHINFER_MOE_FUSED_STRIDES=0 keeps computeStridesTmaWarpSpecialized as its own launch.
+ inline bool fusedStridesEnabled() {
+   static bool const enabled = [] {
+@@ -2404,7 +2414,7 @@
+     ScaleBiasType const* bias_ptr, bool bias_is_broadcast, int64_t const* expert_first_token_offset,
+     int num_experts_per_node, int64_t inter_size, float const* fc2_act_global_scale,
+     bool use_per_expert_act_scale, TmaWarpSpecializedGroupedGemmInput::ElementSF* fc2_act_sf_flat,
+-    ActivationParams activation_params) {
++    ActivationParams activation_params, void* fused_zero_ptr, int64_t fused_zero_vec16) {
+ #ifdef ENABLE_FP4
+   constexpr bool IsNVFP4 =
+       std::is_same_v<T, __nv_fp4_e2m1> &&
+@@ -2442,6 +2452,20 @@
+ 
+   int64_t const num_valid_tokens = expert_first_token_offset[num_experts_per_node];
+ 
++  // G2-1: fold the fused-finalize output zeroing (a 1.0 us memset32 launch in the serial MoE
++  // chain) into this kernel.  It is placed *before* cudaGridDependencySynchronize() because the
++  // zeroing depends on nothing GEMM1 produces; the stores are ordered ahead of GEMM2 by this
++  // kernel's cudaTriggerProgrammaticLaunchCompletion() below, exactly as the memset was.
++  if (fused_zero_ptr != nullptr) {
++    uint4* zero_out = reinterpret_cast<uint4*>(fused_zero_ptr);
++    uint4 const zero_val = make_uint4(0u, 0u, 0u, 0u);
++    int64_t const zero_tid = int64_t(blockIdx.x) * blockDim.x + threadIdx.x;
++    int64_t const zero_stride = int64_t(gridDim.x) * blockDim.x;
++    for (int64_t i = zero_tid; i < fused_zero_vec16; i += zero_stride) {
++      zero_out[i] = zero_val;
++    }
++  }
++
+ #if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
+   cudaGridDependencySynchronize();
+ #endif
+@@ -2581,7 +2605,8 @@
+                   int64_t inter_size, int64_t expanded_num_tokens, ActivationParams activation_type,
+                   QuantParams const& quant_params, bool use_per_expert_act_scale,
+                   TmaWarpSpecializedGroupedGemmInput::ElementSF* fc2_act_sf_flat, bool enable_pdl,
+-                  cudaStream_t stream) {
++                  cudaStream_t stream, void* fused_zero_ptr = nullptr,
++                  int64_t fused_zero_vec16 = 0) {
+   static int64_t const smCount = tensorrt_llm::common::getMultiProcessorCount();
+   // Note: Launching 8 blocks per SM can fully leverage the memory bandwidth (tested on B200).
+   // N-dim SF padding has been removed (CUTLASS grouped GEMM never reads beyond
+@@ -2681,7 +2706,7 @@
+   cudaLaunchKernelEx(&config, fn, output, gemm_result, fp8_quant, bias, bias_is_broadcast,
+                      expert_first_token_offset, num_experts_per_node, inter_size,
+                      quant_params.fp4.fc2.act_global_scale, use_per_expert_act_scale,
+-                     fc2_act_sf_flat, activation_type);
++                     fc2_act_sf_flat, activation_type, fused_zero_ptr, fused_zero_vec16);
+ }
+ 
+ // ============================== Lora Add Bias =================================
+@@ -3318,7 +3343,8 @@
+     int64_t const inter_size, int const num_experts_per_node, ActivationParams fc1_activation_type,
+     float const** alpha_scale_ptr_array, bool bias_is_broadcast, cudaStream_t stream,
+     cutlass_extensions::CutlassGemmConfig config, bool min_latency_mode,
+-    int* num_active_experts_per, int* active_expert_global_ids, bool enable_pdl) {
++    int* num_active_experts_per, int* active_expert_global_ids, bool enable_pdl,
++    void* fused_zero_ptr, int64_t fused_zero_vec16) {
+   if (fp8_blockscale_gemm_runner) {
+     TLLM_CHECK(!min_latency_mode);
+     Self::BlockScaleFC1(*fp8_blockscale_gemm_runner, input, output, intermediate_result,
+@@ -3403,7 +3429,7 @@
+         static_cast<UnfusedGemmOutputType const*>(gemm_output), fc2_fp8_quant, fc1_expert_biases,
+         bias_is_broadcast, expert_first_token_offset, num_experts_per_node, inter_size,
+         expanded_num_rows, fc1_activation_type, quant_params, use_per_expert_act_scale,
+-        fc2_fp4_act_flat, enable_pdl, stream);
++        fc2_fp4_act_flat, enable_pdl, stream, fused_zero_ptr, fused_zero_vec16);
+ 
+     sync_check_cuda_error(stream);
+   } else if (use_fp8) {
+@@ -3551,7 +3577,8 @@
+     int64_t const k, float const** alpha_scale_ptr_array, bool use_lora, void* fc2_lora,
+     cudaStream_t stream, MOEParallelismConfig parallelism_config, bool const enable_alltoall,
+     cutlass_extensions::CutlassGemmConfig config, bool min_latency_mode,
+-    int* num_active_experts_per, int* active_expert_global_ids, bool enable_pdl) {
++    int* num_active_experts_per, int* active_expert_global_ids, bool enable_pdl,
++    bool finalize_output_prezeroed) {
+   int64_t const* total_tokens_including_expert = expert_first_token_offset + 1;
+ 
+   bool const using_tma_ws_gemm2 = gemm_runner.isTmaWarpSpecialized(config);
+@@ -3583,8 +3610,11 @@
+       //
+       // This also means it is included in the timing for the profiler, which is probably more
+       // representative until we can overlap it
+-      check_cuda_error(cudaMemsetAsync(
+-          final_output, 0x0, sizeof(OutputType) * num_rows * unpadded_hidden_size, stream));
++      // G2-1: skipped when doActivationKernel already zeroed this buffer in its own grid.
++      if (!finalize_output_prezeroed) {
++        check_cuda_error(cudaMemsetAsync(
++            final_output, 0x0, sizeof(OutputType) * num_rows * unpadded_hidden_size, stream));
++      }
+     }
+   } else if (use_fp8) {
+     alpha_scale_ptr_array = computeFP8DequantScale(alpha_scale_ptr_array, num_experts_per_node,
+@@ -3634,7 +3664,7 @@
+                       static_cast<ScaleBiasType const*>(fc2_lora), false, expert_first_token_offset,
+                       num_experts_per_node, hidden_size, expanded_num_rows,
+                       ActivationParams(ActivationType::Identity), {}, false, nullptr, enable_pdl,
+-                      stream);
++                      stream, nullptr, 0);
+     sync_check_cuda_error(stream);
+   }
+ 
+@@ -4229,6 +4259,26 @@
+                              num_valid_tokens_ptr, expanded_num_rows, hidden_size, use_awq, stream);
+     }
+     sync_check_cuda_error(stream);
++
++    // G2-1: the fused-finalize output zeroing is a ~1.0 us memset32 launch sitting between
++    // doActivationKernel and GEMM2 in a strictly serial chain.  Hand it to doActivationKernel's
++    // grid instead (same position in the stream, one fewer launch).  Fails safe: any condition
++    // we do not cover leaves the memset where it was.
++    void* fused_zero_ptr = nullptr;
++    int64_t fused_zero_vec16 = 0;
++    if (foldMemsetEnabled() && !min_latency_mode &&
++        gemm2_tma_ws_input.fusion ==
++            TmaWarpSpecializedGroupedGemmInput::EpilogueFusion::FINALIZE &&
++        moe_gemm_runner_.isTmaWarpSpecialized(*gemm1_config_) && !use_lora &&
++        isGatedActivation(fc1_activation_type) && !use_w4afp8 && !blockscale_gemm_runner) {
++      size_t const zero_bytes =
++          sizeof(OutputType) * static_cast<size_t>(num_rows) * unpadded_hidden_size;
++      if (zero_bytes % 16 == 0 && (reinterpret_cast<uintptr_t>(final_output) % 16) == 0) {
++        fused_zero_ptr = final_output;
++        fused_zero_vec16 = static_cast<int64_t>(zero_bytes / 16);
++      }
++    }
++
+     Self::gemm1(moe_gemm_runner_, blockscale_gemm_runner, gemm1_input, fc1_result_,
+                 glu_inter_result_, expert_first_token_offset_, gemm1_tma_ws_input,
+                 fc1_expert_weights, fc1_expert_biases, num_valid_tokens_ptr, fc1_int_scales,
+@@ -4236,7 +4286,7 @@
+                 fc1_fp4_act_scale_, fc2_fp4_act_scale_, quant_params, num_rows, expanded_num_rows,
+                 hidden_size, inter_size, num_experts_per_node, fc1_activation_type,
+                 alpha_scale_ptr_array_fc1_, !use_lora, stream, *gemm1_config_, false, nullptr,
+-                nullptr, enable_pdl);
++                nullptr, enable_pdl, fused_zero_ptr, fused_zero_vec16);
+     sync_check_cuda_error(stream);
+ 
+     if (use_lora) {
+@@ -4257,7 +4307,8 @@
+         permuted_row_to_unpermuted_row_, token_selected_experts, num_valid_tokens_ptr, num_rows,
+         expanded_num_rows, hidden_size, unpadded_hidden_size, inter_size, num_experts_per_node,
+         experts_per_token, alpha_scale_ptr_array_fc2_, use_lora, lora_fc2_result_, stream,
+-        parallelism_config, enable_alltoall, *gemm2_config_, false, nullptr, nullptr, enable_pdl);
++        parallelism_config, enable_alltoall, *gemm2_config_, false, nullptr, nullptr, enable_pdl,
++        /*finalize_output_prezeroed*/ fused_zero_ptr != nullptr);
+     sync_check_cuda_error(stream);
+   }
+ }
+--- a/flashinfer/data/csrc/nv_internal/tensorrt_llm/kernels/cutlass_kernels/include/moe_kernels.h	2026-09-06 00:00:19.582047243 +0900
++++ b/flashinfer/data/csrc/nv_internal/tensorrt_llm/kernels/cutlass_kernels/include/moe_kernels.h	2026-09-06 00:00:19.600147494 +0900
+@@ -720,7 +720,10 @@
+                     ActivationParams fc1_activation_type, float const** alpha_scale_ptr_array,
+                     bool bias_is_broadcast, cudaStream_t stream,
+                     cutlass_extensions::CutlassGemmConfig config, bool min_latency_mode,
+-                    int* num_active_experts_per, int* active_expert_global_ids, bool enable_pdl);
++                    int* num_active_experts_per, int* active_expert_global_ids, bool enable_pdl,
++                    // G2-1: when non-null, doActivationKernel zeroes [fused_zero_ptr,
++                    // fused_zero_ptr + 16 * fused_zero_vec16) so gemm2 can skip its memset.
++                    void* fused_zero_ptr = nullptr, int64_t fused_zero_vec16 = 0);
+ 
+   static void gemm2(
+       MoeGemmRunner<T, WeightType, OutputType, ScaleBiasType, IsMXFPX>& gemm_runner,
+@@ -741,7 +744,9 @@
+       void* fc2_lora, cudaStream_t stream, MOEParallelismConfig parallelism_config,
+       bool const enable_alltoall, cutlass_extensions::CutlassGemmConfig config,
+       bool min_latency_mode, int* num_active_experts_per, int* active_expert_global_ids,
+-      bool enable_pdl);
++      bool enable_pdl,
++      // G2-1: set when gemm1's doActivationKernel already zeroed final_output.
++      bool finalize_output_prezeroed = false);
+ 
+   // Overrides to allow us to forward on to the internal functions with the pointers using the
+   // correct type

@@ -1,0 +1,131 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: aiueo52 <aiueo52@users.noreply.github.com>
+Date: Sun, 6 Sep 2026 17:49:15 +0900
+Subject: [PATCH 098/105] N1 stage C: NVFP4 for the GDN qkvz in_proj and
+ attention qkv
+
+Hooked at the top of Fp8LinearMethod.process_weights_after_loading, before it quantises,
+rather than as a post-load walk. That is where layer.weight is still the loaded BF16
+tensor -- and decisively, these two layers do not exist in the checkpoint under their
+module names (qkv_proj is fused from q/k/v_proj and in_proj_qkvz from in_proj_qkv +
+in_proj_z by the loader), so a post-load re-read would have to replicate that mapping.
+
+GDN out_proj is deliberately excluded: 1.08-1.13x for 0.22% of the W16 step, and the one
+shape where the 4-bit GEMV drops to 47-52% of roof, below break-even. The GDN in_proj
+fusion (apply_into_split) is already guarded by a getattr on the caller side, so falling
+back is graceful.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+---
+ python/sglang/srt/layers/quantization/fp8.py  |  8 +++
+ .../srt/layers/quantization/nvfp4_dense.py    | 71 ++++++++++++++++++-
+ 2 files changed, 78 insertions(+), 1 deletion(-)
+
+diff --git a/python/sglang/srt/layers/quantization/fp8.py b/python/sglang/srt/layers/quantization/fp8.py
+index e3c1c9b747..c701d86b05 100644
+--- a/python/sglang/srt/layers/quantization/fp8.py
++++ b/python/sglang/srt/layers/quantization/fp8.py
+@@ -848,6 +848,14 @@ class Fp8LinearMethod(LinearMethodBase):
+         layer.input_scale = None
+ 
+     def process_weights_after_loading(self, layer: Module) -> None:
++        # N1 stage C: some dense categories are served as NVFP4 instead of FP8. This has
++        # to happen before the FP8 quantisation below, while layer.weight is still the
++        # loaded BF16 tensor -- see nvfp4_dense.maybe_pack_dense_nvfp4.
++        from sglang.srt.layers.quantization.nvfp4_dense import maybe_pack_dense_nvfp4
++
++        if maybe_pack_dense_nvfp4(layer):
++            return
++
+         if self.block_quant:
+             self.process_weights_after_loading_block_quant(layer)
+         else:
+diff --git a/python/sglang/srt/layers/quantization/nvfp4_dense.py b/python/sglang/srt/layers/quantization/nvfp4_dense.py
+index aaa5033be4..1cc3aee062 100644
+--- a/python/sglang/srt/layers/quantization/nvfp4_dense.py
++++ b/python/sglang/srt/layers/quantization/nvfp4_dense.py
+@@ -28,7 +28,10 @@ from typing import Optional, Sequence
+ 
+ import torch
+ 
+-from sglang.srt.layers.quantization.w4a16_nvfp4_gemv import quantize_nvfp4
++from sglang.srt.layers.quantization.w4a16_nvfp4_gemv import (
++    FP4_SCALE_BLOCK,
++    quantize_nvfp4,
++)
+ 
+ logger = logging.getLogger(__name__)
+ 
+@@ -276,3 +279,69 @@ class NVFP4DenseLinearMethod:
+             torch.mm(x.to(torch.bfloat16), w.t(), out=y[:, r0:r1])
+             del w
+         return y
++
++
++# ---------------------------------------------------------------------------
++# N1 stage C: dense projections
++# ---------------------------------------------------------------------------
++#
++# These are packed inside `Fp8LinearMethod.process_weights_after_loading`, *before* it
++# quantises, rather than by a post-load walk. Two reasons, and the first is decisive:
++#
++# - **The BF16 weight is right there.** A post-load pass would have to re-read the
++#   checkpoint, and these layers do not exist in it under their module names --
++#   `qkv_proj` is fused from q/k/v_proj and `in_proj_qkvz` from in_proj_qkv + in_proj_z
++#   by the loader (`qwen4_exp.py:1923-1932`). Packing at this point gets the true BF16
++#   fused tensor for free and skips replicating that mapping.
++# - It is the same hook that already preallocates the GEMV scratch, so ordering against
++#   CUDA-graph capture is settled.
++
++def _cat_flags():
++    def on(name):
++        return os.environ.get(name, "0").lower() in ("1", "true", "yes", "on")
++
++    cats = []
++    if on("SGLANG_LINEAR_ATTN_NVFP4"):
++        cats.append("in_proj_qkvz")
++    if on("SGLANG_ATTN_NVFP4"):
++        cats.append("qkv_proj")
++    return tuple(cats)
++
++
++def maybe_pack_dense_nvfp4(layer) -> bool:
++    """Pack `layer` to NVFP4 in place and install the GEMV method. True if handled.
++
++    Called at the top of `Fp8LinearMethod.process_weights_after_loading`, where
++    `layer.weight` is still the loaded BF16 tensor. Deliberately NOT applied to the GDN
++    `out_proj`: measured 1.08-1.13x there for 0.22 % of the W16 step, and it is the one
++    shape where the 4-bit GEMV falls to 47-52 % of roof -- below break-even (N1_LOG.md 7).
++    """
++    cats = _cat_flags()
++    if not cats:
++        return False
++    prefix = getattr(layer, "prefix", "") or ""
++    if not any(prefix.endswith(c) or f".{c}" in prefix for c in cats):
++        return False
++    w = getattr(layer, "weight", None)
++    if w is None or w.dim() != 2 or w.dtype not in (torch.bfloat16, torch.float16):
++        return False
++    if w.shape[1] % FP4_SCALE_BLOCK:
++        logger.warning("NVFP4 %s: K=%d not a multiple of 16, leaving FP8", prefix, w.shape[1])
++        return False
++
++    from sglang.srt.layers.quantization.w8a16_gemv import prealloc
++
++    wq, bs, gscale = quantize_nvfp4(w.data)
++    prealloc(wq.device)
++    NVFP4DenseLinearMethod.attach(layer, wq, bs, gscale)
++    try:
++        del layer.weight
++    except AttributeError:
++        pass
++    layer.weight = wq
++    layer.weight_scale = None
++    layer.input_scale = None
++    layer.quant_method = NVFP4DenseLinearMethod(prefix)
++    logger.info("NVFP4 dense: %s %s packed", prefix, tuple(wq.shape))
++    return True
++
+-- 
+2.43.0
+

@@ -1,0 +1,28 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: aiueo52 <aiueo52@users.noreply.github.com>
+Date: Wed, 2 Sep 2026 11:12:17 +0900
+Subject: [PATCH 007/105] qwen3_5: SGLANG_GDN_ALT_STREAM=0 switch to keep
+ in_proj_ba on the main stream
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+---
+ python/sglang/srt/models/qwen3_5.py | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/python/sglang/srt/models/qwen3_5.py b/python/sglang/srt/models/qwen3_5.py
+index ec0624511e..270f6cec94 100644
+--- a/python/sglang/srt/models/qwen3_5.py
++++ b/python/sglang/srt/models/qwen3_5.py
+@@ -140,6 +140,9 @@ _hip_use_alt_stream = get_bool_env_var("SGLANG_ALT_STREAM") and _is_hip
+ _gdn_use_alt_stream = _is_cuda or (
+     get_bool_env_var("SGLANG_GDN_QKVZ_BA_ALT_STREAM", "False") and _hip_use_alt_stream
+ )
++# SGLANG_GDN_ALT_STREAM=0 forces the in_proj_ba projection onto the main stream
++# (no multi-stream branch inside the CUDA graph).
++_gdn_use_alt_stream = _gdn_use_alt_stream and _os.environ.get("SGLANG_GDN_ALT_STREAM", "1") == "1"
+ _qknorm_use_alt_stream = _is_cuda or (
+     get_bool_env_var("SGLANG_QK_NORM_ALT_STREAM", "False") and _hip_use_alt_stream
+ )
+-- 
+2.43.0
+

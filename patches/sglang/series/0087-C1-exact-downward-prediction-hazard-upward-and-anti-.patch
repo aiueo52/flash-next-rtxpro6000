@@ -1,0 +1,420 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: aiueo52 <aiueo52@users.noreply.github.com>
+Date: Sun, 6 Sep 2026 15:09:19 +0900
+Subject: [PATCH 087/105] C1: exact downward prediction, hazard upward, and
+ anti-oscillation
+
+Replaces the estimator. The two directions are not symmetric and pretending
+they are was leaving accuracy on the table.
+
+DOWNWARD is exact with no model. A topk=1 draft is a greedy chain, the target
+accepts a prefix, and the first S' tokens of a length-S chain are the tokens a
+length-S' chain would have drafted -- so a step observed at S says exactly what
+S' < S would have accepted: min(accepted, S'). Validated on the 2026-09-06
+traces, mean(min(a_15,3)) from the W16 run against the separately measured W4
+run: 2.66/2.76, 1.49/1.47, 1.14/1.35, 2.09/2.10.
+
+UPWARD is censored -- at S=3 an accepted count of 3 could mean 3 or 14 -- and
+that is where the confidence earns its keep. What survives censoring is the
+boundary hazard r = P(a>=S)/P(a>=S-1); modelling per-position acceptance as flat after
+position 2, that one rate extends the chain. Predicting the W16 runs from
+the W4 traces: +14%, -8%, +17%, +9%. Optimistic, hence tail_bias=0.9. The
+upward estimate is always recomputed from the live state, never read from a
+remembered EMA of the other state, which would go stale exactly when the
+workload changes.
+
+Also adds grace backoff: each REVERSAL of the previous switch multiplies the
+grace window. Without it the controller ping-pongs where the two candidates
+genuinely tie (offline on agent-loop: 24 switches over 3000 batches). A tie
+costs almost nothing to hold, precisely because it is a tie.
+
+Recommended config saved as adaptive/w16_conf.json (margin 0.20, rate_alpha
+0.05, grace 40, interval 20, backoff 3.0). Offline on the recorded traces,
+3000-batch replay, against the better fixed profile per workload:
+  shipped EMA   worst 0.957  mean 0.986   43 switches
+  confidence    worst 0.965  mean 0.985    5 switches
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+---
+ .../srt/speculative/adaptive_confidence.py    | 277 +++++++++++-------
+ 1 file changed, 176 insertions(+), 101 deletions(-)
+
+diff --git a/python/sglang/srt/speculative/adaptive_confidence.py b/python/sglang/srt/speculative/adaptive_confidence.py
+index 666aa353f8..cb714a968c 100644
+--- a/python/sglang/srt/speculative/adaptive_confidence.py
++++ b/python/sglang/srt/speculative/adaptive_confidence.py
+@@ -299,35 +299,61 @@ def invert_accept(mean_accept: float, steps: int) -> float:
+ 
+ 
+ class ConfidenceStepSlot:
+-    """Throughput-maximising step choice from a confidence-conditioned rate.
++    """Throughput-maximising step choice from directly observable statistics.
+ 
+     Drop-in for ``AdaptiveStepSlot``: same ``current_steps`` / ``candidate_steps``
+     / ``update()`` contract, plus ``observe_confidence()``.
+ 
+-    Per decision it:
+-      1. converts the batch's mean accepted-draft count into a per-position
+-         acceptance ``r`` (which is comparable across step counts, unlike the
+-         raw mean),
+-      2. folds it into the EMA of the confidence bucket the *producing* chain
+-         started from, and into that bucket's occupancy EMA,
+-      3. picks the candidate with the highest
+-         ``sum_b w_b (1 + E[accepted | r_b, S]) / step_time(S)``,
+-         i.e. the expected throughput over the confidence mixture the workload
+-         is currently producing, not over its mean.
+-
+-    ``switch_margin`` is the only hysteresis: a candidate must beat the
+-    incumbent by that relative margin to displace it, which both damps
+-    oscillation and encodes the un-modelled cost of a switch (the draft state
+-    is cold for a batch or two afterwards).
++    It picks ``argmax_S sum_b w_b (1 + E[accepted | b, S]) / step_time(S)``.
++    Everything interesting is in how ``E[accepted | b, S]`` is obtained, and the
++    two directions are not symmetric:
++
++    **Downward (S below the live chain) is exact, with no model at all.**  A
++    topk=1 draft is a greedy chain and the target accepts a *prefix* of it, and
++    the first S' tokens of a length-S chain are the same tokens a length-S'
++    chain would have drafted.  So a step observed at S tells you exactly what
++    S' < S would have accepted: ``min(accepted, S')``.  Checked against the
++    2026-09-06 traces -- ``mean(min(a_15, 3))`` on the W16 run versus the mean
++    accepted actually measured on the separate W4 run:
++
++        code-edit  2.66 vs 2.76 (+4%)      prose-en   1.49 vs 1.47 (-1%)
++        prose-ja   1.14 vs 1.35 (+18%)     agent-loop 2.09 vs 2.10 (+0%)
++
++    **Upward is censored, and this is where the confidence earns its keep.**
++    At S=3 an accepted count of 3 could mean "3" or "would have been 14"; the
++    mean saturates and carries no information about how much chain is being
++    left on the table.  What survives censoring is the *hazard* at the
++    boundary: ``r = P(a >= S) / P(a >= S-1)``.  Assuming per-position acceptance is flat
++    after position 2 (a modelling assumption), that one rate extends the
++    chain:
++
++        E[accepted | T] = E[min(a, S)] + P(a >= S) * r (1 - r^(T-S)) / (1 - r)
++
++    Measured on the W4 traces predicting the W16 runs: +14%, -8%, +17%, +9%.
++    Optimistic, so ``tail_bias`` discounts it and ``switch_margin`` covers the
++    rest.  The upward estimate is ALWAYS recomputed from the live state rather
++    than read from a remembered EMA of the other state: a remembered value goes
++    stale exactly when it matters, i.e. when the workload has changed.
++
++    **Why buckets.**  The estimates above are conditioned on the position-0
++    confidence bucket and recombined over the recent bucket occupancy ``w_b``
++    rather than pooled.  Pooling asks about a workload's mean; the mean is a
++    bad summary of code-edit, whose accept distribution at S=15 is spread
++    across 0..15 with a 30-40% spike at the full chain, and a threshold test on
++    it (what the shipped EMA slot does) is answering the wrong question.  The
++    confidence is what makes the sub-populations separable: on the 2026-09-06
++    W16 traces the mean accepted mostly rises across the five buckets (one dip)
++    -- prose-en 1.29 / 2.15 / 3.58 / 3.20 / 3.45, agent-loop 2.10 / 3.73 /
++    4.56 / 4.74 / 5.18, code-edit 2.93 / 4.68 / 8.83 / 9.95 / 11.70 -- with
++    corr(p0, accepted) between 0.37 and 0.53.
++
++    A switch leaves the draft state cold for a batch or two, so decisions are
++    held for a grace window; the per-step confidence is therefore NOT used to
++    pick a step count per step.  It is used to decompose the window.
+     """
+ 
+-    # Position-0 confidence bucket edges.  Coarse on purpose: each bucket has
+-    # to accumulate its own rate estimate, and a decode server sees a few
+-    # thousand steps per workload.  The default edges are packed against 1.0
+-    # because that is where the mass is: on the 2026-09-06 code-edit trace the
+-    # position-0 probability has a 10th percentile of 0.966 and a median of
+-    # 1.000, so uniform edges would put 80% of steps in one bucket and
+-    # discriminate nothing.  Overridable from the config ("buckets").
++    # Position-0 confidence bucket edges, packed against 1.0 because that is
++    # where the mass is (code-edit at W4: 10th percentile 0.966, median 1.000).
+     BUCKETS = (0.8, 0.95, 0.99, 0.999)
+ 
+     def __init__(self, initial_steps: int, cfg: dict):
+@@ -340,38 +366,57 @@ class ConfidenceStepSlot:
+             else candidates[len(candidates) // 2]
+         )
+ 
+-        self.rate_alpha = float(cfg.get("rate_alpha", 0.15))
++        self.alpha = float(cfg.get("rate_alpha", 0.05))
++        self.weight_alpha = float(cfg.get("weight_alpha", 0.02))
+         self.update_interval = int(cfg.get("update_interval", 4))
+         self.warmup_batches = int(cfg.get("warmup_batches", 15))
+         self.switch_grace_batches = int(cfg.get("switch_grace_batches", 20))
+-        self.switch_margin = float(cfg.get("switch_margin", 0.04))
+-        # E[accepted] from an iid model is biased low because positions 0-1
+-        # accept better than the tail; one multiplicative correction, measured
+-        # at 1.15 across all four workloads (see module docstring).
+-        self.position_bias = float(cfg.get("position_bias", 1.15))
+-        # Weight of the confidence-conditioned rate against the pooled rate.
+-        # 0 reproduces a pure "better statistic" policy (option 3); 1 trusts
+-        # the buckets outright.  Buckets are blended in proportion to their
+-        # own sample count either way, so this only sets the ceiling.
++        # Anti-oscillation. When two candidates are genuinely close, small
++        # estimate noise flips the argmax and the controller ping-pongs at the
++        # crossover (measured offline on agent-loop: 24 switches over 3000
++        # batches, -3% against just staying at W4). Each REVERSAL of the
++        # previous switch's direction multiplies the grace window, so a true
++        # tie converges to holding one state -- which costs almost nothing,
++        # precisely because it is a tie -- while a real preference change still
++        # gets through on the first decision.
++        self.grace_backoff = float(cfg.get("grace_backoff", 2.0))
++        self.max_grace_batches = int(cfg.get("max_grace_batches", 2000))
++        self._grace = self.switch_grace_batches
++        self._last_dir = 0
++        self.switch_margin = float(cfg.get("switch_margin", 0.05))
++        # The hazard extrapolation runs 8-17% optimistic against measurement.
++        self.tail_bias = float(cfg.get("tail_bias", 0.9))
++        # 0 pools every step into one estimate (option 3: a better statistic,
++        # no confidence); 1 trusts the buckets, shrunk by their sample count.
+         self.confidence_weight = float(cfg.get("confidence_weight", 1.0))
+-        self.min_bucket_samples = int(cfg.get("min_bucket_samples", 12))
+-        self.weight_alpha = float(cfg.get("weight_alpha", 0.02))
+-
++        self.min_bucket_samples = int(cfg.get("min_bucket_samples", 20))
+         self.buckets = tuple(cfg.get("buckets", self.BUCKETS))
++
+         nb = len(self.buckets) + 1
+         self._nb = nb
+-        self._rate = [0.0] * nb
+-        self._rate_n = [0] * nb
+-        # Occupancy EMA: how often the incoming chains start from each bucket.
++        cands = self.candidate_steps
++        # Per bucket: EMA of min(accepted, c) for every candidate c, updated
++        # only from samples that were NOT censored at c (i.e. live S >= c).
++        self._m = [{c: 0.0 for c in cands} for _ in range(nb)]
++        self._mn = [{c: 0 for c in cands} for _ in range(nb)]
++        # Per bucket, per live S: EMA of P(a >= S) and P(a >= S-1), the two
++        # numbers the boundary hazard needs.
++        self._sat = [{c: 0.0 for c in cands} for _ in range(nb)]
++        self._satp = [{c: 0.0 for c in cands} for _ in range(nb)]
++        self._satn = [{c: 0 for c in cands} for _ in range(nb)]
+         self._w = [1.0 / nb] * nb
+-        self._pooled_rate = 0.0
+-        self._pooled_n = 0
++        # Pooled twins, used before a bucket has samples and when
++        # confidence_weight is 0.
++        self._pm = {c: 0.0 for c in cands}
++        self._pmn = {c: 0 for c in cands}
++        self._psat = {c: 0.0 for c in cands}
++        self._psatp = {c: 0.0 for c in cands}
++        self._psatn = {c: 0 for c in cands}
++
+         self._batch_count = 0
+         self._grace_until = 0
+-        self._next_bucket = nb // 2  # until the first confidence arrives
++        self._next_bucket = nb // 2
+         self._last_conf: Optional[float] = None
+-        # Bucket the chain currently being verified started from, so the
+-        # measurement lands in the right bucket when it comes back.
+         self._inflight_bucket: collections.deque = collections.deque(maxlen=8)
+         self._dbg = os.environ.get("SGLANG_ADAPTIVE_DEBUG", "") == "1"
+ 
+@@ -388,38 +433,46 @@ class ConfidenceStepSlot:
+         """Position-0 top-1 probability for the chain about to be drafted."""
+         if not confidences:
+             return
+-        # Batch-level statistic: the whole batch shares one chain length, and
+-        # the *weakest* request bounds how far the shared verify is useful.
+         conf = sum(confidences) / len(confidences)
+         self._last_conf = conf
+         self._next_bucket = self._bucket(conf)
+         self._inflight_bucket.append(self._next_bucket)
+ 
++    @staticmethod
++    def _ema(cur: float, n: int, x: float, a: float) -> float:
++        return x if n == 0 else (1 - a) * cur + a * x
++
+     def update(self, num_correct_drafts_per_req: list[int]) -> bool:
+         if not num_correct_drafts_per_req:
+             return False
+-        steps = self.current_steps
+-        if steps > 0:
++        S = self.current_steps
++        if S > 0:
+             # Same staleness guard as the EMA slot: a sample longer than the
+             # live chain was produced by the previous, longer state.
+-            fresh = [n for n in num_correct_drafts_per_req if n <= steps]
++            fresh = [n for n in num_correct_drafts_per_req if n <= S]
+             if fresh:
+-                mean = sum(fresh) / len(fresh)
+-                r = invert_accept(mean / self.position_bias, steps)
+                 b = (
+                     self._inflight_bucket.popleft()
+                     if self._inflight_bucket
+                     else self._next_bucket
+                 )
+-                a = self.rate_alpha
+-                self._rate[b] = (
+-                    r if self._rate_n[b] == 0 else (1 - a) * self._rate[b] + a * r
+-                )
+-                self._rate_n[b] += 1
+-                self._pooled_rate = (
+-                    r if self._pooled_n == 0 else (1 - a) * self._pooled_rate + a * r
+-                )
+-                self._pooled_n += 1
++                a = self.alpha
++                for c in self.candidate_steps:
++                    if c > S:
++                        continue  # censored at this chain length
++                    v = sum(min(x, c) for x in fresh) / len(fresh)
++                    self._m[b][c] = self._ema(self._m[b][c], self._mn[b][c], v, a)
++                    self._mn[b][c] += 1
++                    self._pm[c] = self._ema(self._pm[c], self._pmn[c], v, a)
++                    self._pmn[c] += 1
++                sat = sum(x >= S for x in fresh) / len(fresh)
++                satp = sum(x >= S - 1 for x in fresh) / len(fresh)
++                self._sat[b][S] = self._ema(self._sat[b][S], self._satn[b][S], sat, a)
++                self._satp[b][S] = self._ema(self._satp[b][S], self._satn[b][S], satp, a)
++                self._satn[b][S] += 1
++                self._psat[S] = self._ema(self._psat[S], self._psatn[S], sat, a)
++                self._psatp[S] = self._ema(self._psatp[S], self._psatn[S], satp, a)
++                self._psatn[S] += 1
+                 aw = self.weight_alpha
+                 for k in range(self._nb):
+                     self._w[k] = (1 - aw) * self._w[k] + (aw if k == b else 0.0)
+@@ -433,81 +486,103 @@ class ConfidenceStepSlot:
+             return False
+         return self._recompute()
+ 
+-    # -- decision ----------------------------------------------------------
+-    def _bucket_rate(self, b: int) -> float:
+-        """Bucket *b*'s acceptance rate, shrunk toward the pooled rate."""
+-        n = self._rate_n[b]
+-        if n == 0 or self.confidence_weight <= 0.0:
+-            return self._pooled_rate
++    # -- estimates ---------------------------------------------------------
++    def _extrapolate(self, base: float, sat: float, satp: float, k: int) -> float:
++        """Extend a chain by *k* positions past a boundary with survival *sat*."""
++        if sat <= 0.0 or k <= 0:
++            return base
++        r = min(0.999, sat / satp) if satp > 0 else 0.9
++        tail = k if r >= 1.0 else r * (1.0 - r**k) / (1.0 - r)
++        return base + self.tail_bias * sat * tail
++
++    def _pooled_estimate(self, c: int) -> float:
++        S = self.current_steps
++        if c <= S:
++            return self._pm[c] if self._pmn[c] else float(max(0, c - 1))
++        if not self._pmn.get(S) or not self._psatn.get(S):
++            return float(max(0, S - 1))
++        return self._extrapolate(self._pm[S], self._psat[S], self._psatp[S], c - S)
++
++    def _bucket_estimate(self, b: int, c: int) -> float:
++        pooled = self._pooled_estimate(c)
++        S = self.current_steps
++        n = self._mn[b].get(S, 0)
++        if self.confidence_weight <= 0.0 or n == 0:
++            return pooled
++        if c <= S:
++            est = self._m[b][c] if self._mn[b][c] else pooled
++        elif self._satn[b].get(S):
++            est = self._extrapolate(
++                self._m[b][S], self._sat[b][S], self._satp[b][S], c - S
++            )
++        else:
++            est = pooled
++        # Shrink toward the pooled estimate until the bucket has enough samples.
+         w = self.confidence_weight * min(1.0, n / max(1, self.min_bucket_samples))
+-        return w * self._rate[b] + (1 - w) * self._pooled_rate
++        return w * est + (1 - w) * pooled
+ 
+-    def mixture(self) -> list[tuple[float, float]]:
+-        """[(weight, rate)] over the confidence buckets currently in play."""
++    def expected_accept_for(self, steps: int) -> float:
++        """E[accepted] at *steps*, integrated over the confidence mixture."""
+         if self.confidence_weight <= 0.0:
+-            return [(1.0, self._pooled_rate)]
++            return self._pooled_estimate(steps)
+         tot = sum(self._w) or 1.0
+-        return [
+-            (self._w[b] / tot, self._bucket_rate(b))
++        return sum(
++            (self._w[b] / tot) * self._bucket_estimate(b, steps)
+             for b in range(self._nb)
+             if self._w[b] > 1e-4
+-        ]
+-
+-    def value(self, steps: int, mix: list[tuple[float, float]]) -> float:
+-        """Expected tokens per ms at *steps*, integrated over the mixture."""
+-        num = sum(
+-            w * (1.0 + self.position_bias * expected_accept(r, steps))
+-            for w, r in mix
+         )
+-        return num / step_time_ms(steps)
+ 
+-    def best_steps(self, mix: list[tuple[float, float]]) -> tuple[int, float]:
++    def value(self, steps: int) -> float:
++        return (1.0 + self.expected_accept_for(steps)) / step_time_ms(steps)
++
++    def best_steps(self) -> tuple[int, float]:
+         best, best_tps = self.current_steps, -1.0
+         for s in self.candidate_steps:
+-            tps = self.value(s, mix)
++            tps = self.value(s)
+             if s == self.current_steps:
+                 # The only hysteresis: a challenger must clear the incumbent by
+                 # this margin, which pays for the cold draft state a switch
+-                # leaves behind.
++                # leaves behind and covers the upward estimate's known bias.
+                 tps *= 1.0 + self.switch_margin
+             if tps > best_tps:
+                 best, best_tps = s, tps
+         return best, best_tps
+ 
+     def _recompute(self) -> bool:
+-        if self._pooled_n == 0:
++        if not self._pmn.get(self.current_steps):
+             return False
+-        mix = self.mixture()
+-        r = self._rate_for_next_dbg = sum(w * r for w, r in mix)
+-        target, _ = self.best_steps(mix)
++        target, _ = self.best_steps()
+         if self._dbg:
+             logger.info(
+-                "[adaptive-conf] steps=%d batch=%d conf=%s rbar=%.4f "
+-                "w=%s r=%s n=%s -> %d",
++                "[adaptive-conf] steps=%d batch=%d conf=%s w=%s E=%s tps=%s -> %d",
+                 self.current_steps,
+                 self._batch_count,
+                 f"{self._last_conf:.3f}" if self._last_conf is not None else "-",
+-                r,
+                 [round(x, 3) for x in self._w],
+-                [round(self._bucket_rate(b), 3) for b in range(self._nb)],
+-                self._rate_n,
++                {c: round(self.expected_accept_for(c), 2) for c in self.candidate_steps},
++                {c: round(self.value(c) * 1000) for c in self.candidate_steps},
+                 target,
+             )
+         if target == self.current_steps:
+             return False
+         old = self.current_steps
++        e_old = self.expected_accept_for(old)
++        e_new = self.expected_accept_for(target)
++        v_old = self.value(old) * 1000
++        v_new = self.value(target) * 1000
++        direction = 1 if target > old else -1
++        if direction == -self._last_dir:
++            self._grace = min(self.max_grace_batches,
++                              max(1.0, self._grace) * self.grace_backoff)
++        else:
++            self._grace = float(self.switch_grace_batches)
++        self._last_dir = direction
+         self.current_steps = target
+-        self._grace_until = self._batch_count + self.switch_grace_batches
++        self._grace_until = self._batch_count + int(self._grace)
+         logger.info(
+             "Adaptive spec params updated (confidence): steps %d -> %d "
+-            "(r=%.3f, conf=%s, E@%d=%.2f, E@%d=%.2f)",
+-            old,
+-            target,
+-            r,
++            "(E@%d=%.2f -> %.0f tok/s, E@%d=%.2f -> %.0f tok/s, conf=%s)",
++            old, target, old, e_old, v_old, target, e_new, v_new,
+             f"{self._last_conf:.3f}" if self._last_conf is not None else "-",
+-            old,
+-            self.value(old, mix) * step_time_ms(old) - 1.0,
+-            target,
+-            self.value(target, mix) * step_time_ms(target) - 1.0,
+         )
+         return True
+-- 
+2.43.0
+

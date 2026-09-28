@@ -1,0 +1,738 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: aiueo52 <aiueo52@users.noreply.github.com>
+Date: Wed, 2 Sep 2026 10:52:19 +0900
+Subject: [PATCH 005/105] fix(qsa): size the pending index-key ring for the
+ speculative verify window
+
+The per-request pending ring was addressed by position % compress_ratio with a
+ring of exactly one group. A chain verify window of W tokens writes W ring entries
+in one forward, so any group completing inside the window aliased its members
+(only L % ratio == 0 was correct at W=4). Size the ring as
+R = ratio * (ceil(Wmax / ratio) + 1) (>= ratio + Wmax - 1) from the runtime maximum
+draft-token count, thread ring_size through the metadata builders, the Triton graph
+metadata kernel (RING constexpr) and the backend guard, and map padding rows to the
+reserved request slot 0 on the host fallback path. No CUDA kernel changes.
+
+Implemented by Codex (gpt-5.6-sol high) from a supervisor spec; CPU tests added.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+---
+ .../layers/attention/qsa/graph_metadata.py    |   6 +-
+ .../srt/layers/attention/qsa/metadata.py      |  17 +-
+ .../srt/layers/attention/qsa/qsa_indexer.py   |   2 +
+ .../attention/qwen_sparse_attn_backend.py     |  55 ++--
+ .../srt/mem_cache/kv_cache_configurator.py    |   8 +
+ python/sglang/srt/mem_cache/qsa_kv_pool.py    |  58 +++-
+ .../unit/mem_cache/test_qsa_pending_ring.py   | 277 ++++++++++++++++++
+ 7 files changed, 374 insertions(+), 49 deletions(-)
+ create mode 100644 test/registered/unit/mem_cache/test_qsa_pending_ring.py
+
+diff --git a/python/sglang/srt/layers/attention/qsa/graph_metadata.py b/python/sglang/srt/layers/attention/qsa/graph_metadata.py
+index 2c8964ecd2..8db513b5d0 100644
+--- a/python/sglang/srt/layers/attention/qsa/graph_metadata.py
++++ b/python/sglang/srt/layers/attention/qsa/graph_metadata.py
+@@ -125,6 +125,7 @@ def _qsa_graph_row_metadata_kernel(
+     req_to_token_row_stride,
+     max_pages,
+     RATIO: tl.constexpr,
++    RING: tl.constexpr,
+     FULL_PAGE: tl.constexpr,  # full-KV tokens per page
+     PAGE_BLOCK: tl.constexpr,
+ ):
+@@ -148,11 +149,11 @@ def _qsa_graph_row_metadata_kernel(
+     tl.store(write_locs_ptr + row, write_loc)
+ 
+     tl.store(logical_positions_ptr + row, current)
+-    tl.store(state_slots_ptr + row, req * RATIO + (current % RATIO).to(tl.int64))
++    tl.store(state_slots_ptr + row, req * RING + (current % RING).to(tl.int64))
+     ring_base = row.to(tl.int64) * RATIO
+     for k in tl.static_range(RATIO):
+         member = tl.maximum(current - (RATIO - 1 - k), 0)
+-        slot = req * RATIO + (member % RATIO).to(tl.int64)
++        slot = req * RING + (member % RING).to(tl.int64)
+         tl.store(ring_locs_ptr + ring_base + k, slot.to(tl.int32))
+ 
+     # Page-table entries are the request's FULL-KV page ids, read from the
+@@ -235,6 +236,7 @@ def launch_graph_metadata(
+         req_to_token.stride(0),
+         max_pages,
+         RATIO=indexer.compress_ratio,
++        RING=indexer.ring_size or indexer.compress_ratio,
+         FULL_PAGE=pool.qsa_compressed_page_size * indexer.compress_ratio,
+         PAGE_BLOCK=128,
+         num_warps=1,
+diff --git a/python/sglang/srt/layers/attention/qsa/metadata.py b/python/sglang/srt/layers/attention/qsa/metadata.py
+index 261333b4f5..d397ddbc93 100644
+--- a/python/sglang/srt/layers/attention/qsa/metadata.py
++++ b/python/sglang/srt/layers/attention/qsa/metadata.py
+@@ -66,6 +66,7 @@ class QSAIndexerMetadata(msgspec.Struct, frozen=True):
+     token_to_kv_pool: object
+     compress_ratio: int
+     block_topk: int
++    ring_size: int = 0
+     req_pool_indices: Optional[torch.Tensor] = None
+     # One entry per compressed group to (re)write this forward: the
+     # slot, the group-end token position (sequence-local) and the metadata
+@@ -241,25 +242,26 @@ def build_pending_ring_slots(
+     sequence_lengths: torch.Tensor,
+     logical_positions: torch.Tensor,
+     compress_ratio: int,
++    ring_size: int,
+     is_extend: bool,
+ ) -> torch.Tensor:
+     """Per-token slots in the per-request pending ring.
+ 
+-    ``req_pool_idx * ratio + position % ratio``: four consecutive positions
+-    occupy four distinct slots, which is exactly the pending group. On extend
+-    forwards only that pending tail must survive the forward (compression
++    ``req_pool_idx * ring_size + position % ring_size`` keeps a whole verify
++    window plus its oldest completing group live without aliasing. On extend
++    forwards only the pending tail must survive the forward (compression
+     sources members from the chunk itself), so older tokens dump into ring
+-    rows [0, ratio) -- request slot 0 is never allocated. Pure tensor
++    rows [0, ring_size) -- request slot 0 is never allocated. Pure tensor
+     arithmetic, CUDA-graph safe.
+     """
+     rows = token_to_batch_idx.long()[: logical_positions.numel()]
+     requests = req_pool_indices.long()[rows]
+     positions = logical_positions.long()
+-    slots = requests * compress_ratio + positions % compress_ratio
++    slots = requests * ring_size + positions % ring_size
+     if is_extend:
+         lengths = sequence_lengths.long()[rows]
+         pending = positions >= (lengths // compress_ratio) * compress_ratio
+-        slots = torch.where(pending, slots, positions % compress_ratio)
++        slots = torch.where(pending, slots, positions % ring_size)
+     return slots
+ 
+ 
+@@ -269,6 +271,7 @@ def build_group_ring_slots(
+     group_end_positions: torch.Tensor,
+     sequence_ids: torch.Tensor,
+     compress_ratio: int,
++    ring_size: int,
+ ) -> torch.Tensor:
+     """Ring slots of a planned group's members, oldest first."""
+     requests = req_pool_indices.long()[sequence_ids]
+@@ -280,7 +283,7 @@ def build_group_ring_slots(
+         dtype=torch.long,
+     )
+     positions = (group_end_positions[:, None] - offsets[None, :]).clamp_min(0)
+-    return requests[:, None] * compress_ratio + positions % compress_ratio
++    return requests[:, None] * ring_size + positions % ring_size
+ 
+ 
+ def build_rope_position_matrix(
+diff --git a/python/sglang/srt/layers/attention/qsa/qsa_indexer.py b/python/sglang/srt/layers/attention/qsa/qsa_indexer.py
+index a2e47b5422..4803c310f2 100644
+--- a/python/sglang/srt/layers/attention/qsa/qsa_indexer.py
++++ b/python/sglang/srt/layers/attention/qsa/qsa_indexer.py
+@@ -271,6 +271,7 @@ class QSAIndexer(MultiPlatformOp):
+             sequence_lengths=metadata.sequence_lengths,
+             logical_positions=logical_positions,
+             compress_ratio=self.compress_ratio,
++            ring_size=metadata.ring_size or self.compress_ratio,
+             is_extend=is_extend,
+         )
+ 
+@@ -282,6 +283,7 @@ class QSAIndexer(MultiPlatformOp):
+             group_end_positions=group_end_positions,
+             sequence_ids=sequence_ids,
+             compress_ratio=self.compress_ratio,
++            ring_size=metadata.ring_size or self.compress_ratio,
+         )
+ 
+     def update_key_state_and_compress(
+diff --git a/python/sglang/srt/layers/attention/qwen_sparse_attn_backend.py b/python/sglang/srt/layers/attention/qwen_sparse_attn_backend.py
+index 339d0763fa..464738731c 100644
+--- a/python/sglang/srt/layers/attention/qwen_sparse_attn_backend.py
++++ b/python/sglang/srt/layers/attention/qwen_sparse_attn_backend.py
+@@ -262,16 +262,17 @@ class QwenSparseAttnBackend(AttentionBackend):
+             return
+         if int(getattr(spec_info, "topk", 1) or 1) != 1:
+             raise NotImplementedError(
+-                "Qwen QSA target verification supports only " "speculative_eagle_topk=1"
++                "Qwen QSA target verification supports only speculative_eagle_topk=1"
+             )
+         draft_tokens = int(getattr(spec_info, "draft_token_num", 0) or 0)
+-        if draft_tokens > self.compress_ratio:
+-            # The pending-group ring keys state by position % ratio; a verify
+-            # window wider than the ratio would collide within one forward.
++        ring_size = self.token_to_kv_pool.qsa_ring_size
++        max_draft_tokens = ring_size - self.compress_ratio + 1
++        if draft_tokens > max_draft_tokens:
+             raise NotImplementedError(
+-                "Qwen QSA requires speculative_num_draft_tokens <= the QSA "
+-                f"compress ratio ({self.compress_ratio}): the pending "
+-                f"index-key ring holds one group; got {draft_tokens}"
++                "Qwen QSA speculative_num_draft_tokens="
++                f"{draft_tokens} exceeds the pending-ring maximum "
++                f"{max_draft_tokens} (ring_size={ring_size}, "
++                f"compress_ratio={self.compress_ratio})"
+             )
+ 
+     @staticmethod
+@@ -297,6 +298,8 @@ class QwenSparseAttnBackend(AttentionBackend):
+ 
+     @staticmethod
+     def _speculative_row_to_request(forward_batch, num_rows: int) -> torch.Tensor:
++        """Map speculative token rows directly to request-pool slots."""
++
+         batch_size = int(forward_batch.req_pool_indices.numel())
+         if batch_size == 0:
+             if num_rows == 0:
+@@ -314,8 +317,8 @@ class QwenSparseAttnBackend(AttentionBackend):
+             # Draft-extend carries the accepted length per request.  DP batch
+             # padding appends zero-length request rows, and DP token padding
+             # appends trailing token rows that belong to no request; alias
+-            # those tail rows to request row 0, mirroring the CUDA-graph
+-            # speculative layout padding, so gathers stay in bounds.
++            # those tail rows to reserved request-pool slot 0, mirroring the
++            # CUDA-graph speculative layout padding, so gathers stay in bounds.
+             repeats = extend_seq_lens[:batch_size].to(dtype=torch.long)
+             real_rows = int(repeats.sum().item())
+             if real_rows > num_rows:
+@@ -324,11 +327,7 @@ class QwenSparseAttnBackend(AttentionBackend):
+                     f"mapping: rows={num_rows}, mapped={real_rows}"
+                 )
+             row_to_request = torch.repeat_interleave(
+-                torch.arange(
+-                    batch_size,
+-                    dtype=torch.long,
+-                    device=forward_batch.req_pool_indices.device,
+-                ),
++                forward_batch.req_pool_indices[:batch_size].long(),
+                 repeats,
+             )
+             padding = num_rows - real_rows
+@@ -345,11 +344,11 @@ class QwenSparseAttnBackend(AttentionBackend):
+                 "QSA speculative query rows cannot be mapped to requests: "
+                 f"rows={num_rows}, batch={batch_size}"
+             )
+-        return torch.arange(
+-            batch_size,
+-            dtype=torch.long,
+-            device=forward_batch.req_pool_indices.device,
+-        ).repeat_interleave(num_rows // batch_size)
++        return (
++            forward_batch.req_pool_indices[:batch_size]
++            .long()
++            .repeat_interleave(num_rows // batch_size)
++        )
+ 
+     @staticmethod
+     def _as_cpu_int_tensor(values, size: int) -> torch.Tensor:
+@@ -442,10 +441,8 @@ class QwenSparseAttnBackend(AttentionBackend):
+             row_prefix_lengths = torch.cat(
+                 [row_prefix_lengths, torch.zeros(padding, dtype=torch.int32)]
+             )
+-            dummy_req = (
+-                req_pool_indices[0]
+-                if req_pool_indices.numel()
+-                else torch.zeros((), dtype=torch.int32, device=req_pool_indices.device)
++            dummy_req = torch.zeros(
++                (), dtype=torch.int32, device=req_pool_indices.device
+             )
+             row_req_pool_indices = torch.cat(
+                 [
+@@ -473,6 +470,7 @@ class QwenSparseAttnBackend(AttentionBackend):
+             token_to_kv_pool=self.token_to_kv_pool,
+             compress_ratio=self.token_to_kv_pool.qsa_compress_ratio,
+             block_topk=self.token_to_kv_pool.qsa_block_topk,
++            ring_size=self.token_to_kv_pool.qsa_ring_size,
+         )
+         return QwenSparseAttnMetadata(
+             sequence_lengths=sequence_lengths,
+@@ -626,12 +624,9 @@ class QwenSparseAttnBackend(AttentionBackend):
+                 logical_positions = logical_positions[0]
+             logical_positions = logical_positions.flatten()
+             sequence_lengths = (logical_positions + 1).to(torch.int32)
+-            row_to_request = self._speculative_row_to_request(
++            row_req_pool_indices = self._speculative_row_to_request(
+                 forward_batch, logical_positions.numel()
+             )
+-            row_req_pool_indices = forward_batch.req_pool_indices.index_select(
+-                0, row_to_request
+-            )
+             max_length = self._speculative_max_row_length(
+                 forward_batch, sequence_lengths
+             )
+@@ -745,6 +740,7 @@ class QwenSparseAttnBackend(AttentionBackend):
+                     sequence_lengths=sequence_lengths,
+                     logical_positions=ring_logical_positions,
+                     compress_ratio=self.compress_ratio,
++                    ring_size=self.token_to_kv_pool.qsa_ring_size,
+                     is_extend=group_member_rows is not None,
+                 )
+                 if write_locs.numel():
+@@ -763,6 +759,7 @@ class QwenSparseAttnBackend(AttentionBackend):
+                             group_end_positions=group_positions.long(),
+                             sequence_ids=group_sequence_ids.long(),
+                             compress_ratio=self.compress_ratio,
++                            ring_size=self.token_to_kv_pool.qsa_ring_size,
+                         )
+         indexer_metadata = QSAIndexerMetadata(
+             sequence_lengths=sequence_lengths,
+@@ -772,6 +769,7 @@ class QwenSparseAttnBackend(AttentionBackend):
+             token_to_kv_pool=self.token_to_kv_pool,
+             compress_ratio=self.token_to_kv_pool.qsa_compress_ratio,
+             block_topk=self.token_to_kv_pool.qsa_block_topk,
++            ring_size=self.token_to_kv_pool.qsa_ring_size,
+             req_pool_indices=row_req_pool_indices,
+             write_locs=write_locs,
+             compress_group_positions=group_positions,
+@@ -970,6 +968,7 @@ class QwenSparseAttnBackend(AttentionBackend):
+             token_to_kv_pool=pool,
+             compress_ratio=pool.qsa_compress_ratio,
+             block_topk=pool.qsa_block_topk,
++            ring_size=pool.qsa_ring_size,
+             req_pool_indices=self._graph_row_req_pool_indices[:metadata_rows],
+             is_cuda_graph=True,
+             graph_write_locs=self._graph_write_locs[:metadata_rows],
+@@ -1190,6 +1189,7 @@ class QwenSparseAttnBackend(AttentionBackend):
+                 sequence_lengths=metadata.sequence_lengths,
+                 logical_positions=current_positions,
+                 compress_ratio=ratio,
++                ring_size=metadata.ring_size,
+                 is_extend=False,
+             )
+         )
+@@ -1199,6 +1199,7 @@ class QwenSparseAttnBackend(AttentionBackend):
+                 group_end_positions=current_positions,
+                 sequence_ids=metadata.token_to_batch_idx.long(),
+                 compress_ratio=ratio,
++                ring_size=metadata.ring_size,
+             ).to(torch.int32)
+         )
+ 
+diff --git a/python/sglang/srt/mem_cache/kv_cache_configurator.py b/python/sglang/srt/mem_cache/kv_cache_configurator.py
+index 69df49c568..4c310f2e30 100644
+--- a/python/sglang/srt/mem_cache/kv_cache_configurator.py
++++ b/python/sglang/srt/mem_cache/kv_cache_configurator.py
+@@ -1608,6 +1608,7 @@ class KVCacheConfigurator:
+         from sglang.srt.mem_cache.qsa_kv_pool import (
+             QSATokenToKVPool,
+             QwenDSATokenToKVPool,
++            get_qsa_pending_ring_size,
+         )
+ 
+         qsa_profile = parse_qsa_profile(self.model_config.hf_text_config)
+@@ -1623,10 +1624,17 @@ class KVCacheConfigurator:
+             )
+         else:
+             pool_class = QSATokenToKVPool
++            max_draft_tokens = max(1, max_speculative_num_draft_tokens() or 1)
++            # A verify write must not alias the oldest group it can complete:
++            # R >= ratio + Wmax - 1. Round R up by whole ratio-sized groups.
++            qsa_ring_size = get_qsa_pending_ring_size(
++                qsa_profile.compress_ratio, max_draft_tokens
++            )
+             extra_args.update(
+                 qsa_index_kv_heads=qsa_profile.kv_heads,
+                 qsa_index_head_dim=qsa_profile.head_dim,
+                 qsa_compress_ratio=qsa_profile.compress_ratio,
++                qsa_ring_size=qsa_ring_size,
+                 qsa_token_topk=qsa_profile.budget,
+                 num_request_slots=req_to_token_pool.req_to_token.shape[0],
+             )
+diff --git a/python/sglang/srt/mem_cache/qsa_kv_pool.py b/python/sglang/srt/mem_cache/qsa_kv_pool.py
+index e2b63daae5..e3356234e6 100644
+--- a/python/sglang/srt/mem_cache/qsa_kv_pool.py
++++ b/python/sglang/srt/mem_cache/qsa_kv_pool.py
+@@ -8,17 +8,32 @@ Qwen3Next-DSA) adds only the flat per-token index-K cache.
+ 
+ from __future__ import annotations
+ 
++import logging
+ from typing import List, Optional
+ 
+ import torch
+ 
+ from sglang.srt.mem_cache.memory_pool import GB, HybridLinearKVPool, MambaPool
+ 
++logger = logging.getLogger(__name__)
++
+ 
+ def _index_k_bytes(*, kv_heads: int, head_dim: int, dtype: torch.dtype) -> int:
+     return kv_heads * head_dim * dtype.itemsize
+ 
+ 
++def get_qsa_pending_ring_size(compress_ratio: int, max_draft_tokens: int) -> int:
++    """Return the per-request pending-ring width for a verify window."""
++
++    ratio = int(compress_ratio)
++    window = max(1, int(max_draft_tokens))
++    if ratio <= 0:
++        raise ValueError(f"QSA compress ratio must be positive, got {ratio}")
++    if window <= 1:
++        return ratio
++    return ratio * ((window + ratio - 1) // ratio + 1)
++
++
+ class QSATokenToKVPool(HybridLinearKVPool):
+     """Hybrid KV pool with the minimal BF16 state required by simple QSA."""
+ 
+@@ -41,11 +56,10 @@ class QSATokenToKVPool(HybridLinearKVPool):
+     ) -> int:
+         """Per-token cost of the QSA index caches: the compressed keys only.
+ 
+-        Pre-compression state is a per-request ring of ``compress_ratio``
+-        slots (the pending group's members), not a per-token cache, so it
+-        does not price per token; its total is bounded by the request-slot
+-        count and stays outside this budget like the other per-request
+-        buffers.
++        Pre-compression state is a per-request ring sized for the maximum
++        speculative verify window, not a per-token cache, so it does not
++        price per token; its total is bounded by the request-slot count and
++        stays outside this budget like the other per-request buffers.
+         """
+         index_k_bytes = _index_k_bytes(
+             kv_heads=kv_heads, head_dim=head_dim, dtype=cls.index_state_dtype
+@@ -68,6 +82,7 @@ class QSATokenToKVPool(HybridLinearKVPool):
+         qsa_compress_ratio: int,
+         qsa_token_topk: int,
+         num_request_slots: int,
++        qsa_ring_size: Optional[int] = None,
+         enable_memory_saver: bool = False,
+         enable_kv_cache_copy: bool = False,
+         start_layer: Optional[int] = None,
+@@ -120,6 +135,19 @@ class QSATokenToKVPool(HybridLinearKVPool):
+         if qsa_token_topk % qsa_compress_ratio != 0:
+             raise ValueError("qsa_token_topk must be divisible by qsa_compress_ratio")
+         self.qsa_compress_ratio = int(qsa_compress_ratio)
++        if qsa_ring_size is None:
++            qsa_ring_size = self.qsa_compress_ratio
++        qsa_ring_size = int(qsa_ring_size)
++        if (
++            qsa_ring_size < self.qsa_compress_ratio
++            or qsa_ring_size % self.qsa_compress_ratio != 0
++        ):
++            raise ValueError(
++                "qsa_ring_size must be a multiple of qsa_compress_ratio and "
++                f"at least the ratio: ring={qsa_ring_size}, "
++                f"ratio={self.qsa_compress_ratio}"
++            )
++        self.qsa_ring_size = qsa_ring_size
+         self.qsa_index_head_dim = int(qsa_index_head_dim)
+         self.qsa_index_kv_heads = int(qsa_index_kv_heads)
+         self.qsa_token_topk = int(qsa_token_topk)
+@@ -129,21 +157,25 @@ class QSATokenToKVPool(HybridLinearKVPool):
+         # seen by the scoring kernels is one full-KV page's worth of groups.
+         self.qsa_compressed_page_size = page_size // self.qsa_compress_ratio
+         self.qsa_compressed_capacity = -(state_size // -self.qsa_compress_ratio)
+-        # Pre-compression index-K state is a per-request RING, not a
++        # Pre-compression index-K state is a per-request ring, not a
+         # per-token cache: once a group's compressed key is written, its raw
+         # members are never read again, and page-granular prefix sharing
+-        # keeps every extend chunk group-aligned, so the only state that
+-        # must survive a forward is the pending group's members -- at most
+-        # ``ratio`` tokens per request, addressed as
+-        # ``req_pool_idx * ratio + position % ratio``. Request slot 0 is
+-        # never allocated, so ring rows [0, ratio) double as the inert dump
+-        # for tokens whose group already compressed in the same forward.
++        # keeps every extend chunk group-aligned. The ring is wide enough for
++        # the maximum verify window plus the oldest group that can complete,
++        # addressed as ``req_pool_idx * ring + position % ring``. Request
++        # slot 0 is never allocated, so rows [0, ring) double as the inert
++        # dump for tokens whose group already compressed in the same forward.
+         if num_request_slots <= 0:
+             raise ValueError(
+                 f"QSA pending ring needs request slots, got {num_request_slots}"
+             )
+         self.qsa_num_request_slots = int(num_request_slots)
+-        ring_slots = self.qsa_num_request_slots * self.qsa_compress_ratio
++        ring_slots = self.qsa_num_request_slots * self.qsa_ring_size
++        logger.info_once(
++            "QSA pending index-key ring allocation: "
++            f"{self.qsa_num_request_slots} request slots x "
++            f"{self.qsa_ring_size} rows = {ring_slots} rows"
++        )
+         self.qsa_key_state_buffer_pool = [
+             torch.zeros(
+                 (ring_slots, self.qsa_index_kv_heads, self.qsa_index_head_dim),
+diff --git a/test/registered/unit/mem_cache/test_qsa_pending_ring.py b/test/registered/unit/mem_cache/test_qsa_pending_ring.py
+new file mode 100644
+index 0000000000..91cb75352f
+--- /dev/null
++++ b/test/registered/unit/mem_cache/test_qsa_pending_ring.py
+@@ -0,0 +1,277 @@
++"""CPU invariants for the QSA per-request pending index-key ring."""
++
++import random
++import unittest
++from types import SimpleNamespace
++
++import torch
++
++from sglang.srt.layers.attention.qsa.metadata import (
++    build_group_ring_slots,
++    build_pending_ring_slots,
++)
++from sglang.srt.layers.attention.qwen_sparse_attn_backend import (
++    QwenSparseAttnBackend,
++)
++from sglang.srt.mem_cache.qsa_kv_pool import (
++    QSATokenToKVPool,
++    get_qsa_pending_ring_size,
++)
++from sglang.test.ci.ci_register import register_cpu_ci
++from sglang.test.test_utils import CustomTestCase
++
++register_cpu_ci(est_time=10, suite="base-a-test-cpu")
++
++RATIO = 4
++
++
++def _write_slots(state, slots, requests, positions):
++    for slot, request, position in zip(
++        slots.tolist(), requests.tolist(), positions.tolist()
++    ):
++        state[int(slot)] = (int(request), int(position))
++
++
++def _seed_pending_tail(state, request, length, ring_size):
++    positions = torch.arange(length - length % RATIO, length, dtype=torch.long)
++    if positions.numel() == 0:
++        return
++    requests = torch.full_like(positions, request)
++    slots = build_pending_ring_slots(
++        token_to_batch_idx=torch.arange(positions.numel()),
++        req_pool_indices=requests,
++        sequence_lengths=positions + 1,
++        logical_positions=positions,
++        compress_ratio=RATIO,
++        ring_size=ring_size,
++        is_extend=False,
++    )
++    _write_slots(state, slots, requests, positions)
++
++
++def _verify_forward(state, request_lengths, request_slots, window, ring_size):
++    positions = torch.cat(
++        [
++            torch.arange(length, length + window, dtype=torch.long)
++            for length in request_lengths
++        ]
++    )
++    requests = torch.repeat_interleave(
++        torch.tensor(request_slots, dtype=torch.long), window
++    )
++    rows = torch.arange(positions.numel(), dtype=torch.long)
++    state_slots = build_pending_ring_slots(
++        token_to_batch_idx=rows,
++        req_pool_indices=requests,
++        sequence_lengths=positions + 1,
++        logical_positions=positions,
++        compress_ratio=RATIO,
++        ring_size=ring_size,
++        is_extend=False,
++    )
++    _write_slots(state, state_slots, requests, positions)
++
++    group_rows = rows[(positions + 1) % RATIO == 0]
++    group_ends = positions.index_select(0, group_rows)
++    group_slots = build_group_ring_slots(
++        req_pool_indices=requests,
++        group_end_positions=group_ends,
++        sequence_ids=group_rows,
++        compress_ratio=RATIO,
++        ring_size=ring_size,
++    )
++    for group_idx, row in enumerate(group_rows.tolist()):
++        request = int(requests[row])
++        group_end = int(positions[row])
++        actual = [state[int(slot)] for slot in group_slots[group_idx].tolist()]
++        expected = [
++            (request, position)
++            for position in range(group_end - RATIO + 1, group_end + 1)
++        ]
++        if actual != expected:
++            raise AssertionError(
++                f"group ending at {group_end} read {actual}, expected {expected}"
++            )
++
++
++def _draft_extend(state, old_lengths, accepted, request_slots, ring_size):
++    positions = torch.cat(
++        [
++            torch.arange(length, length + count, dtype=torch.long)
++            for length, count in zip(old_lengths, accepted)
++        ]
++    )
++    if positions.numel() == 0:
++        return
++    token_to_batch = torch.repeat_interleave(
++        torch.arange(len(request_slots), dtype=torch.long),
++        torch.tensor(accepted, dtype=torch.long),
++    )
++    lengths = torch.tensor(
++        [length + count for length, count in zip(old_lengths, accepted)],
++        dtype=torch.long,
++    )
++    request_tensor = torch.tensor(request_slots, dtype=torch.long)
++    slots = build_pending_ring_slots(
++        token_to_batch_idx=token_to_batch,
++        req_pool_indices=request_tensor,
++        sequence_lengths=lengths,
++        logical_positions=positions,
++        compress_ratio=RATIO,
++        ring_size=ring_size,
++        is_extend=True,
++    )
++    requests = request_tensor.index_select(0, token_to_batch)
++    _write_slots(state, slots, requests, positions)
++
++
++class TestQsaPendingRing(CustomTestCase):
++    def test_ring_size_formula(self):
++        for window in (0, 1, 2, 4, 8, 16):
++            ring_size = get_qsa_pending_ring_size(RATIO, window)
++            self.assertGreaterEqual(ring_size, RATIO + max(1, window) - 1)
++            self.assertEqual(ring_size % RATIO, 0)
++            if window <= 1:
++                self.assertEqual(ring_size, RATIO)
++
++    def test_verify_window_slots_are_distinct_at_every_ring_offset(self):
++        for window in (1, 2, 4, 8, 16):
++            ring_size = get_qsa_pending_ring_size(RATIO, window)
++            for start in range(ring_size):
++                positions = torch.arange(start, start + window)
++                slots = build_pending_ring_slots(
++                    token_to_batch_idx=torch.arange(window),
++                    req_pool_indices=torch.full((window,), 3),
++                    sequence_lengths=positions + 1,
++                    logical_positions=positions,
++                    compress_ratio=RATIO,
++                    ring_size=ring_size,
++                    is_extend=False,
++                )
++                self.assertEqual(torch.unique(slots).numel(), window)
++
++    def test_randomized_verify_accept_extend_round_trip(self):
++        rng = random.Random(20260902)
++        for batch_size in (1, 3):
++            request_slots = [2, 5, 9][:batch_size]
++            for window in (2, 4, 8, 16):
++                ring_size = get_qsa_pending_ring_size(RATIO, window)
++                lengths = [rng.randrange(1, 64) for _ in range(batch_size)]
++                state = {}
++                for request, length in zip(request_slots, lengths):
++                    _seed_pending_tail(state, request, length, ring_size)
++                for _ in range(2000):
++                    _verify_forward(state, lengths, request_slots, window, ring_size)
++                    accepted = [rng.randint(1, window) for _ in range(batch_size)]
++                    old_lengths = lengths
++                    _draft_extend(
++                        state,
++                        old_lengths,
++                        accepted,
++                        request_slots,
++                        ring_size,
++                    )
++                    lengths = [
++                        length + count for length, count in zip(old_lengths, accepted)
++                    ]
++
++    def test_one_row_below_the_bound_aliases_a_group_member(self):
++        window = 8
++        ring_size = RATIO + window - 2
++        start = 7  # The first verify token completes a compression group.
++        state = {}
++        _seed_pending_tail(state, 2, start, ring_size)
++        with self.assertRaises(AssertionError):
++            _verify_forward(state, [start], [2], window, ring_size)
++
++    def test_chain_speculation_limit_matches_ring_capacity(self):
++        backend = QwenSparseAttnBackend.__new__(QwenSparseAttnBackend)
++        backend.compress_ratio = RATIO
++        backend.token_to_kv_pool = SimpleNamespace(qsa_ring_size=20)
++        mode = SimpleNamespace(is_target_verify=lambda: True)
++        backend._require_chain_speculation(
++            mode, SimpleNamespace(topk=1, draft_token_num=17)
++        )
++        with self.assertRaisesRegex(NotImplementedError, "18.*17"):
++            backend._require_chain_speculation(
++                mode, SimpleNamespace(topk=1, draft_token_num=18)
++            )
++
++    def test_host_speculative_padding_uses_reserved_request_slot(self):
++        forward_batch = SimpleNamespace(
++            req_pool_indices=torch.tensor([7, 8], dtype=torch.int32),
++            extend_seq_lens=torch.tensor([1, 0], dtype=torch.int32),
++        )
++        row_requests = QwenSparseAttnBackend._speculative_row_to_request(
++            forward_batch, 2
++        )
++        self.assertEqual(row_requests.tolist(), [7, 0])
++
++        mode = SimpleNamespace(is_target_verify=lambda: False)
++        spec_info = SimpleNamespace(extend_seq_lens_cpu=torch.tensor([1, 0]))
++        _, graph_requests, _ = QwenSparseAttnBackend._graph_speculative_layout(
++            bs=2,
++            num_tokens=2,
++            req_pool_indices=forward_batch.req_pool_indices,
++            seq_lens_cpu=torch.tensor([9, 12]),
++            forward_mode=mode,
++            spec_info=spec_info,
++        )
++        self.assertEqual(graph_requests.tolist(), [7, 0])
++
++    def test_extend_dump_rows_stay_in_reserved_ring(self):
++        ring_size = 12
++        positions = torch.arange(8)
++        slots = build_pending_ring_slots(
++            token_to_batch_idx=torch.zeros(8, dtype=torch.long),
++            req_pool_indices=torch.tensor([5]),
++            sequence_lengths=torch.tensor([8]),
++            logical_positions=positions,
++            compress_ratio=RATIO,
++            ring_size=ring_size,
++            is_extend=True,
++        )
++        self.assertTrue(bool(((0 <= slots) & (slots < ring_size)).all()))
++
++    def test_pool_allocates_ring_size_per_request_slot(self):
++        pool = QSATokenToKVPool(
++            size=8,
++            dtype=torch.bfloat16,
++            page_size=4,
++            head_num=1,
++            head_dim=8,
++            full_attention_layer_ids=[0],
++            device="cpu",
++            mamba_pool=None,
++            qsa_index_kv_heads=1,
++            qsa_index_head_dim=8,
++            qsa_compress_ratio=RATIO,
++            qsa_token_topk=4,
++            num_request_slots=3,
++            qsa_ring_size=12,
++        )
++        self.assertEqual(pool.qsa_ring_size, 12)
++        self.assertEqual(pool.qsa_key_state_buffer_pool[0].shape[0], 36)
++        self.assertEqual(pool.qsa_rope_position_buffer.shape[0], 36)
++
++        with self.assertRaisesRegex(ValueError, "multiple.*at least"):
++            QSATokenToKVPool(
++                size=8,
++                dtype=torch.bfloat16,
++                page_size=4,
++                head_num=1,
++                head_dim=8,
++                full_attention_layer_ids=[0],
++                device="cpu",
++                mamba_pool=None,
++                qsa_index_kv_heads=1,
++                qsa_index_head_dim=8,
++                qsa_compress_ratio=RATIO,
++                qsa_token_topk=4,
++                num_request_slots=3,
++                qsa_ring_size=10,
++            )
++
++
++if __name__ == "__main__":
++    unittest.main()
+-- 
+2.43.0
+

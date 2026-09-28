@@ -1,0 +1,243 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: aiueo52 <aiueo52@users.noreply.github.com>
+Date: Sun, 6 Sep 2026 12:14:50 +0900
+Subject: [PATCH 100/105] P1: singleton-route pruning for the MoE grouped GEMM
+
+SGLANG_MOE_PRUNE_SINGLETON_TAU masks routes that are the only user of their
+expert and below tau in routing weight, so the grouped GEMM reads fewer
+distinct expert weights (~1.6 us of GEMM1+GEMM2 per expert dropped).  One
+single-CTA Triton kernel over the [M, k] top-k tensors, in place, no host sync,
+CUDA-graph safe.  Masked routes get expert id -1, which FlashInfer's prologue
+sorts past num_valid_tokens and the finalize skips explicitly.  Default off.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+---
+ .../moe/moe_runner/flashinfer_cutlass.py      |   6 +
+ .../sglang/srt/layers/moe/prune_singleton.py  | 191 ++++++++++++++++++
+ 2 files changed, 197 insertions(+)
+ create mode 100644 python/sglang/srt/layers/moe/prune_singleton.py
+
+diff --git a/python/sglang/srt/layers/moe/moe_runner/flashinfer_cutlass.py b/python/sglang/srt/layers/moe/moe_runner/flashinfer_cutlass.py
+index 6a592fb5eb..ae7c56ce02 100644
+--- a/python/sglang/srt/layers/moe/moe_runner/flashinfer_cutlass.py
++++ b/python/sglang/srt/layers/moe/moe_runner/flashinfer_cutlass.py
+@@ -25,6 +25,7 @@ from sglang.srt.layers.moe.moe_runner.base import (
+     MoeRunnerConfig,
+     register_fused_func,
+ )
++from sglang.srt.layers.moe.prune_singleton import maybe_prune_singleton_routes
+ from sglang.srt.utils import is_flashinfer_available
+ from sglang.srt.utils.common import next_power_of_2
+ 
+@@ -188,6 +189,11 @@ def _run_flashinfer_cutlass(
+     topk_output = dispatch_output.topk_output
+     topk_weights = topk_output.topk_weights
+     topk_ids = topk_output.topk_ids
++    # P1: mask low-weight routes that are the only user of their expert, so the
++    # grouped GEMM reads fewer distinct expert weights.  No-op unless
++    # SGLANG_MOE_PRUNE_SINGLETON_TAU is set.  In place and CUDA-graph safe; see
++    # sglang/srt/layers/moe/prune_singleton.py.
++    maybe_prune_singleton_routes(topk_ids, topk_weights)
+     x, x_sf, output_dtype, output_col = _prepare_input(
+         dispatch_output, quant_info, runner_config
+     )
+diff --git a/python/sglang/srt/layers/moe/prune_singleton.py b/python/sglang/srt/layers/moe/prune_singleton.py
+new file mode 100644
+index 0000000000..80256cbeb0
+--- /dev/null
++++ b/python/sglang/srt/layers/moe/prune_singleton.py
+@@ -0,0 +1,191 @@
++"""P1: drop routed-expert routes that are the sole user of their expert.
++
++The routed-expert grouped GEMM is at the expert-weight bandwidth roof and costs
++~1.04 us per *distinct* expert per call (GEMM1 = 9.4 + 1.036*D us at T=4, GEMM2
++~0.55x that; ``specs/G1_LOG.md``).  At T=16 about half the ~69 distinct experts
++of a verify call are **singletons** -- reached by exactly one of the 16 chain
++rows (``specs/MOE_SMALLM_SPEC.md`` 8.2, columns x1/x2/>=3).  Dropping a
++singleton route removes a whole expert weight read (2.76 MB, ~1.6 us of
++GEMM1+GEMM2); dropping a route to an expert some *other* row also uses saves
++nothing at all, because that expert's weights are read either way.  A uniform
++top-k cut cannot exploit that asymmetry; this can.
++
++``SGLANG_MOE_PRUNE_SINGLETON_TAU=<float>`` (default 0 = off) masks every route
++that is, within the current MoE call's batch,
++
++* the only route to its expert, **and**
++* below ``tau`` in normalised routing weight, **and**
++* not the row's top-1 (``SGLANG_MOE_PRUNE_MIN_RANK``, default 1) -- a row must
++  keep at least one expert or FlashInfer's finalize never writes its output.
++
++A masked route gets expert id ``-1`` and weight 0.  FlashInfer treats any id
++outside ``[start_expert, end_expert)`` as "not on this node": the fused prologue
++sorts it into the ``num_experts_per_node`` bucket, so it lands past
++``expert_first_token_offset[num_experts_per_node]`` -- the ``num_valid_tokens``
++bound that ``expandInputRowsKernel`` and both finalize paths loop to -- and the
++non-filling finalize skips it explicitly (``expert_id < 0`` in
++``finalizeMoeRoutingNoFillingKernel``).  Nothing downstream has to change, and
++the group-packing patch (``FLASHINFER_MOE_PACK_GROUPS``) keeps working because
++its group list bound ``expanded_num_rows = num_tokens * k`` stays an upper
++bound.  ``-1`` rather than ``num_experts`` as the sentinel so it can never
++collide with a fused shared-expert slot at index ``num_experts``.
++
++Everything runs in one single-CTA Triton kernel over the ``[M, k]`` top-k
++tensors, in place, with no host sync and no allocation, so it is CUDA-graph
++capturable.  Only ``[min_rows, max_rows]`` batches are touched (default 2..64),
++which keeps the T=1 draft/decode calls -- where every route is a singleton by
++construction, i.e. a plain top-k cut -- and prefill out of it.
++
++Env:
++    SGLANG_MOE_PRUNE_SINGLETON_TAU   weight threshold; 0/unset disables (default 0)
++    SGLANG_MOE_PRUNE_MIN_RANK        lowest 0-based within-row rank eligible (default 1)
++    SGLANG_MOE_PRUNE_MIN_ROWS        smallest batch to prune (default 2)
++    SGLANG_MOE_PRUNE_MAX_ROWS        largest batch to prune (default 64)
++    SGLANG_MOE_PRUNE_RENORM          rescale each row's surviving weights to sum 1 (default 0)
++    SGLANG_MOE_PRUNE_KEEP_IDS        zero the weight but keep the id (equivalence control, default 0)
++"""
++
++from __future__ import annotations
++
++import logging
++import os
++
++import torch
++import triton
++import triton.language as tl
++
++from sglang.kernels.triton_pdl import PDL, pdl_trigger, pdl_wait
++
++logger = logging.getLogger(__name__)
++
++SENTINEL = -1
++
++
++def _f(name: str, default: str) -> float:
++    return float(os.environ.get(name, default) or default)
++
++
++def _i(name: str, default: str) -> int:
++    return int(os.environ.get(name, default) or default)
++
++
++def _b(name: str, default: str) -> bool:
++    return os.environ.get(name, default).lower() in ("1", "true", "yes", "on")
++
++
++TAU = _f("SGLANG_MOE_PRUNE_SINGLETON_TAU", "0")
++MIN_RANK = _i("SGLANG_MOE_PRUNE_MIN_RANK", "1")
++MIN_ROWS = _i("SGLANG_MOE_PRUNE_MIN_ROWS", "2")
++MAX_ROWS = _i("SGLANG_MOE_PRUNE_MAX_ROWS", "64")
++RENORM = _b("SGLANG_MOE_PRUNE_RENORM", "0")
++# Equivalence control: zero the weight but keep the expert id.  The MoE output
++# is then mathematically identical to real pruning (a zero-weight route adds
++# nothing in the finalize) while the grouped GEMM still reads every expert, so
++# an A/B against the real thing isolates "is the -1 sentinel handled correctly"
++# from "does dropping the route change the answer".
++KEEP_IDS = _b("SGLANG_MOE_PRUNE_KEEP_IDS", "0")
++ENABLED = TAU > 0.0
++
++_warned: set = set()
++
++
++@triton.jit
++def _prune_singleton_kernel(
++    ids_ptr,
++    w_ptr,
++    N,
++    K,
++    TAU_,
++    MIN_RANK_,
++    BLOCK: tl.constexpr,
++    CHUNK: tl.constexpr,
++    KEEP_IDS_: tl.constexpr,
++    USE_PDL: tl.constexpr,
++):
++    """One CTA over all ``N = M*k`` routes of the call.
++
++    ``cnt``  = routes in this call that name the same expert (== rows, since a
++               row's top-k ids are distinct), so ``cnt == 1`` is a singleton.
++    ``rank`` = routes in the same row with a strictly larger weight (index
++               breaks ties), i.e. the 0-based within-row rank.
++    Both come from a chunked pairwise compare: N is at most a few hundred, so
++    this is ~N*N/CHUNK register ops and the kernel is launch-latency bound.
++    """
++    pdl_wait(USE_PDL)
++    offs = tl.arange(0, BLOCK)
++    m = offs < N
++    ids = tl.load(ids_ptr + offs, mask=m, other=SENTINEL)
++    w = tl.load(w_ptr + offs, mask=m, other=0.0).to(tl.float32)
++    row = offs // K
++
++    cnt = tl.zeros([BLOCK], tl.int32)
++    rank = tl.zeros([BLOCK], tl.int32)
++    for s in tl.static_range(0, BLOCK, CHUNK):
++        o = s + tl.arange(0, CHUNK)
++        om = o < N
++        oids = tl.load(ids_ptr + o, mask=om, other=SENTINEL)
++        ow = tl.load(w_ptr + o, mask=om, other=0.0).to(tl.float32)
++        orow = o // K
++        eq = (ids[:, None] == oids[None, :]) & om[None, :]
++        cnt += tl.sum(eq.to(tl.int32), axis=1)
++        same = (row[:, None] == orow[None, :]) & om[None, :]
++        gt = same & (
++            (ow[None, :] > w[:, None])
++            | ((ow[None, :] == w[:, None]) & (o[None, :] < offs[:, None]))
++        )
++        rank += tl.sum(gt.to(tl.int32), axis=1)
++
++    prune = m & (cnt == 1) & (w < TAU_) & (rank >= MIN_RANK_)
++    if not KEEP_IDS_:
++        tl.store(ids_ptr + offs, tl.where(prune, SENTINEL, ids), mask=m)
++    tl.store(w_ptr + offs, tl.where(prune, 0.0, w).to(w_ptr.dtype.element_ty), mask=m)
++    pdl_trigger(USE_PDL)
++
++
++def _skip(reason: str) -> None:
++    if reason not in _warned:
++        _warned.add(reason)
++        logger.warning("moe singleton prune disabled for this shape: %s", reason)
++
++
++def maybe_prune_singleton_routes(topk_ids: torch.Tensor, topk_weights: torch.Tensor) -> None:
++    """In-place mask of low-weight singleton routes.  No-op unless enabled."""
++    if not ENABLED:
++        return
++    if topk_ids.dim() != 2 or topk_weights.shape != topk_ids.shape:
++        return _skip(f"shape {tuple(topk_ids.shape)}/{tuple(topk_weights.shape)}")
++    M, K = topk_ids.shape
++    if M < MIN_ROWS or M > MAX_ROWS:
++        return
++    if not (topk_ids.is_contiguous() and topk_weights.is_contiguous()):
++        return _skip("non-contiguous top-k tensors")
++    N = M * K
++    BLOCK = triton.next_power_of_2(N)
++    if BLOCK > 1024:
++        return _skip(f"N={N} above the single-CTA bound")
++    CHUNK = min(BLOCK, 32)
++    _prune_singleton_kernel[(1,)](
++        topk_ids,
++        topk_weights,
++        N,
++        K,
++        TAU,
++        MIN_RANK,
++        BLOCK=BLOCK,
++        CHUNK=CHUNK,
++        KEEP_IDS_=KEEP_IDS,
++        USE_PDL=PDL,
++        num_warps=4,
++        launch_pdl=PDL,
++    )
++    if RENORM:
++        topk_weights.div_(
++            topk_weights.sum(dim=-1, keepdim=True).clamp_min(1e-6)
++        )
++
++
++def describe() -> str:
++    return (
++        f"tau={TAU} min_rank={MIN_RANK} rows=[{MIN_ROWS},{MAX_ROWS}] "
++        f"renorm={RENORM} keep_ids={KEEP_IDS}"
++    )
+-- 
+2.43.0
+

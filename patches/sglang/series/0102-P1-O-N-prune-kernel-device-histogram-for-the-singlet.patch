@@ -1,0 +1,218 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: aiueo52 <aiueo52@users.noreply.github.com>
+Date: Sun, 6 Sep 2026 16:57:50 +0900
+Subject: [PATCH 102/105] P1: O(N) prune kernel -- device histogram for the
+ singleton count, k x k rank
+
+The first kernel measured 21 us/call in the server trace (49 verify calls/step =
+1.0 ms), which more than cancelled the 25 us/call the grouped GEMM gave back.
+It paid for an all-pairs [N, N] compare plus a runtime integer division per
+route.  The rewrite works on the [M, k] tile directly (no division), takes the
+within-row rank from a per-row k x k compare, and gets the singleton count from
+an atomic histogram over the expert slots that is left zeroed for the next call.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+---
+ .../sglang/srt/layers/moe/prune_singleton.py  | 139 ++++++++++++------
+ 1 file changed, 92 insertions(+), 47 deletions(-)
+
+diff --git a/python/sglang/srt/layers/moe/prune_singleton.py b/python/sglang/srt/layers/moe/prune_singleton.py
+index 0e23a989b7..2a4948b3f0 100644
+--- a/python/sglang/srt/layers/moe/prune_singleton.py
++++ b/python/sglang/srt/layers/moe/prune_singleton.py
+@@ -43,6 +43,9 @@ Env:
+     SGLANG_MOE_PRUNE_MAX_ROWS        largest batch to prune (default 64)
+     SGLANG_MOE_PRUNE_RENORM          rescale each row's surviving weights to sum 1 (default 0)
+     SGLANG_MOE_PRUNE_KEEP_IDS        zero the weight but keep the id (equivalence control, default 0)
++    SGLANG_MOE_PRUNE_PAIRWISE        O(N^2) reference path instead of the histogram (default 0)
++    SGLANG_MOE_PRUNE_WARPS           num_warps for the kernel (default 4)
++    SGLANG_MOE_PRUNE_NUM_EXPERTS     histogram width; must exceed every expert id (default 512)
+ """
+ 
+ from __future__ import annotations
+@@ -84,62 +87,92 @@ RENORM = _b("SGLANG_MOE_PRUNE_RENORM", "0")
+ # an A/B against the real thing isolates "is the -1 sentinel handled correctly"
+ # from "does dropping the route change the answer".
+ KEEP_IDS = _b("SGLANG_MOE_PRUNE_KEEP_IDS", "0")
++PAIRWISE = _b("SGLANG_MOE_PRUNE_PAIRWISE", "0")
++NUM_WARPS = _i("SGLANG_MOE_PRUNE_WARPS", "4")
++# Upper bound on expert ids, i.e. the histogram width.  512 for this model;
++# raised via the env if a wider router ever uses this path.
++NUM_EXPERT_SLOTS = _i("SGLANG_MOE_PRUNE_NUM_EXPERTS", "512")
+ ENABLED = TAU > 0.0
+ 
+ _warned: set = set()
++# Per-device [NUM_EXPERT_SLOTS] int32 histogram scratch, allocated eagerly on the
++# first non-capturing call and always left zeroed by the kernel.
++_COUNTS: dict = {}
+ 
+ 
+ @triton.jit
+ def _prune_singleton_kernel(
+     ids_ptr,
+     w_ptr,
+-    N,
+-    K,
++    cnt_ptr,
++    M,
+     TAU_,
+     MIN_RANK_,
++    K: tl.constexpr,
++    MP: tl.constexpr,
++    KP: tl.constexpr,
+     SENTINEL_: tl.constexpr,
+-    BLOCK: tl.constexpr,
+-    CHUNK: tl.constexpr,
+     KEEP_IDS_: tl.constexpr,
++    PAIRWISE_: tl.constexpr,
+     USE_PDL: tl.constexpr,
+ ):
+-    """One CTA over all ``N = M*k`` routes of the call.
+-
+-    ``cnt``  = routes in this call that name the same expert (== rows, since a
+-               row's top-k ids are distinct), so ``cnt == 1`` is a singleton.
+-    ``rank`` = routes in the same row with a strictly larger weight (index
+-               breaks ties), i.e. the 0-based within-row rank.
+-    Both come from a chunked pairwise compare: N is at most a few hundred, so
+-    this is ~N*N/CHUNK register ops and the kernel is launch-latency bound.
++    """One CTA over the [M, k] top-k tile of a single MoE call.
++
++    ``rank`` -- routes in the same row with a strictly larger weight (column
++    index breaks ties), i.e. the 0-based within-row rank.  Computed from a
++    per-row k x k compare, so it is exact and costs only ``M*k*k`` register ops
++    (1 280 at T=16, k=10) -- no dependence on the order ``topk`` happened to
++    store the ids in.
++
++    ``cnt`` -- how many rows of this call route to the same expert; ``cnt == 1``
++    is a singleton.  Two ways to get it:
++
++    * default: a **device histogram** over the E expert slots in ``cnt_ptr``.
++      ``atomic_add`` -> ``__syncthreads`` -> gather -> ``atomic_xchg`` back to
++      zero, so the buffer is always zero on entry and never has to be cleared
++      with a plain store (a store would land in this SM's L1 while the atomics
++      go to L2, and the gather could then read a stale line).  The gather is
++      ``.cg`` for the same reason.  O(N).
++    * ``PAIRWISE_``: the O(N^2/CHUNK) all-pairs compare, kept as a reference
++      for the unit test and as a fallback if the scratch buffer cannot be
++      allocated eagerly.
++
++    Everything is one CTA, so ``tl.debug_barrier`` is a plain ``__syncthreads``
++    and there is no inter-CTA race between the loads and the in-place stores.
+     """
+     pdl_wait(USE_PDL)
+-    offs = tl.arange(0, BLOCK)
+-    m = offs < N
+-    ids = tl.load(ids_ptr + offs, mask=m, other=SENTINEL_)
+-    w = tl.load(w_ptr + offs, mask=m, other=0.0).to(tl.float32)
+-    row = offs // K
+-
+-    cnt = tl.zeros([BLOCK], tl.int32)
+-    rank = tl.zeros([BLOCK], tl.int32)
+-    for s in tl.static_range(0, BLOCK, CHUNK):
+-        o = s + tl.arange(0, CHUNK)
+-        om = o < N
+-        oids = tl.load(ids_ptr + o, mask=om, other=SENTINEL_)
+-        ow = tl.load(w_ptr + o, mask=om, other=0.0).to(tl.float32)
+-        orow = o // K
+-        eq = (ids[:, None] == oids[None, :]) & om[None, :]
+-        cnt += tl.sum(eq.to(tl.int32), axis=1)
+-        same = (row[:, None] == orow[None, :]) & om[None, :]
+-        gt = same & (
+-            (ow[None, :] > w[:, None])
+-            | ((ow[None, :] == w[:, None]) & (o[None, :] < offs[:, None]))
+-        )
+-        rank += tl.sum(gt.to(tl.int32), axis=1)
++    r = tl.arange(0, MP)
++    c = tl.arange(0, KP)
++    off = r[:, None] * K + c[None, :]
++    m = (r[:, None] < M) & (c[None, :] < K)
++    ids = tl.load(ids_ptr + off, mask=m, other=SENTINEL_)
++    w = tl.load(w_ptr + off, mask=m, other=0.0).to(tl.float32)
++
++    # within-row rank: [MP, KP, KP]
++    gt = (w[:, None, :] > w[:, :, None]) | (
++        (w[:, None, :] == w[:, :, None]) & (c[None, None, :] < c[None, :, None])
++    )
++    rank = tl.sum((gt & m[:, None, :]).to(tl.int32), axis=2)
++
++    if PAIRWISE_:
++        cnt = tl.zeros([MP, KP], tl.int32)
++        for rp in tl.static_range(MP):
++            orow = tl.load(ids_ptr + rp * K + c, mask=(c < K) & (rp < M),
++                           other=SENTINEL_ - 1)
++            cnt += tl.sum((ids[:, :, None] == orow[None, None, :]).to(tl.int32),
++                          axis=2)
++    else:
++        tl.atomic_add(cnt_ptr + ids, 1, mask=m)
++        tl.debug_barrier()
++        cnt = tl.load(cnt_ptr + ids, mask=m, other=0, cache_modifier=".cg")
++        tl.debug_barrier()
++        tl.atomic_xchg(cnt_ptr + ids, 0, mask=m)
+ 
+     prune = m & (cnt == 1) & (w < TAU_) & (rank >= MIN_RANK_)
++    tl.debug_barrier()          # every load above precedes every store below
+     if not KEEP_IDS_:
+-        tl.store(ids_ptr + offs, tl.where(prune, SENTINEL_, ids), mask=m)
+-    tl.store(w_ptr + offs, tl.where(prune, 0.0, w).to(w_ptr.dtype.element_ty), mask=m)
++        tl.store(ids_ptr + off, tl.where(prune, SENTINEL_, ids), mask=m)
++    tl.store(w_ptr + off, tl.where(prune, 0.0, w).to(w_ptr.dtype.element_ty), mask=m)
+     pdl_trigger(USE_PDL)
+ 
+ 
+@@ -160,24 +193,35 @@ def maybe_prune_singleton_routes(topk_ids: torch.Tensor, topk_weights: torch.Ten
+         return
+     if not (topk_ids.is_contiguous() and topk_weights.is_contiguous()):
+         return _skip("non-contiguous top-k tensors")
+-    N = M * K
+-    BLOCK = triton.next_power_of_2(N)
+-    if BLOCK > 1024:
+-        return _skip(f"N={N} above the single-CTA bound")
+-    CHUNK = min(BLOCK, 32)
++    dev = topk_ids.device
++    cnt = _COUNTS.get(dev)
++    if cnt is None:
++        # The histogram scratch must not be allocated inside a CUDA graph
++        # capture (it would land in that graph's private pool).  SGLang runs two
++        # eager warmup forwards per batch size before every capture, so this
++        # always fires on an eager call; the pairwise path is the safety net.
++        if torch.cuda.is_current_stream_capturing():
++            _skip("scratch not allocated before capture; using pairwise")
++        else:
++            cnt = torch.zeros(NUM_EXPERT_SLOTS, dtype=torch.int32, device=dev)
++            _COUNTS[dev] = cnt
++    MP = triton.next_power_of_2(M)
++    KP = triton.next_power_of_2(K)
+     _prune_singleton_kernel[(1,)](
+         topk_ids,
+         topk_weights,
+-        N,
+-        K,
++        cnt if cnt is not None else topk_ids,   # unused when PAIRWISE_
++        M,
+         TAU,
+         MIN_RANK,
++        K=K,
++        MP=MP,
++        KP=KP,
+         SENTINEL_=SENTINEL,
+-        BLOCK=BLOCK,
+-        CHUNK=CHUNK,
+         KEEP_IDS_=KEEP_IDS,
++        PAIRWISE_=PAIRWISE or cnt is None,
+         USE_PDL=PDL,
+-        num_warps=4,
++        num_warps=NUM_WARPS,
+         launch_pdl=PDL,
+     )
+     if RENORM:
+@@ -189,5 +233,6 @@ def maybe_prune_singleton_routes(topk_ids: torch.Tensor, topk_weights: torch.Ten
+ def describe() -> str:
+     return (
+         f"tau={TAU} min_rank={MIN_RANK} rows=[{MIN_ROWS},{MAX_ROWS}] "
+-        f"renorm={RENORM} keep_ids={KEEP_IDS}"
++        f"renorm={RENORM} keep_ids={KEEP_IDS} pairwise={PAIRWISE} "
++        f"warps={NUM_WARPS}"
+     )
+-- 
+2.43.0
+

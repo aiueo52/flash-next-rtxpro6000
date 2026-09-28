@@ -1,0 +1,397 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: aiueo52 <aiueo52@users.noreply.github.com>
+Date: Sun, 6 Sep 2026 00:57:37 +0900
+Subject: [PATCH 075/105] hc layer boundary: defer the MoE combine into the
+ next layer's mix K0
+
+R7 folded the apply of the attention boundary's combine into the MoE
+boundary's K0, because the two are consecutive statements of one method.
+The other half of every layer -- the MoE combine feeding the *next*
+layer's attention mix -- is the same shape of work, but the combine has
+to survive a trip through the model loop to reach the K0 that would
+absorb it. `_PendingHCCombine` is that trip: `_postprocess_qwen4_exp_layer`
+returns the combine's inputs instead of its result, and the next layer's
+`_prepare_qwen4_exp_attn` hands them to `combine_then_mix`, which runs the
+apply as K0's prologue exactly as R7 does.
+
+Two things ride along that R7 never had to carry. R6's deferred
+shared-expert join is now part of the apply being moved, so the prologue
+grew a `FUSE_SHARED` stage that forms `bf16(routed + gate * shared)`
+before the residual update -- the same intermediate rounding
+`hc_combine_apply`'s `kUseShared` path does, so the two agree bitwise.
+And the PLE, whose query *reads* the combined residual, cannot have the
+apply moved past it; layer 1 (the only PLE layer here) and the last layer
+keep the plain apply, which leaves 46 of 48 boundaries fused per target
+forward. The draft backbone is one layer, so it contributes none.
+
+Numerics on real weights, M in {1, 4, 16}, bf16 and fp8 mix weights, with
+and without the shared fold: `applied`, `normed` and the gate partials are
+bit-identical to apply-then-mix in all 12 cases. `mixed` differs on a few
+elements in 2 of 12, but K1 accumulates `t_raw` with device-scope atomics
+and is already run-to-run non-deterministic on identical inputs (measured:
+5/5 repeats differ at M=16 bf16), so that is the atomics, not the fold.
+
+Default off (`SGLANG_HC_LAYER_APPLY_FUSED`).
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+---
+ python/sglang/srt/environ.py                |  4 +
+ python/sglang/srt/layers/hc_mix2_triton.py  | 40 ++++++++--
+ python/sglang/srt/layers/hyperconnection.py | 64 ++++++++++++++--
+ python/sglang/srt/models/qwen4_exp.py       | 85 ++++++++++++++++++++-
+ 4 files changed, 182 insertions(+), 11 deletions(-)
+
+diff --git a/python/sglang/srt/environ.py b/python/sglang/srt/environ.py
+index f326c68aad..124145248e 100644
+--- a/python/sglang/srt/environ.py
++++ b/python/sglang/srt/environ.py
+@@ -1048,6 +1048,10 @@ class Envs:
+     # Fold the HC combine's apply stage into the next boundary's HC mix K0,
+     # whose branch CTAs already own exactly the row slice the apply writes.
+     SGLANG_HC_APPLY_MIX_FUSED = EnvBool(False)
++    # H2: the same fold at the layer->layer boundary -- layer L's MoE combine
++    # becomes the prologue of layer L+1's attention HC mix K0. Needs the
++    # combine deferred across the model loop, so it is a separate flag.
++    SGLANG_HC_LAYER_APPLY_FUSED = EnvBool(False)
+     SGLANG_DEEPGEMM_STANDARD_LAYOUT = EnvStr("auto")
+     SGLANG_DEEPGEMM_MASKED_MEMORY_BUDGET_FRACTION = EnvFloat(0.25)
+     # Cap the DeepGEMM masked grouped-GEMM per-expert padded capacity at
+diff --git a/python/sglang/srt/layers/hc_mix2_triton.py b/python/sglang/srt/layers/hc_mix2_triton.py
+index 1a6a414ee1..f370d4bce4 100644
+--- a/python/sglang/srt/layers/hc_mix2_triton.py
++++ b/python/sglang/srt/layers/hc_mix2_triton.py
+@@ -143,6 +143,8 @@ def _hc_branch_stats_kernel(
+     apply_resid_ptr,
+     apply_block_ptr,
+     apply_part_ptr,
++    apply_shared_ptr,
++    apply_sgate_ptr,
+     num_tasks,
+     zero_span,
+     K,
+@@ -155,6 +157,7 @@ def _hc_branch_stats_kernel(
+     SINGLE_TILE: tl.constexpr,
+     FUSE_GATE: tl.constexpr,
+     FUSE_APPLY: tl.constexpr,
++    FUSE_SHARED: tl.constexpr,
+     PREV_SPLITS: tl.constexpr,
+     USE_PDL: tl.constexpr = False,
+ ):
+@@ -184,6 +187,18 @@ def _hc_branch_stats_kernel(
+             y = tl.load(
+                 apply_block_ptr + m * HS + offs, mask=mask_s, other=0.0
+             ).to(tl.float32)
++            if FUSE_SHARED:
++                # R6's shared-expert join (`routed + gate * shared`) rides in
++                # the same prologue at the layer->layer boundary. Round the sum
++                # back to the storage dtype first: that reproduces the bf16
++                # store `fused_gate_sigmoid_mul_add` would have made before the
++                # combine read it, which is what `hc_combine_apply`'s
++                # `kUseShared` path does too.
++                g = tl.load(apply_sgate_ptr + m)
++                sh = tl.load(
++                    apply_shared_ptr + m * HS + offs, mask=mask_s, other=0.0
++                ).to(tl.float32)
++                y = (y + g * sh).to(x_ptr.dtype.element_ty).to(tl.float32)
+             r = tl.load(
+                 apply_resid_ptr + base + offs, mask=mask_s, other=0.0
+             ).to(tl.float32)
+@@ -551,10 +566,12 @@ def hc_norm_mix2(
+ 
+     ``inject_weight`` adds the next combine's gate to K0 and makes the return
+     ``(mixed, normed, gate_partials[M, hc, hc])``. ``apply_inputs`` is
+-    ``(block_output, gate_partials)`` of the *previous* boundary: K0 then
+-    applies that combine to ``hyper_input`` first, and the return grows to
+-    ``(mixed, normed, gate_partials, applied)`` where ``applied`` is the
+-    combined residual. Check `hc_apply_norm_mix2_supported` before passing it.
++    ``(block_output, gate_partials)`` -- or ``(block_output, gate_partials,
++    shared_output, shared_gate)`` to fold R6's shared-expert join in -- of the
++    *previous* boundary: K0 then applies that combine to ``hyper_input`` first,
++    and the return grows to ``(mixed, normed, gate_partials, applied)`` where
++    ``applied`` is the combined residual. Check
++    `hc_apply_norm_mix2_supported` before passing it.
+     """
+     w_fp8 = w_down.dtype == torch.float8_e4m3fn
+     if config is None:
+@@ -583,13 +600,23 @@ def hc_norm_mix2(
+         # boundary's combine apply on it and writes the result to `applied`,
+         # which is this boundary's hyper input and the tensor the next combine
+         # reads back. Nothing else re-reads the row in between.
+-        prev_block_output, prev_partials = apply_inputs
++        prev_block_output, prev_partials = apply_inputs[0], apply_inputs[1]
++        prev_shared = apply_inputs[2] if len(apply_inputs) > 2 else None
++        prev_sgate = apply_inputs[3] if len(apply_inputs) > 3 else None
+         prev_splits = prev_partials.shape[1]
+         applied = torch.empty_like(hyper_input)
+     else:
+         prev_block_output = prev_partials = hyper_input
++        prev_shared = prev_sgate = None
+         prev_splits = 1
+         applied = None
++    fuse_shared = fuse_apply and prev_shared is not None
++    if fuse_shared:
++        assert prev_sgate is not None
++    else:
++        # FUSE_SHARED is a constexpr, so these loads are never traced; pass a
++        # live tensor rather than allocating a dummy inside a graph capture.
++        prev_shared = prev_sgate = hyper_input
+     if apply_inputs is not None and not fuse_apply:
+         # The caller must have checked `hc_apply_norm_mix2_supported`; running
+         # the mix on the un-applied row would be silently wrong.
+@@ -627,6 +654,8 @@ def hc_norm_mix2(
+             hyper_input,
+             prev_block_output,
+             prev_partials,
++            prev_shared,
++            prev_sgate,
+             num_tasks,
+             zero_span,
+             k,
+@@ -639,6 +668,7 @@ def hc_norm_mix2(
+             SINGLE_TILE=single_tile,
+             FUSE_GATE=fuse_gate,
+             FUSE_APPLY=fuse_apply,
++            FUSE_SHARED=fuse_shared,
+             PREV_SPLITS=prev_splits,
+             USE_PDL=PDL,
+             launch_pdl=PDL,
+diff --git a/python/sglang/srt/layers/hyperconnection.py b/python/sglang/srt/layers/hyperconnection.py
+index d80713a948..aaeed4ad3a 100644
+--- a/python/sglang/srt/layers/hyperconnection.py
++++ b/python/sglang/srt/layers/hyperconnection.py
+@@ -35,6 +35,20 @@ def _hc_apply_mix_fused() -> bool:
+     return bool(envs.SGLANG_HC_APPLY_MIX_FUSED.get())
+ 
+ 
++def _hc_layer_apply_fused() -> bool:
++    """H2: the same fold at the layer->layer boundary.
++
++    R7 covers the attention->MoE boundary, where the combine and the next mix
++    are two statements of one method. The MoE->next-attention boundary needs
++    the combine deferred across the model loop, so the decision lives in
++    `Qwen4ExpLayerExtensionMixin`; this flag only says the kernel side is
++    allowed to serve it.
++    """
++    from sglang.srt.environ import envs
++
++    return bool(envs.SGLANG_HC_LAYER_APPLY_FUSED.get())
++
++
+ def _hc_gate_early_mode() -> int:
+     """R1: where the combine gate runs. See `HCGateEarly` in `srt.environ`.
+ 
+@@ -295,6 +309,11 @@ class GatedResidual(HyperConnectionBase):
+                 _hc_gate_early_mode() if self._split_combine_ok else 0
+             )
+             self._apply_mix_fused = bool(self._gate_early) and _hc_apply_mix_fused()
++            # H2: whether this boundary's combine may be deferred into the
++            # *next layer's* attention mix K0. Same prologue, different seam.
++            self._layer_apply_fused = (
++                bool(self._gate_early) and _hc_layer_apply_fused()
++            )
+             if self._gate_early:
+                 self._early_partials_buf = torch.empty(
+                     (32, 8, self.hc_count),
+@@ -783,12 +802,35 @@ class GatedResidual(HyperConnectionBase):
+         block_output: torch.Tensor,
+         residuals,
+         next_hc: "GatedResidual",
++        shared_output: Optional[torch.Tensor] = None,
++        shared_gate: Optional[torch.Tensor] = None,
++        fused_attr: str = "_apply_mix_fused",
+     ):
+-        """Combine this boundary and norm/mix the next one in one launch."""
++        """Combine this boundary and norm/mix the next one in one launch.
++
++        `shared_output`/`shared_gate` carry R6's deferred shared-expert join,
++        which the fused prologue folds in the way `hc_combine_apply` would.
++        `fused_attr` names the flag that authorises the fold: R7's
++        `_apply_mix_fused` for the attention->MoE seam inside a layer, H2's
++        `_layer_apply_fused` for the layer->layer one.
++        """
+         hyper_input, hyper_input_normed = residuals[0], residuals[1]
+         gate_partials = residuals[2] if len(residuals) > 2 else None
+         inject_w = self.block_inject_weight.weight
+-        if gate_partials is not None and getattr(self, "_apply_mix_fused", False):
++        shared_ok = shared_output is None or (
++            shared_gate is not None
++            and shared_output.shape == (hyper_input.shape[0], self.hidden_size)
++            and shared_output.dtype == hyper_input.dtype
++            and shared_output.is_cuda
++            and shared_output.is_contiguous()
++            and shared_gate.dtype == torch.float32
++            and shared_gate.is_contiguous()
++        )
++        if (
++            gate_partials is not None
++            and shared_ok
++            and getattr(self, fused_attr, False)
++        ):
+             from sglang.srt.layers.hc_mix2_triton import (
+                 hc_apply_norm_mix2_supported,
+                 hc_norm_mix2,
+@@ -826,14 +868,24 @@ class GatedResidual(HyperConnectionBase):
+                         if next_hc._gate_early == 1
+                         else None
+                     ),
+-                    apply_inputs=(block_output, gate_partials),
++                    apply_inputs=(
++                        (block_output, gate_partials)
++                        if shared_output is None
++                        else (
++                            block_output,
++                            gate_partials,
++                            shared_output,
++                            shared_gate,
++                        )
++                    ),
+                 )
+                 assert applied is not None
+                 if next_partials is None:
+                     return mixed, next_hc._early_gate(applied, normed)
+                 return mixed, (applied, normed, next_partials)
+         if (
+-            next_hc._fused_mix_supported(hyper_input)
++            shared_output is None
++            and next_hc._fused_mix_supported(hyper_input)
+             and self.hc_count == next_hc.hc_count
+             and self.hidden_size == next_hc.hidden_size
+             and block_output.shape == (hyper_input.shape[0], self.hidden_size)
+@@ -864,7 +916,9 @@ class GatedResidual(HyperConnectionBase):
+                 self.hidden_size,
+             )
+             return mixed, (new_residual, normed)
+-        return next_hc.mix(self.combine(block_output, residuals))
++        return next_hc.mix(
++            self.combine(block_output, residuals, shared_output, shared_gate)
++        )
+ 
+ 
+ HYPERCONNECTION_CLASS_DICT = {
+diff --git a/python/sglang/srt/models/qwen4_exp.py b/python/sglang/srt/models/qwen4_exp.py
+index a4fa5a6824..31b5cebd94 100644
+--- a/python/sglang/srt/models/qwen4_exp.py
++++ b/python/sglang/srt/models/qwen4_exp.py
+@@ -1222,6 +1222,35 @@ class Qwen4ExpPLELayer(nn.Module):
+         return _pad_token_rows(output, batch.physical_tokens)
+ 
+ 
++class _PendingHCCombine:
++    """A layer's HC combine that has not been launched yet.
++
++    H2 (`SGLANG_HC_LAYER_APPLY_FUSED`): the MoE boundary's apply is the only
++    thing standing between layer L's block output and layer L+1's HC mix, and
++    the mix's K0 already owns exactly the row slice the apply writes. So the
++    combine travels across the model loop in place of the hidden states and is
++    launched as that K0's prologue. Every path that needs the residual as a
++    real tensor calls `materialize()` instead.
++    """
++
++    __slots__ = ("hc", "block_output", "residuals", "shared_output", "shared_gate")
++
++    def __init__(self, hc, block_output, residuals, shared_output, shared_gate):
++        self.hc = hc
++        self.block_output = block_output
++        self.residuals = residuals
++        self.shared_output = shared_output
++        self.shared_gate = shared_gate
++
++    def materialize(self) -> torch.Tensor:
++        return self.hc.combine(
++            self.block_output,
++            self.residuals,
++            self.shared_output,
++            self.shared_gate,
++        )
++
++
+ class Qwen4ExpLayerExtensionMixin:
+     def _init_qwen4_exp_layer_extensions(
+         self,
+@@ -1279,6 +1308,15 @@ class Qwen4ExpLayerExtensionMixin:
+             if layer_prefix
+             else "mlp_hyper_connection"
+         )
++        # H2: may this layer's MoE combine be deferred into the next layer's
++        # attention mix? The next layer has to exist and must not run a PLE --
++        # the PLE query reads the combined residual, so the apply cannot move
++        # past it. (The draft backbone is one layer, so it never defers.)
++        next_layer_id = layer_id + 1
++        self._hc_defer_to_next_layer = next_layer_id < int(
++            config.num_hidden_layers
++        ) and (next_layer_id + 1) not in config.ple_layer_ids
++
+         self.attn_hyper_connection = GatedResidual(
+             hc_config,
+             use_mix=True,
+@@ -1310,6 +1348,25 @@ class Qwen4ExpLayerExtensionMixin:
+         *,
+         ple_batch: Optional[_PLEBatch],
+     ):
++        if isinstance(hidden_states, _PendingHCCombine):
++            pending = hidden_states
++            if self.ple is None:
++                # H2: the deferred apply becomes this mix's K0 prologue.
++                # `combine_then_mix` falls back to combine + mix for any shape
++                # the fused prologue cannot serve.
++                return pending.hc.combine_then_mix(
++                    pending.block_output,
++                    pending.residuals,
++                    self.attn_hyper_connection,
++                    shared_output=pending.shared_output,
++                    shared_gate=pending.shared_gate,
++                    fused_attr="_layer_apply_fused",
++                )
++            # The PLE reads the combined residual as its query, so it has to
++            # exist before the mix; `_hc_defer_to_next_layer` keeps the
++            # previous layer off this path, and this is the safety net.
++            hidden_states = pending.materialize()
++
+         hc_dim = self.hc_count * self.hidden_size
+         if hidden_states.shape[-1] != hc_dim:
+             assert hidden_states.shape[-1] == self.hidden_size
+@@ -1424,7 +1481,28 @@ class Qwen4ExpLayerExtensionMixin:
+         # kernel. `_pending_shared_join` is reset by every MoE forward.
+         pending = getattr(self.mlp, "_pending_shared_join", None)
+         shared_output, shared_gate = pending if pending is not None else (None, None)
+-        hidden_states = self.mlp_hyper_connection.combine(
++        hc = self.mlp_hyper_connection
++        if (
++            self._hc_defer_to_next_layer
++            and getattr(hc, "_layer_apply_fused", False)
++            and get_parallel().attn_tp_size == 1
++            and residual is not None
++            and len(residual) > 2
++            and residual[2] is not None
++            and 0 < hidden_states.shape[0] <= 16
++        ):
++            # H2: hand the combine to the next layer's mix instead of
++            # launching it. Nothing between here and that mix reads the
++            # residual (`_hc_defer_to_next_layer` excludes the PLE layer and
++            # the last layer, and the aux-hidden-state capture is inert for
++            # this model), so the apply can be its K0 prologue.
++            return (
++                _PendingHCCombine(
++                    hc, hidden_states, residual, shared_output, shared_gate
++                ),
++                None,
++            )
++        hidden_states = hc.combine(
+             hidden_states, residual, shared_output, shared_gate
+         )
+         return hidden_states, None
+@@ -1721,6 +1799,11 @@ class Qwen4ExpModel(Qwen3_5ForCausalLM):
+                     ),
+                 )
+ 
++        if isinstance(hidden_states, _PendingHCCombine):
++            # Safety net: the last executed layer has nothing to fuse into
++            # (and `hc_hidden_states` below is read bitwise by the MTP head).
++            hidden_states = hidden_states.materialize()
++
+         _commit_ple_batch(ple_batch, forward_batch)
+ 
+         hc_hidden_states = hidden_states
+-- 
+2.43.0
+

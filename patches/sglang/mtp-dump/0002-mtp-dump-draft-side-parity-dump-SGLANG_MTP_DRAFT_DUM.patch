@@ -1,0 +1,236 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: aiueo52 <aiueo52@users.noreply.github.com>
+Date: Thu, 3 Sep 2026 19:59:43 +0900
+Subject: [PATCH 2/9] mtp dump: draft-side parity dump
+ (SGLANG_MTP_DRAFT_DUMP_DIR)
+
+Records, for every draft-extend forward, the exact tensors the served draft
+head consumed (shifted input ids, positions, the target HC state it was handed)
+next to what it produced (pre-mixer HC state, mixed state, argmax, top-K
+logits).  This lets the standalone trainer be compared against the server on
+identical inputs, with no alignment guesswork.  Parity gate only; unused for
+training.  Decode / target-verify / capture paths bail out as before.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+---
+ python/sglang/srt/models/mtp_dump.py      | 167 +++++++++++++++++++++-
+ python/sglang/srt/models/qwen4_exp_mtp.py |  14 ++
+ 2 files changed, 180 insertions(+), 1 deletion(-)
+
+diff --git a/python/sglang/srt/models/mtp_dump.py b/python/sglang/srt/models/mtp_dump.py
+index b35537411b..376b09267a 100644
+--- a/python/sglang/srt/models/mtp_dump.py
++++ b/python/sglang/srt/models/mtp_dump.py
+@@ -242,4 +242,169 @@ def maybe_flush(lm_head) -> None:
+         dumper.flush(lm_head)
+ 
+ 
+-__all__ = ["MTPDumper", "dump_enabled", "get_dumper", "maybe_stage", "maybe_flush"]
++# ---------------------------------------------------------------------------
++# Draft-side dump (parity gate only -- SGLANG_MTP_DRAFT_DUMP_DIR)
++# ---------------------------------------------------------------------------
++_DRAFT: Optional["MTPDraftDumper"] = None
++_DRAFT_INIT = False
++
++
++def get_draft_dumper() -> Optional["MTPDraftDumper"]:
++    global _DRAFT, _DRAFT_INIT
++    if not _DRAFT_INIT:
++        _DRAFT_INIT = True
++        directory = os.environ.get("SGLANG_MTP_DRAFT_DUMP_DIR", "").strip()
++        if directory:
++            _DRAFT = MTPDraftDumper(directory)
++            logger.warning("MTP DRAFT dump ENABLED -> %s", directory)
++    return _DRAFT
++
++
++class MTPDraftDumper:
++    """Records the draft head's own inputs and outputs during draft-extend.
++
++    This exists purely so the standalone trainer can be proved numerically
++    identical to the served head: it stores the exact tensors the draft
++    consumed (its shifted input ids, its positions, and the target HC state it
++    was handed) next to what it produced (pre-mixer HC state, mixed state,
++    argmax and top-K logits).  Nothing here is needed for training.
++
++    Only draft-*extend* forwards are recorded; draft decode runs inside a CUDA
++    graph and is skipped, as is capture mode.
++    """
++
++    def __init__(self, directory: str):
++        self.dir = directory
++        os.makedirs(self.dir, exist_ok=True)
++        self.topk = int(os.environ.get("SGLANG_MTP_DRAFT_DUMP_TOPK", "8"))
++        self.chunk = int(os.environ.get("SGLANG_MTP_DRAFT_DUMP_CHUNK", "1024"))
++        self.max_bytes = (
++            float(os.environ.get("SGLANG_MTP_DRAFT_DUMP_MAX_GB", "40")) * 2**30
++        )
++        self.tag = os.environ.get("SGLANG_MTP_DRAFT_DUMP_TAG", "draft")
++        self.counter = 0
++        self.bytes_written = 0
++        self.rows_written = 0
++        self.stopped = False
++        self._queue: "queue.Queue" = queue.Queue(maxsize=4)
++        self._thread = threading.Thread(target=self._writer, daemon=True)
++        self._thread.start()
++
++    _writer = MTPDumper._writer
++    close = MTPDumper.close
++
++    @torch.no_grad()
++    def dump(
++        self,
++        model,
++        input_ids,
++        positions,
++        forward_batch,
++        input_hc,
++        mixed,
++        own_hc,
++    ) -> None:
++        if self.stopped or input_hc is None or own_hc is None or mixed is None:
++            return
++        if self.bytes_written >= self.max_bytes:
++            if not self.stopped:
++                logger.warning("MTP draft dump budget reached; stopping")
++                self.stopped = True
++            return
++        mode = forward_batch.forward_mode
++        if not mode.is_extend_or_draft_extend_or_mixed():
++            return
++        if mode.is_target_verify() or mode.is_idle():
++            return
++        try:
++            from sglang.srt.model_executor.runner import get_is_capture_mode
++
++            if get_is_capture_mode():
++                return
++        except Exception:  # noqa: BLE001
++            pass
++        if isinstance(mixed, tuple):
++            mixed = mixed[0]
++        n = int(input_ids.shape[0])
++        if n < 4 or own_hc.shape[0] != n or input_hc.shape[0] != n:
++            return
++
++        weight = getattr(model.lm_head, "weight", None)
++        if weight is None or weight.dim() != 2:
++            logger.error("MTP draft dump: unusable lm_head; disabling")
++            self.stopped = True
++            return
++
++        argmax = torch.empty(n, dtype=torch.int32, device=mixed.device)
++        topk_ids = torch.empty(n, self.topk, dtype=torch.int32, device=mixed.device)
++        topk_vals = torch.empty(n, self.topk, dtype=torch.float32, device=mixed.device)
++        for start in range(0, n, self.chunk):
++            end = min(n, start + self.chunk)
++            logits = torch.nn.functional.linear(
++                mixed[start:end].to(weight.dtype), weight
++            ).float()
++            argmax[start:end] = logits.argmax(dim=-1).to(torch.int32)
++            vals, ids = torch.topk(logits, self.topk, dim=-1)
++            topk_ids[start:end] = ids.to(torch.int32)
++            topk_vals[start:end] = vals
++            del logits
++
++        seq_lens = forward_batch.extend_seq_lens_cpu
++        if seq_lens is None and forward_batch.extend_seq_lens is not None:
++            seq_lens = forward_batch.extend_seq_lens.tolist()
++        if not seq_lens:
++            seq_lens = [n]
++        offsets = [0]
++        for length in seq_lens:
++            offsets.append(offsets[-1] + int(length))
++        if offsets[-1] != n:
++            offsets = [0, n]
++
++        tensors = {
++            "input_ids": input_ids.to(torch.int32).cpu(),
++            "positions": positions.reshape(-1)[:n].to(torch.int32).cpu(),
++            "input_hc": input_hc.to(torch.bfloat16).cpu(),
++            "own_hc": own_hc.to(torch.bfloat16).cpu(),
++            "mixed": mixed.to(torch.bfloat16).cpu(),
++            "argmax": argmax.cpu(),
++            "topk_ids": topk_ids.cpu(),
++            "topk_logits": topk_vals.cpu(),
++            "seq_offsets": torch.tensor(offsets, dtype=torch.int32),
++        }
++        self.counter += 1
++        self.rows_written += n
++        name = f"{self.tag}-{os.getpid()}-{self.counter:08d}.safetensors"
++        meta = {
++            "forward_mode": str(forward_batch.forward_mode),
++            "tokens": str(n),
++            # A reduced draft vocabulary (--speculative-token-map) makes argmax /
++            # topk_ids indices into the hot-token list, not the real vocabulary.
++            "lm_head_vocab": str(int(weight.shape[0])),
++            "lm_head_dtype": str(weight.dtype),
++        }
++        try:
++            self._queue.put((os.path.join(self.dir, name), tensors, meta), timeout=300)
++        except queue.Full:  # pragma: no cover
++            logger.error("MTP draft dump queue full; dropping a batch")
++
++
++def maybe_dump_draft(
++    model, input_ids, positions, forward_batch, input_hc, mixed, own_hc
++) -> None:
++    dumper = get_draft_dumper()
++    if dumper is not None:
++        dumper.dump(
++            model, input_ids, positions, forward_batch, input_hc, mixed, own_hc
++        )
++
++
++__all__ = [
++    "MTPDumper",
++    "MTPDraftDumper",
++    "dump_enabled",
++    "get_dumper",
++    "get_draft_dumper",
++    "maybe_stage",
++    "maybe_flush",
++    "maybe_dump_draft",
++]
+diff --git a/python/sglang/srt/models/qwen4_exp_mtp.py b/python/sglang/srt/models/qwen4_exp_mtp.py
+index f55c4d61cc..853f938a22 100644
+--- a/python/sglang/srt/models/qwen4_exp_mtp.py
++++ b/python/sglang/srt/models/qwen4_exp_mtp.py
+@@ -19,6 +19,7 @@ from sglang.srt.layers.logits_processor import LogitsProcessor
+ from sglang.srt.layers.quantization.base_config import QuantizationConfig
+ from sglang.srt.layers.vocab_parallel_embedding import ParallelLMHead
+ from sglang.srt.model_executor.forward_batch_info import ForwardBatch
++from sglang.srt.models.mtp_dump import maybe_dump_draft
+ from sglang.srt.models.qwen3_5_mtp import Qwen3_5ForCausalLMMTP, _mtp_quant_config
+ from sglang.srt.models.qwen4_exp import Qwen4ExpModel
+ from sglang.srt.runtime_context import get_model, get_parallel, get_spec
+@@ -575,6 +576,9 @@ class Qwen4ExpForCausalLMMTP(Qwen3_5ForCausalLMMTP):
+                     input_ids, forward_batch, input_embeds
+                 )
+             hidden_states = forward_batch.spec_info.hidden_states
++            # Parity gate only (SGLANG_MTP_DRAFT_DUMP_DIR): keep the unfused
++            # target HC state the draft was handed.
++            draft_input_hc = hidden_states
+             if not forward_batch.forward_mode.is_idle():
+                 hidden_states = self._mtp_input_fusion(
+                     input_embeds, hidden_states, embed_proj
+@@ -594,6 +598,16 @@ class Qwen4ExpForCausalLMMTP(Qwen3_5ForCausalLMMTP):
+             else:
+                 hidden_states = model_output
+ 
++            maybe_dump_draft(
++                self,
++                input_ids,
++                positions,
++                forward_batch,
++                draft_input_hc,
++                hidden_states,
++                hc_hidden_states,
++            )
++
+         logits_output = self.logits_processor(
+             input_ids, hidden_states, self.lm_head, forward_batch
+         )
+-- 
+2.43.0
+

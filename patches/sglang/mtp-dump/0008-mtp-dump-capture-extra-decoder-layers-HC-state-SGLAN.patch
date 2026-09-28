@@ -1,0 +1,237 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: aiueo52 <aiueo52@users.noreply.github.com>
+Date: Sat, 5 Sep 2026 15:25:15 +0900
+Subject: [PATCH 8/9] mtp dump: capture extra decoder layers' HC state
+ (SGLANG_MTP_DUMP_TAPS)
+
+Phase 1 of specs/DRAFT_V2_SPEC.md needs the hidden states of two extra
+target layers for the same rows the existing dump already covers, so an
+EAGLE-3-style multi-layer entry can be trained offline for the MTP head.
+
+A Qwen4Exp decoder layer's return value is already the right tensor: the
+4x2560 hyper-connection residual stream between two layers, i.e. exactly
+what hc_hidden is for layer 47.  The generic captured_last_layer_outputs
+accumulator cannot be used -- these layers override forward() and drop
+the kwarg -- so the tap is taken in the model loop instead.
+
+Off unless SGLANG_MTP_DUMP_TAPS is set; a forward whose taps are missing
+or mis-shaped is dropped rather than written without them.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+---
+ python/sglang/srt/models/mtp_dump.py  | 64 ++++++++++++++++++++++++---
+ python/sglang/srt/models/qwen4_exp.py | 16 +++++++
+ 2 files changed, 75 insertions(+), 5 deletions(-)
+
+diff --git a/python/sglang/srt/models/mtp_dump.py b/python/sglang/srt/models/mtp_dump.py
+index 4d00e0564b..25b2f790bd 100644
+--- a/python/sglang/srt/models/mtp_dump.py
++++ b/python/sglang/srt/models/mtp_dump.py
+@@ -23,6 +23,17 @@ per token:
+                                     logits, so a consumer can recover the
+                                     probability mass outside the top-K as
+                                     ``1 - exp(logsumexp(topk_logits) - lse)``
++    tap_hidden     bf16  [T, N*4*H] optional (SGLANG_MTP_DUMP_TAPS=3,23): the
++                                    *output* HC state of each tapped decoder
++                                    layer, concatenated in the order the env
++                                    var lists them.  Each tap is exactly the
++                                    same kind of tensor as ``hc_hidden`` (the
++                                    residual stream between two layers, before
++                                    any mixer), which is what an EAGLE-3-style
++                                    multi-layer entry would consume.  The tap
++                                    layer ids are repeated in the file metadata
++                                    as ``tap_layers`` so training and serving
++                                    can never silently disagree.
+ 
+ Design constraints:
+   * Decode / target-verify / draft forwards are never touched, so the CUDA
+@@ -37,6 +48,8 @@ Environment:
+     SGLANG_MTP_DUMP_CHUNK   rows per lm_head matmul chunk (default 1024)
+     SGLANG_MTP_DUMP_MAX_GB  stop dumping after this many GB (default 400)
+     SGLANG_MTP_DUMP_TAG     filename prefix (default "dump")
++    SGLANG_MTP_DUMP_TAPS    comma-separated decoder layer ids whose output HC
++                            state is also stored (default "": no taps)
+ """
+ 
+ from __future__ import annotations
+@@ -72,6 +85,25 @@ def get_dumper() -> Optional["MTPDumper"]:
+     return _DUMPER
+ 
+ 
++_TAPS: Optional[tuple] = None
++
++
++def tap_layer_ids() -> tuple:
++    """Decoder layers whose output HC state the dump also stores.
++
++    Read once from ``SGLANG_MTP_DUMP_TAPS``.  Empty (the default) means the
++    capture is completely absent from the forward pass, so a server started
++    without it is byte-for-byte the ordinary one.
++    """
++    global _TAPS
++    if _TAPS is None:
++        raw = os.environ.get("SGLANG_MTP_DUMP_TAPS", "").strip()
++        _TAPS = tuple(int(x) for x in raw.replace(" ", "").split(",") if x)
++        if _TAPS:
++            logger.warning("MTP dump: capturing tap layers %s", list(_TAPS))
++    return _TAPS
++
++
+ def project_lm_head(lm_head, x: "torch.Tensor") -> "torch.Tensor":
+     """Apply the (possibly quantized) lm_head exactly as the server does.
+ 
+@@ -136,7 +168,9 @@ class MTPDumper:
+         self._thread.join(timeout=60)
+ 
+     # -------------------------------------------------------------- stage
+-    def stage(self, input_ids, positions, forward_batch, mixed_hidden, hc_hidden) -> None:
++    def stage(
++        self, input_ids, positions, forward_batch, mixed_hidden, hc_hidden, taps=None
++    ) -> None:
+         """Called from the language model with everything except lm_head."""
+         self._staged = None
+         if self.stopped or hc_hidden is None or mixed_hidden is None:
+@@ -160,7 +194,19 @@ class MTPDumper:
+         n = int(input_ids.shape[0])
+         if n < 4 or hc_hidden.shape[0] != n or mixed_hidden.shape[0] != n:
+             return
+-        self._staged = (input_ids, positions, forward_batch, mixed_hidden, hc_hidden)
++        wanted = len(tap_layer_ids())
++        if wanted:
++            # A short/None tap list means the capture did not run for this
++            # forward (idle rank, graph capture, a shape guard upstream).
++            # Writing a row without its taps would silently produce a file the
++            # trainer reads as "no taps", so drop the batch instead.
++            if not taps or len(taps) != wanted or any(
++                t is None or t.shape[0] != n for t in taps
++            ):
++                return
++        self._staged = (
++            input_ids, positions, forward_batch, mixed_hidden, hc_hidden, taps
++        )
+ 
+     # -------------------------------------------------------------- flush
+     @torch.no_grad()
+@@ -176,7 +222,7 @@ class MTPDumper:
+                 )
+                 self.stopped = True
+             return
+-        input_ids, positions, forward_batch, mixed, hc_hidden = staged
++        input_ids, positions, forward_batch, mixed, hc_hidden, taps = staged
+         n = int(input_ids.shape[0])
+         argmax = torch.empty(n, dtype=torch.int32, device=mixed.device)
+         topk_ids = topk_vals = None
+@@ -245,6 +291,10 @@ class MTPDumper:
+             tensors["topk_ids"] = topk_ids.cpu()
+             tensors["topk_logits"] = topk_vals.cpu()
+             tensors["lse"] = lse.cpu()
++        if taps:
++            tensors["tap_hidden"] = (
++                torch.cat([t.to(torch.bfloat16) for t in taps], dim=-1).cpu()
++            )
+ 
+         self.counter += 1
+         self.rows_written += n
+@@ -254,6 +304,7 @@ class MTPDumper:
+             "tokens": str(n),
+             "sequences": str(len(seq_lens)),
+             "written_at": f"{time.time():.3f}",
++            "tap_layers": ",".join(str(i) for i in tap_layer_ids()),
+         }
+         try:
+             self._queue.put((os.path.join(self.dir, name), tensors, meta), timeout=300)
+@@ -269,10 +320,12 @@ class MTPDumper:
+         }
+ 
+ 
+-def maybe_stage(model, input_ids, positions, forward_batch, mixed, hc_hidden) -> None:
++def maybe_stage(
++    model, input_ids, positions, forward_batch, mixed, hc_hidden, taps=None
++) -> None:
+     dumper = get_dumper()
+     if dumper is not None:
+-        dumper.stage(input_ids, positions, forward_batch, mixed, hc_hidden)
++        dumper.stage(input_ids, positions, forward_batch, mixed, hc_hidden, taps)
+ 
+ 
+ def maybe_flush(lm_head) -> None:
+@@ -475,6 +528,7 @@ def maybe_dump_draft(
+ 
+ __all__ = [
+     "project_lm_head",
++    "tap_layer_ids",
+     "MTPDumper",
+     "MTPDraftDumper",
+     "dump_enabled",
+diff --git a/python/sglang/srt/models/qwen4_exp.py b/python/sglang/srt/models/qwen4_exp.py
+index eb68eff972..5cd614ddb1 100644
+--- a/python/sglang/srt/models/qwen4_exp.py
++++ b/python/sglang/srt/models/qwen4_exp.py
+@@ -61,6 +61,7 @@ from sglang.srt.models.mtp_dump import (
+     maybe_flush,
+     maybe_stage,
+     stash_post_attn_hc,
++    tap_layer_ids,
+ )
+ from sglang.srt.models.qwen3_5 import (
+     Qwen3_5AttentionDecoderLayer,
+@@ -1732,6 +1733,7 @@ class Qwen4ExpModel(Qwen3_5ForCausalLM):
+         super().__init__(config, quant_config, prefix, is_nextn)
+         self.hc_count = config.hc_count
+         self.hidden_size = config.hidden_size
++        self.last_tap_hidden_states = None
+         self.has_ple = bool(config.ple_layer_ids)
+         self.ple_ngram_size = int(config.ngram_size) if self.has_ple else None
+         self.ple_ngram_eos_token_id = (
+@@ -1787,6 +1789,12 @@ class Qwen4ExpModel(Qwen3_5ForCausalLM):
+         )
+         residual = None
+         aux_hidden_states = []
++        # MTP dump taps: a Qwen4Exp layer returns the 4x2560 hyper-connection
++        # residual stream, the same tensor hc_hidden_states is for layer 47.
++        # The generic captured_last_layer_outputs accumulator never fires here
++        # because these layers override forward and drop that kwarg.
++        taps = tap_layer_ids()
++        tapped = [] if taps else None
+         for i in range(self.start_layer, self.end_layer):
+             layer = self.layers[i]
+             if i + 1 < self.end_layer:
+@@ -1806,6 +1814,10 @@ class Qwen4ExpModel(Qwen3_5ForCausalLM):
+                         else None
+                     ),
+                 )
++            if tapped is not None and i in taps:
++                # Cloned: the next layer's hyper-connection combine may write
++                # through this buffer, and the dump write is asynchronous.
++                tapped.append(hidden_states.clone())
+ 
+         if isinstance(hidden_states, _PendingHCCombine):
+             # Safety net: the last executed layer has nothing to fuse into
+@@ -1817,6 +1829,8 @@ class Qwen4ExpModel(Qwen3_5ForCausalLM):
+         hc_hidden_states = hidden_states
+         hidden_states, _ = self.hyper_connection_mixer.mix(hidden_states)
+         if not forward_batch.forward_mode.is_idle():
++            if tapped is not None:
++                self.last_tap_hidden_states = tapped
+             return hidden_states, hc_hidden_states
+ 
+         if len(aux_hidden_states) == 0:
+@@ -1848,6 +1862,7 @@ class Qwen4ExpVLModel(Qwen4ExpModel):
+         input_deepstack_embeds: Optional[torch.Tensor] = None,
+     ) -> torch.Tensor:
+         self.last_hc_hidden_states = None
++        self.last_tap_hidden_states = None
+         # mm routine passes input_ids=None; PLE needs the real ids.
+         if input_ids is None:
+             input_ids = forward_batch.input_ids
+@@ -1867,6 +1882,7 @@ class Qwen4ExpVLModel(Qwen4ExpModel):
+                 forward_batch,
+                 hidden_states,
+                 self.last_hc_hidden_states,
++                self.last_tap_hidden_states,
+             )
+             return hidden_states
+         return model_output
+-- 
+2.43.0
+

@@ -1,0 +1,32 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: aiueo52 <aiueo52@users.noreply.github.com>
+Date: Wed, 2 Sep 2026 12:23:13 +0900
+Subject: [PATCH 013/105] fix(adaptive): tolerate EagerRunner (no capture_bs)
+ when scheduling GDN recovery-graph capture
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+---
+ python/sglang/srt/model_executor/model_runner.py | 7 ++-----
+ 1 file changed, 2 insertions(+), 5 deletions(-)
+
+diff --git a/python/sglang/srt/model_executor/model_runner.py b/python/sglang/srt/model_executor/model_runner.py
+index d28596d7a3..b7c429096d 100644
+--- a/python/sglang/srt/model_executor/model_runner.py
++++ b/python/sglang/srt/model_executor/model_runner.py
+@@ -1030,11 +1030,8 @@ class ModelRunner:
+         # final addresses. Self-guards (no-op in full mode / non-recovery paths).
+         self.maybe_capture_gdn_recovery_graphs(
+             attn_backend=self.attn_backend,
+-            capture_bs=(
+-                None
+-                if self.decode_cuda_graph_runner is None
+-                else self.decode_cuda_graph_runner.capture_bs
+-            ),
++            # Draft workers use an EagerRunner without capture_bs.
++            capture_bs=getattr(self.decode_cuda_graph_runner, "capture_bs", None),
+         )
+ 
+     def maybe_capture_gdn_recovery_graphs(self, attn_backend, capture_bs):
+-- 
+2.43.0
+

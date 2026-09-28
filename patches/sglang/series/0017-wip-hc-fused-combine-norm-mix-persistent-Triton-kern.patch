@@ -1,0 +1,878 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: aiueo52 <aiueo52@users.noreply.github.com>
+Date: Thu, 3 Sep 2026 05:42:53 +0900
+Subject: [PATCH 017/105] wip(hc): fused combine+norm+mix persistent Triton
+ kernel (SGLANG_HC_FUSED=1, default off)
+
+Codex round 2: numerics match the reference chain (tests pass); graph-timed
+microbench is only at parity with the 3-4 kernel chain (~18-22us). Bench uses
+CUDA-graph replay timing with 24 rotating weight copies.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+---
+ bench/hc_fused/bench_hc_fused.py            | 196 ++++++++++
+ python/sglang/srt/layers/hc_fused_triton.py | 399 ++++++++++++++++++++
+ python/sglang/srt/layers/hyperconnection.py |  92 ++++-
+ python/sglang/srt/models/qwen4_exp.py       |   5 +
+ test/srt/layers/test_hc_fused.py            |  84 +++++
+ 5 files changed, 773 insertions(+), 3 deletions(-)
+ create mode 100644 bench/hc_fused/bench_hc_fused.py
+ create mode 100644 python/sglang/srt/layers/hc_fused_triton.py
+ create mode 100644 test/srt/layers/test_hc_fused.py
+
+diff --git a/bench/hc_fused/bench_hc_fused.py b/bench/hc_fused/bench_hc_fused.py
+new file mode 100644
+index 0000000000..258598cdf6
+--- /dev/null
++++ b/bench/hc_fused/bench_hc_fused.py
+@@ -0,0 +1,196 @@
++#!/usr/bin/env python3
++"""Correctness and cold-weight timing for the fused HC boundary kernels."""
++
++from __future__ import annotations
++
++import os
++
++# This script uses GatedResidual itself as the baseline/reference chain.
++os.environ["SGLANG_HC_FUSED"] = "0"
++os.environ["SGLANG_HC_MIX_FP8"] = "0"
++
++import torch
++
++from sglang.srt.layers.hc_fused_triton import (
++    hc_fused_combine_norm_mix,
++    hc_fused_norm_mix,
++)
++from sglang.srt.layers.hyperconnection import GatedResidual, HyperConnectionConfig
++
++HC = 4
++HS = 2560
++LR = 320
++EPS = 1e-6
++WEIGHT_COPIES = 24
++
++
++def _make_modules() -> tuple[GatedResidual, GatedResidual]:
++    config = HyperConnectionConfig(
++        hc_count=HC,
++        hidden_size=HS,
++        params_dtype=torch.bfloat16,
++        hc_lowrank=LR,
++        rms_norm_eps=EPS,
++        hc_per_branch_norm=True,
++    )
++    previous = (
++        GatedResidual(config, use_mix=False, use_combine=True).cuda().to(torch.bfloat16)
++    )
++    following = (
++        GatedResidual(config, use_mix=True, use_combine=False).cuda().to(torch.bfloat16)
++    )
++    with torch.no_grad():
++        previous.block_inject_weight.weight.normal_(std=0.02)
++        following.hc_norm.weight.normal_(std=0.02)
++        following.input_mix_weight_down.weight.normal_(std=0.02)
++        following.input_mix_weight_up.weight.normal_(std=0.02)
++    return previous, following
++
++
++def _errors(actual: torch.Tensor, expected: torch.Tensor) -> tuple[float, float]:
++    error = (actual.float() - expected.float()).abs()
++    return error.max().item(), error.mean().item()
++
++
++def _print_error(label: str, actual: torch.Tensor, expected: torch.Tensor) -> None:
++    maximum, mean = _errors(actual, expected)
++    print(f"  {label:16s} max_abs={maximum:.7g}  mean_abs={mean:.7g}")
++
++
++GRAPH_REPLAYS = 50
++
++
++def _time_us(fn) -> float:
++    """GPU time per call, measured by replaying a CUDA graph that holds one call
++    per weight copy (removes Python/launch overhead, like the serving graphs)."""
++    side = torch.cuda.Stream()
++    side.wait_stream(torch.cuda.current_stream())
++    with torch.cuda.stream(side):
++        for i in range(WEIGHT_COPIES):
++            fn(i)
++    torch.cuda.current_stream().wait_stream(side)
++    torch.cuda.synchronize()
++    graph = torch.cuda.CUDAGraph()
++    with torch.cuda.graph(graph):
++        for i in range(WEIGHT_COPIES):
++            fn(i)
++    graph.replay()
++    torch.cuda.synchronize()
++    start = torch.cuda.Event(enable_timing=True)
++    end = torch.cuda.Event(enable_timing=True)
++    start.record()
++    for _ in range(GRAPH_REPLAYS):
++        graph.replay()
++    end.record()
++    end.synchronize()
++    return start.elapsed_time(end) * 1000.0 / (GRAPH_REPLAYS * WEIGHT_COPIES)
++
++
++@torch.inference_mode()
++def main() -> None:
++    if not torch.cuda.is_available():
++        raise SystemExit("CUDA is required")
++    torch.manual_seed(0)
++    modules = [_make_modules() for _ in range(WEIGHT_COPIES)]
++    timings: list[tuple[int, str, float, float]] = []
++
++    for rows in (1, 16):
++        block_output = torch.randn(rows, HS, device="cuda", dtype=torch.bfloat16)
++        residual = torch.randn(rows, HC * HS, device="cuda", dtype=torch.bfloat16)
++        normed_prev = torch.randn_like(residual)
++        previous, following = modules[0]
++
++        ref_norm_mixed, (_, ref_normed) = following.mix(residual)
++        fused_norm_mixed, fused_normed = hc_fused_norm_mix(
++            residual,
++            following.hc_norm.weight,
++            EPS,
++            following.input_mix_weight_down.weight,
++            following.input_mix_weight_up.weight,
++            HC,
++            HS,
++        )
++
++        ref_new_residual = previous.combine(block_output, (residual, normed_prev))
++        ref_combined_mixed, (_, ref_combined_normed) = following.mix(ref_new_residual)
++        (
++            fused_combined_mixed,
++            fused_new_residual,
++            fused_combined_normed,
++        ) = hc_fused_combine_norm_mix(
++            block_output,
++            residual,
++            normed_prev,
++            previous.block_inject_weight.weight,
++            following.hc_norm.weight,
++            EPS,
++            following.input_mix_weight_down.weight,
++            following.input_mix_weight_up.weight,
++            HC,
++            HS,
++        )
++        torch.cuda.synchronize()
++
++        print(f"M={rows} numerical errors versus GatedResidual baseline")
++        _print_error("norm/mixed", fused_norm_mixed, ref_norm_mixed)
++        _print_error("norm/normed", fused_normed, ref_normed)
++        _print_error("combine/mixed", fused_combined_mixed, ref_combined_mixed)
++        _print_error("combine/normed", fused_combined_normed, ref_combined_normed)
++        _print_error("combine/residual", fused_new_residual, ref_new_residual)
++
++        def baseline_norm(index: int):
++            return modules[index][1].mix(residual)
++
++        def fused_norm(index: int):
++            nxt = modules[index][1]
++            return hc_fused_norm_mix(
++                residual,
++                nxt.hc_norm.weight,
++                EPS,
++                nxt.input_mix_weight_down.weight,
++                nxt.input_mix_weight_up.weight,
++                HC,
++                HS,
++            )
++
++        def baseline_combine(index: int):
++            prev, nxt = modules[index]
++            combined = prev.combine(block_output, (residual, normed_prev))
++            return nxt.mix(combined)
++
++        def fused_combine(index: int):
++            prev, nxt = modules[index]
++            return hc_fused_combine_norm_mix(
++                block_output,
++                residual,
++                normed_prev,
++                prev.block_inject_weight.weight,
++                nxt.hc_norm.weight,
++                EPS,
++                nxt.input_mix_weight_down.weight,
++                nxt.input_mix_weight_up.weight,
++                HC,
++                HS,
++            )
++
++        baseline_us = _time_us(baseline_norm)
++        fused_us = _time_us(fused_norm)
++        timings.append((rows, "norm+mix", baseline_us, fused_us))
++        baseline_us = _time_us(baseline_combine)
++        fused_us = _time_us(fused_combine)
++        timings.append((rows, "combine+norm+mix", baseline_us, fused_us))
++
++    print(
++        f"\nCUDA-graph timing, {WEIGHT_COPIES} rotating weight copies per graph, "
++        f"{GRAPH_REPLAYS} replays"
++    )
++    print("M   path                 baseline_us  fused_us  speedup")
++    for rows, name, baseline_us, fused_us in timings:
++        print(
++            f"{rows:<3d} {name:<20s} {baseline_us:11.3f}  "
++            f"{fused_us:8.3f}  {baseline_us / fused_us:6.2f}x"
++        )
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/python/sglang/srt/layers/hc_fused_triton.py b/python/sglang/srt/layers/hc_fused_triton.py
+new file mode 100644
+index 0000000000..1583e6048f
+--- /dev/null
++++ b/python/sglang/srt/layers/hc_fused_triton.py
+@@ -0,0 +1,399 @@
++"""Persistent fused HyperConnection combine, per-branch norm, and mix.
++
++Decode and target-verify batches are small enough that launching the individual
++combine, RMSNorm, and low-rank mix kernels costs more than their arithmetic.
++This module keeps the bf16 materialization points of that chain while executing
++all of its phases in one persistent Triton launch.
++"""
++
++from __future__ import annotations
++
++import os
++
++import torch
++import triton
++import triton.language as tl
++
++_HC_FUSED_MAX_ROWS = 16
++
++
++def _env_block_size(name: str, default: int, allowed: tuple[int, ...]) -> int:
++    value = int(os.environ.get(name, str(default)))
++    if value not in allowed:
++        choices = ", ".join(str(item) for item in allowed)
++        raise ValueError(f"{name} must be one of: {choices}")
++    return value
++
++
++_HC_FUSED_BLOCK_J = _env_block_size("SGLANG_HC_FUSED_BLOCK_J", 16, (8, 16, 32))
++_HC_FUSED_BLOCK_R = _env_block_size(
++    "SGLANG_HC_FUSED_BLOCK_R", 64, (16, 32, 64, 128, 256)
++)
++
++
++@triton.jit
++def _grid_barrier(counter_ptr, num_ctas):
++    tl.atomic_add(counter_ptr, 1, sem="acq_rel", scope="gpu")
++    while tl.atomic_add(counter_ptr, 0, sem="acq_rel", scope="gpu") < num_ctas:
++        pass
++
++
++@triton.jit
++def _hc_fused_persistent_kernel(
++    hyper_input_ptr,
++    block_output_ptr,
++    normed_prev_ptr,
++    inject_w_ptr,
++    norm_w_ptr,
++    w_down_ptr,
++    w_up_ptr,
++    new_residual_ptr,
++    normed_ptr,
++    t_raw_ptr,
++    mixed_ptr,
++    counters_ptr,
++    K,
++    LOWRANK,
++    HS,
++    num_rows,
++    num_ctas,
++    eps,
++    inv_hc,
++    ROWS: tl.constexpr,
++    HC: tl.constexpr,
++    HAS_COMBINE: tl.constexpr,
++    BLOCK_P0: tl.constexpr,
++    BLOCK_N: tl.constexpr,
++    BLOCK_K: tl.constexpr,
++    BLOCK_J: tl.constexpr,
++    BLOCK_R: tl.constexpr,
++):
++    pid = tl.program_id(0)
++    offs_m = tl.arange(0, ROWS)
++    mask_m = offs_m < num_rows
++
++    # P0a: every later split-K tile atomically accumulates into this buffer.
++    zero_span = ROWS * LOWRANK
++    offs_z = tl.arange(0, 256)
++    for z0 in range(pid * 256, zero_span, num_ctas * 256):
++        idx = z0 + offs_z
++        tl.store(t_raw_ptr + idx, 0.0, mask=idx < zero_span)
++
++    # P0b: one task owns one (row, HC branch). Wide register-resident tiles
++    # turn the production K=10240 gate into three reductions and H=2560 norm
++    # into one. Rnew is rounded once to bf16, then that same register value is
++    # reused for its square and normalized store; there is no global reload.
++    offs_p0 = tl.arange(0, BLOCK_P0)
++    branch_tasks = num_rows * HC
++    for task in range(pid, branch_tasks, num_ctas):
++        m = task // HC
++        c = task % HC
++        branch_base = m * K + c * HS
++
++        if HAS_COMBINE:
++            gate_acc = 0.0
++            for k0 in range(0, K, BLOCK_P0):
++                k = k0 + offs_p0
++                mask_k = k < K
++                n = tl.load(normed_prev_ptr + m * K + k, mask=mask_k, other=0.0).to(
++                    tl.float32
++                )
++                w = tl.load(inject_w_ptr + c * K + k, mask=mask_k, other=0.0).to(
++                    tl.float32
++                )
++                gate_acc += tl.sum(n * w, axis=0)
++            gate = 2.0 * tl.sigmoid(gate_acc * inv_hc)
++
++        h = offs_p0
++        mask_h = h < HS
++        if HAS_COMBINE:
++            r = tl.load(hyper_input_ptr + branch_base + h, mask=mask_h, other=0.0).to(
++                tl.float32
++            )
++            y = tl.load(block_output_ptr + m * HS + h, mask=mask_h, other=0.0).to(
++                tl.float32
++            )
++            x_bf16 = (r + gate * y).to(hyper_input_ptr.dtype.element_ty)
++            tl.store(new_residual_ptr + branch_base + h, x_bf16, mask=mask_h)
++        else:
++            x_bf16 = tl.load(hyper_input_ptr + branch_base + h, mask=mask_h, other=0.0)
++        x = x_bf16.to(tl.float32)
++        sum_sq = tl.sum(x * x, axis=0)
++        inv_rms = tl.rsqrt(sum_sq / HS + eps)
++        w = tl.load(norm_w_ptr + c * HS + h, mask=mask_h, other=0.0).to(tl.float32)
++        n = x * inv_rms * (1.0 + w)
++        tl.store(
++            normed_ptr + branch_base + h,
++            n.to(normed_ptr.dtype.element_ty),
++            mask=mask_h,
++        )
++
++    _grid_barrier(counters_ptr + 0, num_ctas)
++
++    # PA: grid-strided split-K down projection.  Atomic accumulation makes all
++    # CTAs useful even for a single row while retaining fp32 accumulation.
++    offs_k = tl.arange(0, BLOCK_K)
++    offs_n = tl.arange(0, BLOCK_N)
++    n_blocks = tl.cdiv(LOWRANK, BLOCK_N)
++    k_chunks = tl.cdiv(K, BLOCK_K)
++    for tile in range(pid, n_blocks * k_chunks, num_ctas):
++        nb = tile % n_blocks
++        kc = tile // n_blocks
++        n = nb * BLOCK_N + offs_n
++        k = kc * BLOCK_K + offs_k
++        mask_n = n < LOWRANK
++        x = tl.load(
++            normed_ptr + offs_m[:, None] * K + k[None, :],
++            mask=mask_m[:, None],
++            other=0.0,
++        )
++        w = tl.load(
++            w_down_ptr + n[:, None] * K + k[None, :],
++            mask=mask_n[:, None],
++            other=0.0,
++        )
++        acc = tl.dot(x, tl.trans(w))
++        tl.atomic_add(
++            t_raw_ptr + offs_m[:, None] * LOWRANK + n[None, :],
++            acc,
++            mask=mask_n[None, :],
++            sem="relaxed",
++            scope="gpu",
++        )
++
++    _grid_barrier(counters_ptr + 1, num_ctas)
++
++    # PB: BLOCK_J defaults to 16 (160 production output tasks) and is tunable
++    # between the old kernel's proven 32-wide tile and the first revision's
++    # 8-wide tile. SiLU is rounded to bf16 before the up projection.
++    offs_j = tl.arange(0, BLOCK_J)
++    offs_r = tl.arange(0, BLOCK_R)
++    offs_c = tl.arange(0, HC)
++    j_blocks = tl.cdiv(HS, BLOCK_J)
++    for jb in range(pid, j_blocks, num_ctas):
++        j = jb * BLOCK_J + offs_j
++        mask_j = j < HS
++        cj = offs_c[:, None] * HS + j[None, :]
++        cj_flat = tl.reshape(cj, (HC * BLOCK_J,))
++        mask_cj = tl.reshape(
++            tl.broadcast_to(mask_j[None, :], (HC, BLOCK_J)),
++            (HC * BLOCK_J,),
++        )
++        up_acc = tl.zeros((ROWS, HC * BLOCK_J), dtype=tl.float32)
++        for r0 in range(0, LOWRANK, BLOCK_R):
++            r = r0 + offs_r
++            mask_r = r < LOWRANK
++            a = tl.load(
++                t_raw_ptr + offs_m[:, None] * LOWRANK + r[None, :],
++                mask=mask_r[None, :],
++                other=0.0,
++            )
++            a = a * inv_hc
++            t = (a * tl.sigmoid(a)).to(normed_ptr.dtype.element_ty)
++            w = tl.load(
++                w_up_ptr + cj_flat[:, None] * LOWRANK + r[None, :],
++                mask=mask_cj[:, None] & mask_r[None, :],
++                other=0.0,
++            )
++            up_acc = tl.dot(t, tl.trans(w), up_acc)
++
++        gate = tl.sigmoid(tl.reshape(up_acc, (ROWS, HC, BLOCK_J)))
++        x = tl.load(
++            normed_ptr
++            + offs_m[:, None, None] * K
++            + offs_c[None, :, None] * HS
++            + j[None, None, :],
++            mask=mask_m[:, None, None] & mask_j[None, None, :],
++            other=0.0,
++        ).to(tl.float32)
++        out = tl.sum(gate * x, axis=1) * inv_hc
++        tl.store(
++            mixed_ptr + offs_m[:, None] * HS + j[None, :],
++            out.to(mixed_ptr.dtype.element_ty),
++            mask=mask_m[:, None] & mask_j[None, :],
++        )
++
++    # The last CTA reaching the epilogue restores all persistent counters.
++    # Kernel completion on the stream therefore implies graph-replay readiness.
++    ticket = tl.atomic_add(counters_ptr + 2, 1, sem="acq_rel", scope="gpu")
++    if ticket == num_ctas - 1:
++        tl.store(counters_ptr + 0, 0)
++        tl.store(counters_ptr + 1, 0)
++        tl.store(counters_ptr + 2, 0)
++
++
++_counters_cache: dict[torch.device, torch.Tensor] = {}
++
++
++def _get_counters(device: torch.device) -> torch.Tensor:
++    """Return this kernel's graph-replay-safe counters (not the old mixer's)."""
++    buf = _counters_cache.get(device)
++    if buf is None:
++        buf = torch.zeros(3, dtype=torch.int32, device=device)
++        _counters_cache[device] = buf
++    return buf
++
++
++def _validate_common(
++    hyper_input: torch.Tensor,
++    norm_w: torch.Tensor,
++    w_down: torch.Tensor,
++    w_up: torch.Tensor,
++    hc: int,
++    hs: int,
++) -> tuple[int, int, int]:
++    if hyper_input.dim() != 2:
++        raise ValueError("hyper_input must be 2-D")
++    rows, k = hyper_input.shape
++    lowrank = w_down.shape[0] if w_down.dim() == 2 else -1
++    tensors = (hyper_input, norm_w, w_down, w_up)
++    if not 1 <= rows <= _HC_FUSED_MAX_ROWS:
++        raise ValueError(f"row count must be in [1, {_HC_FUSED_MAX_ROWS}]")
++    if k != hc * hs or k % 2048 != 0:
++        raise ValueError("HC*H must match the input width and be divisible by 2048")
++    if lowrank <= 0 or lowrank % 64 != 0:
++        raise ValueError("low-rank width must be a positive multiple of 64")
++    if norm_w.shape != (k,) or w_down.shape != (lowrank, k):
++        raise ValueError("invalid norm or down-projection weight shape")
++    if w_up.shape != (k, lowrank):
++        raise ValueError("invalid up-projection weight shape")
++    if any(t.device != hyper_input.device for t in tensors):
++        raise ValueError("all tensors must be on the same device")
++    if any(not t.is_cuda for t in tensors):
++        raise ValueError("the fused HC kernel requires CUDA tensors")
++    if any(t.dtype != torch.bfloat16 for t in tensors):
++        raise ValueError("the fused HC kernel supports bf16 only")
++    if any(not t.is_contiguous() for t in tensors):
++        raise ValueError("all tensors must be contiguous")
++    return rows, k, lowrank
++
++
++def _launch(
++    hyper_input: torch.Tensor,
++    block_output: torch.Tensor,
++    normed_prev: torch.Tensor,
++    inject_w: torch.Tensor,
++    norm_w: torch.Tensor,
++    eps: float,
++    w_down: torch.Tensor,
++    w_up: torch.Tensor,
++    hc: int,
++    hs: int,
++    *,
++    has_combine: bool,
++) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
++    rows, k, lowrank = _validate_common(hyper_input, norm_w, w_down, w_up, hc, hs)
++    if has_combine:
++        extra = (block_output, normed_prev, inject_w)
++        if block_output.shape != (rows, hs):
++            raise ValueError("block_output has the wrong shape")
++        if normed_prev.shape != (rows, k) or inject_w.shape != (hc, k):
++            raise ValueError("invalid previous norm or inject-weight shape")
++        if any(t.device != hyper_input.device for t in extra):
++            raise ValueError("all tensors must be on the same device")
++        if any(t.dtype != torch.bfloat16 for t in extra):
++            raise ValueError("the fused HC kernel supports bf16 only")
++        if any(not t.is_contiguous() for t in extra):
++            raise ValueError("all tensors must be contiguous")
++
++    device = hyper_input.device
++    rows_pad = 16
++    num_ctas = torch.cuda.get_device_properties(device).multi_processor_count
++    new_residual = torch.empty_like(hyper_input) if has_combine else None
++    normed = torch.empty_like(hyper_input)
++    mixed = torch.empty((rows, hs), dtype=torch.bfloat16, device=device)
++    t_raw = torch.empty((rows_pad, lowrank), dtype=torch.float32, device=device)
++
++    # Unused no-combine operands are valid device pointers so argument
++    # marshalling stays graph-capturable; HAS_COMBINE eliminates their loads.
++    block_arg = block_output if has_combine else hyper_input
++    normed_prev_arg = normed_prev if has_combine else hyper_input
++    inject_arg = inject_w if has_combine else norm_w
++    new_residual_arg = new_residual if has_combine else hyper_input
++    _hc_fused_persistent_kernel[(num_ctas,)](
++        hyper_input,
++        block_arg,
++        normed_prev_arg,
++        inject_arg,
++        norm_w,
++        w_down,
++        w_up,
++        new_residual_arg,
++        normed,
++        t_raw,
++        mixed,
++        _get_counters(device),
++        k,
++        lowrank,
++        hs,
++        rows,
++        num_ctas,
++        eps,
++        1.0 / hc,
++        ROWS=rows_pad,
++        HC=hc,
++        HAS_COMBINE=has_combine,
++        BLOCK_P0=4096,
++        BLOCK_N=32,
++        BLOCK_K=256,
++        BLOCK_J=_HC_FUSED_BLOCK_J,
++        BLOCK_R=_HC_FUSED_BLOCK_R,
++        num_warps=8,
++    )
++    return mixed, normed, new_residual
++
++
++def hc_fused_norm_mix(
++    hyper_input: torch.Tensor,
++    norm_w: torch.Tensor,
++    eps: float,
++    w_down: torch.Tensor,
++    w_up: torch.Tensor,
++    hc: int,
++    hs: int,
++) -> tuple[torch.Tensor, torch.Tensor]:
++    """Run per-branch Gemma RMSNorm and HC low-rank mixing in one kernel."""
++    mixed, normed, _ = _launch(
++        hyper_input,
++        hyper_input,
++        hyper_input,
++        norm_w,
++        norm_w,
++        eps,
++        w_down,
++        w_up,
++        hc,
++        hs,
++        has_combine=False,
++    )
++    return mixed, normed
++
++
++def hc_fused_combine_norm_mix(
++    block_output: torch.Tensor,
++    residual: torch.Tensor,
++    normed_prev: torch.Tensor,
++    inject_w: torch.Tensor,
++    norm_w: torch.Tensor,
++    eps: float,
++    w_down: torch.Tensor,
++    w_up: torch.Tensor,
++    hc: int,
++    hs: int,
++) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
++    """Run gated combine, per-branch norm, and HC mixing in one kernel."""
++    mixed, normed, new_residual = _launch(
++        residual,
++        block_output,
++        normed_prev,
++        inject_w,
++        norm_w,
++        eps,
++        w_down,
++        w_up,
++        hc,
++        hs,
++        has_combine=True,
++    )
++    assert new_residual is not None
++    return mixed, new_residual, normed
+diff --git a/python/sglang/srt/layers/hyperconnection.py b/python/sglang/srt/layers/hyperconnection.py
+index 2257b3d57e..989472acfe 100644
+--- a/python/sglang/srt/layers/hyperconnection.py
++++ b/python/sglang/srt/layers/hyperconnection.py
+@@ -1,18 +1,19 @@
+ from __future__ import annotations
+ 
++import os
+ from typing import TYPE_CHECKING, Optional
+ 
+ import msgspec
+ import torch
+-import os as _os
+-
+-_HC_MIX_FP8 = _os.environ.get("SGLANG_HC_MIX_FP8", "0") == "1"
+ import torch.nn as nn
+ import torch.nn.functional as F
+ 
+ from sglang.srt.layers.hc_mix_triton import fused_hc_mix, fused_hc_mix_supported
+ from sglang.srt.layers.linear import ReplicatedLinear
+ 
++_HC_FUSED = os.environ.get("SGLANG_HC_FUSED", "0") == "1"
++_HC_MIX_FP8 = os.environ.get("SGLANG_HC_MIX_FP8", "0") == "1"
++
+ if TYPE_CHECKING:
+     from sglang.srt.layers.quantization.base_config import QuantizationConfig
+ 
+@@ -280,6 +281,34 @@ class GatedResidual(HyperConnectionBase):
+             * hyper_input_normed.unflatten(-1, (self.hc_count, self.hidden_size))
+         ).mean(dim=-2)
+ 
++    def _fused_mix_supported(self, hyper_input: torch.Tensor) -> bool:
++        if not (
++            _HC_FUSED
++            and self.config.hc_per_branch_norm
++            and not self._quantized_mix
++            and hyper_input.is_cuda
++            and hyper_input.dtype == torch.bfloat16
++            and hyper_input.dim() == 2
++            and 1 <= hyper_input.shape[0] <= 16
++            and hyper_input.shape[1] == self.hc_count * self.hidden_size
++            and hyper_input.shape[1] % 2048 == 0
++            and self.config.hc_lowrank % 64 == 0
++            and hyper_input.is_contiguous()
++        ):
++            return False
++        weights = (
++            self.hc_norm.weight,
++            self.input_mix_weight_down.weight,
++            self.input_mix_weight_up.weight,
++        )
++        return all(
++            w.is_cuda
++            and w.device == hyper_input.device
++            and w.dtype == torch.bfloat16
++            and w.is_contiguous()
++            for w in weights
++        )
++
+     def mix(self, hyper_input: torch.Tensor):
+         assert hyper_input.shape[-1] == self.hc_count * self.hidden_size
+         if hyper_input.shape[0] == 0:
+@@ -288,6 +317,20 @@ class GatedResidual(HyperConnectionBase):
+             )
+             return mixed_input, (hyper_input, hyper_input)
+ 
++        if self._fused_mix_supported(hyper_input):
++            from sglang.srt.layers.hc_fused_triton import hc_fused_norm_mix
++
++            mixed_input, hyper_input_normed = hc_fused_norm_mix(
++                hyper_input,
++                self.hc_norm.weight,
++                self.hc_norm.variance_epsilon,
++                self.input_mix_weight_down.weight,
++                self.input_mix_weight_up.weight,
++                self.hc_count,
++                self.hidden_size,
++            )
++            return mixed_input, (hyper_input, hyper_input_normed)
++
+         if self.config.hc_per_branch_norm:
+             hyper_input_normed = self.hc_norm(hyper_input)
+         else:
+@@ -422,6 +465,49 @@ class GatedResidual(HyperConnectionBase):
+         ).to(self.params_dtype)
+         return updated_residuals
+ 
++    def combine_then_mix(
++        self,
++        block_output: torch.Tensor,
++        residuals,
++        next_hc: "GatedResidual",
++    ):
++        """Combine this boundary and norm/mix the next one in one launch."""
++        hyper_input, hyper_input_normed = residuals
++        inject_w = self.block_inject_weight.weight
++        if (
++            next_hc._fused_mix_supported(hyper_input)
++            and self.hc_count == next_hc.hc_count
++            and self.hidden_size == next_hc.hidden_size
++            and block_output.shape == (hyper_input.shape[0], self.hidden_size)
++            and hyper_input_normed.shape == hyper_input.shape
++            and block_output.is_cuda
++            and block_output.device == hyper_input.device
++            and hyper_input_normed.device == hyper_input.device
++            and inject_w.device == hyper_input.device
++            and block_output.dtype == torch.bfloat16
++            and hyper_input_normed.dtype == torch.bfloat16
++            and inject_w.dtype == torch.bfloat16
++            and block_output.is_contiguous()
++            and hyper_input_normed.is_contiguous()
++            and inject_w.is_contiguous()
++        ):
++            from sglang.srt.layers.hc_fused_triton import hc_fused_combine_norm_mix
++
++            mixed, new_residual, normed = hc_fused_combine_norm_mix(
++                block_output,
++                hyper_input,
++                hyper_input_normed,
++                inject_w,
++                next_hc.hc_norm.weight,
++                next_hc.hc_norm.variance_epsilon,
++                next_hc.input_mix_weight_down.weight,
++                next_hc.input_mix_weight_up.weight,
++                self.hc_count,
++                self.hidden_size,
++            )
++            return mixed, (new_residual, normed)
++        return next_hc.mix(self.combine(block_output, residuals))
++
+ 
+ HYPERCONNECTION_CLASS_DICT = {
+     "hyperconnection_average": HyperConnectionBase,
+diff --git a/python/sglang/srt/models/qwen4_exp.py b/python/sglang/srt/models/qwen4_exp.py
+index b0f44a28fe..e359128e26 100644
+--- a/python/sglang/srt/models/qwen4_exp.py
++++ b/python/sglang/srt/models/qwen4_exp.py
+@@ -35,6 +35,7 @@ from sglang.srt.layers.dp_attention import (
+     is_dp_attention_enabled,
+ )
+ from sglang.srt.layers.hyperconnection import (
++    _HC_FUSED,
+     GatedResidual,
+     HyperConnectionConfig,
+ )
+@@ -1340,6 +1341,10 @@ class Qwen4ExpLayerExtensionMixin:
+         residual: Optional[torch.Tensor],
+         forward_batch: ForwardBatch,
+     ):
++        if _HC_FUSED and get_parallel().attn_tp_size == 1:
++            return self.attn_hyper_connection.combine_then_mix(
++                hidden_states, residual, self.mlp_hyper_connection
++            )
+         if not forward_batch.forward_mode.is_idle():
+             hidden_states = attn_tp_all_reduce(hidden_states)
+         hidden_states = self.attn_hyper_connection.combine(hidden_states, residual)
+diff --git a/test/srt/layers/test_hc_fused.py b/test/srt/layers/test_hc_fused.py
+new file mode 100644
+index 0000000000..1a5c41918d
+--- /dev/null
++++ b/test/srt/layers/test_hc_fused.py
+@@ -0,0 +1,84 @@
++import pytest
++import torch
++
++from sglang.kernels.ops.elementwise.hc_combine import hc_combine
++from sglang.kernels.ops.layernorm import grouped_gemma_rmsnorm as rmsnorm_ops
++from sglang.srt.layers.hc_fused_triton import (
++    hc_fused_combine_norm_mix,
++    hc_fused_norm_mix,
++)
++from sglang.srt.layers.hc_mix_triton import fused_hc_mix
++
++HC = 4
++HS = 2560
++LR = 320
++EPS = 1e-6
++
++pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
++
++
++def _assert_mix_error(actual: torch.Tensor, expected: torch.Tensor) -> None:
++    error = (actual.float() - expected.float()).abs()
++    assert error.max().item() <= 3e-2
++    assert error.mean().item() <= 3e-3
++
++
++def _assert_norm_error(actual: torch.Tensor, expected: torch.Tensor) -> None:
++    error = (actual.float() - expected.float()).abs()
++    assert error.max().item() <= 2e-2
++
++
++def _assert_one_bf16_ulp(actual: torch.Tensor, expected: torch.Tensor) -> None:
++    error = (actual.float() - expected.float()).abs()
++    magnitude = expected.float().abs()
++    # Normal bf16 spacing is 2**(floor(log2(abs(x))) - 7); subnormals have
++    # fixed spacing 2**-133.  This is the requested ULP of |reference value|.
++    normal_ulp = torch.exp2(torch.floor(torch.log2(magnitude)) - 7)
++    ulp = torch.where(magnitude < 2.0**-126, 2.0**-133, normal_ulp)
++    assert torch.all(error <= ulp).item()
++
++
++def _make_inputs(rows: int):
++    torch.manual_seed(1234 + rows)
++    residual = torch.randn(rows, HC * HS, device="cuda", dtype=torch.bfloat16)
++    normed_prev = torch.randn_like(residual)
++    block_output = torch.randn(rows, HS, device="cuda", dtype=torch.bfloat16)
++    inject_w = torch.randn(HC, HC * HS, device="cuda", dtype=torch.bfloat16) * 0.02
++    norm_w = torch.randn(HC * HS, device="cuda", dtype=torch.bfloat16) * 0.02
++    w_down = torch.randn(LR, HC * HS, device="cuda", dtype=torch.bfloat16) * 0.02
++    w_up = torch.randn(HC * HS, LR, device="cuda", dtype=torch.bfloat16) * 0.02
++    return residual, normed_prev, block_output, inject_w, norm_w, w_down, w_up
++
++
++@pytest.mark.parametrize("rows", [1, 5, 16])
++def test_hc_fused_entry_points_match_reference_chain(rows: int):
++    residual, normed_prev, block_output, inject_w, norm_w, w_down, w_up = _make_inputs(
++        rows
++    )
++
++    ref_normed = rmsnorm_ops.grouped_gemma_rmsnorm(residual, norm_w, HS, EPS)
++    ref_mixed = fused_hc_mix(ref_normed, w_down, w_up, HC, HS)
++    mixed, normed = hc_fused_norm_mix(residual, norm_w, EPS, w_down, w_up, HC, HS)
++    _assert_norm_error(normed, ref_normed)
++    _assert_mix_error(mixed, ref_mixed)
++
++    ref_new_residual = hc_combine(block_output, residual, normed_prev, inject_w, HC, HS)
++    ref_combined_normed = rmsnorm_ops.grouped_gemma_rmsnorm(
++        ref_new_residual, norm_w, HS, EPS
++    )
++    ref_combined_mixed = fused_hc_mix(ref_combined_normed, w_down, w_up, HC, HS)
++    combined_mixed, new_residual, combined_normed = hc_fused_combine_norm_mix(
++        block_output,
++        residual,
++        normed_prev,
++        inject_w,
++        norm_w,
++        EPS,
++        w_down,
++        w_up,
++        HC,
++        HS,
++    )
++    _assert_one_bf16_ulp(new_residual, ref_new_residual)
++    _assert_norm_error(combined_normed, ref_combined_normed)
++    _assert_mix_error(combined_mixed, ref_combined_mixed)
+-- 
+2.43.0
+

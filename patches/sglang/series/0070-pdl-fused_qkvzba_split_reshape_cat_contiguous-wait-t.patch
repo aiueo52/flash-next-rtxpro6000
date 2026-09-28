@@ -1,0 +1,62 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: aiueo52 <aiueo52@users.noreply.github.com>
+Date: Sat, 5 Sep 2026 18:32:59 +0900
+Subject: [PATCH 070/105] pdl: fused_qkvzba_split_reshape_cat_contiguous
+ wait/trigger
+
+36 launches per W4 verify step (0.10 ms). Pure split/copy of the fused qkvz/ba
+GEMV output, so every load is dependent and the wait sits at the very top; the
+trigger is after the last store.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+---
+ .../kernels/ops/attention/triton_gdn_fused_proj.py     | 10 ++++++++++
+ 1 file changed, 10 insertions(+)
+
+diff --git a/python/sglang/kernels/ops/attention/triton_gdn_fused_proj.py b/python/sglang/kernels/ops/attention/triton_gdn_fused_proj.py
+index a9b5e199ca..a18fb72096 100644
+--- a/python/sglang/kernels/ops/attention/triton_gdn_fused_proj.py
++++ b/python/sglang/kernels/ops/attention/triton_gdn_fused_proj.py
+@@ -4,6 +4,8 @@ import torch
+ import triton
+ import triton.language as tl
+ 
++from sglang.kernels.triton_pdl import PDL, pdl_trigger, pdl_wait
++
+ from sglang.srt.utils import get_bool_env_var, is_hip
+ 
+ _is_hip = is_hip()
+@@ -178,8 +180,12 @@ def fused_qkvzba_split_reshape_cat_contiguous_kernel(
+     HEAD_QK: tl.constexpr,
+     HEAD_V: tl.constexpr,
+     V_POW2: tl.constexpr,
++    USE_PDL: tl.constexpr = False,
+ ):
+     i_bs, i_qk = tl.program_id(0), tl.program_id(1)
++    # Pure split/copy of the fused qkvz/ba GEMV output: every load is dependent,
++    # so the wait goes first and PDL only buys the scheduling ramp.
++    pdl_wait(USE_PDL)
+ 
+     V_PER_GROUP: tl.constexpr = NUM_HEADS_V // NUM_HEADS_QK
+ 
+@@ -267,6 +273,8 @@ def fused_qkvzba_split_reshape_cat_contiguous_kernel(
+         blk_a_st_ptr = a + i_bs * NUM_HEADS_V + i_qk * V_PER_GROUP + i
+         tl.store(blk_a_st_ptr, tl.load(blk_a_ptr))
+ 
++    pdl_trigger(USE_PDL)
++
+ 
+ def fused_qkvzba_split_reshape_cat_contiguous(
+     mixed_qkvz,
+@@ -351,6 +359,8 @@ def fused_qkvzba_split_reshape_cat_contiguous(
+         head_qk,
+         head_v,
+         V_POW2=(v_per_group & (v_per_group - 1)) == 0,
++        USE_PDL=PDL,
++        launch_pdl=PDL,
+         num_warps=num_warps,
+         num_stages=3,
+     )
+-- 
+2.43.0
+

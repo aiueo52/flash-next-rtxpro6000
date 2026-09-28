@@ -1,0 +1,377 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: aiueo52 <aiueo52@users.noreply.github.com>
+Date: Thu, 3 Sep 2026 05:16:56 +0900
+Subject: [PATCH 016/105] spec: remove per-draft-step glue in the topk=1 chain
+ with a hot-vocab map
+
+- draft_topk1_postprocess: optional hot_token_id map applied inside the
+  finalize kernel, so the direct draft_tokens_topk1 chain path (no per-step
+  select_top_k_tokens, no separate gather) now also covers
+  --speculative-token-map serving.
+- QSA MTP shared sparse-index lookup: one Triton kernel replaces the ~10
+  torch ops (gather/cast/arange/where/slice-assign) per draft step.
+- GPU tests: test/srt/speculative/test_draft_fuse.py (8 passed), existing
+  topk1 fastpath tests (9 passed).
+
+Implemented by Codex (gpt-5.6-sol) from DRAFT_FUSE_SPEC.md; reviewed and
+GPU-validated by the supervisor.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+---
+ .../sglang/kernels/ops/speculative/topk1.py   |  28 ++++-
+ .../attention/qwen_sparse_attn_backend.py     |  67 +++++++++++
+ .../sglang/srt/speculative/eagle_worker_v2.py |  17 ++-
+ test/srt/speculative/test_draft_fuse.py       | 113 ++++++++++++++++++
+ 4 files changed, 215 insertions(+), 10 deletions(-)
+ create mode 100644 test/srt/speculative/test_draft_fuse.py
+
+diff --git a/python/sglang/kernels/ops/speculative/topk1.py b/python/sglang/kernels/ops/speculative/topk1.py
+index 93f658f2a1..3f6d8aba9e 100644
+--- a/python/sglang/kernels/ops/speculative/topk1.py
++++ b/python/sglang/kernels/ops/speculative/topk1.py
+@@ -1,5 +1,7 @@
+ from __future__ import annotations
+ 
++from typing import Optional
++
+ import torch
+ import triton
+ import triton.language as tl
+@@ -44,10 +46,12 @@ def _draft_topk1_finalize_kernel(
+     topk_p,
+     topk_index,
+     positions,
++    hot_token_id,
+     draft_tokens,
+     draft_tokens_stride,
+     draft_token_column,
+     num_splits: tl.constexpr,
++    HAS_TOKEN_MAP: tl.constexpr,
+     WRITE_DRAFT_TOKEN: tl.constexpr,
+     BLOCK: tl.constexpr,
+ ):
+@@ -62,10 +66,11 @@ def _draft_topk1_finalize_kernel(
+ 
+     split = tl.argmax(vals, axis=0)
+     index = tl.load(partial_indices + row * num_splits + split).to(tl.int64)
+-    tl.store(topk_index + row, index)
++    token = tl.load(hot_token_id + index) if HAS_TOKEN_MAP else index
++    tl.store(topk_index + row, token)
+     tl.store(topk_p + row, 1.0)
+     if WRITE_DRAFT_TOKEN:
+-        tl.store(draft_tokens + row * draft_tokens_stride + draft_token_column, index)
++        tl.store(draft_tokens + row * draft_tokens_stride + draft_token_column, token)
+ 
+     position = tl.load(positions + row)
+     tl.store(positions + row, position + 1)
+@@ -76,6 +81,7 @@ def draft_topk1_postprocess(
+     positions: torch.Tensor,
+     draft_tokens: torch.Tensor | None = None,
+     draft_token_column: int = 0,
++    hot_token_id: Optional[torch.Tensor] = None,
+ ):
+     """Argmax draft logits for topk=1 and advance positions.
+ 
+@@ -83,10 +89,11 @@ def draft_topk1_postprocess(
+     GLM/DSV4 vocab widths in CUDA graph replay. This split reduction exposes
+     the vocab dimension across CTAs, then finalizes one token per row.
+ 
+-    If ``draft_tokens`` is given, the finalize kernel also stores the argmax
+-    into ``draft_tokens[:, draft_token_column]``, mutating the caller-owned
+-    buffer in place. ``topk_p`` is returned as constant 1.0: topk=1 drafting
+-    is greedy and the chain probabilities are unused downstream.
++    If ``hot_token_id`` is given, the argmax is mapped to a full-vocabulary
++    token ID in the finalize kernel. If ``draft_tokens`` is given, that token
++    is also stored into ``draft_tokens[:, draft_token_column]``, mutating the
++    caller-owned buffer in place. ``topk_p`` is returned as constant 1.0:
++    topk=1 drafting is greedy and the chain probabilities are unused downstream.
+     """
+     assert next_token_logits.ndim == 2
+     assert next_token_logits.stride(1) == 1
+@@ -94,6 +101,13 @@ def draft_topk1_postprocess(
+     assert positions.is_contiguous()
+     assert positions.shape[0] == next_token_logits.shape[0]
+     assert positions.device == next_token_logits.device
++    has_token_map = hot_token_id is not None
++    if has_token_map:
++        assert hot_token_id.ndim == 1
++        assert hot_token_id.dtype == torch.int64
++        assert hot_token_id.is_contiguous()
++        assert hot_token_id.device == next_token_logits.device
++        assert hot_token_id.shape[0] == next_token_logits.shape[1]
+     write_draft_token = draft_tokens is not None
+     if write_draft_token:
+         assert draft_tokens.ndim == 2
+@@ -139,10 +153,12 @@ def draft_topk1_postprocess(
+         topk_p,
+         topk_index,
+         positions,
++        hot_token_id if has_token_map else topk_index,
+         draft_tokens if write_draft_token else topk_index,
+         draft_tokens.stride(0) if write_draft_token else 0,
+         draft_token_column,
+         num_splits,
++        HAS_TOKEN_MAP=has_token_map,
+         WRITE_DRAFT_TOKEN=write_draft_token,
+         BLOCK=triton.next_power_of_2(num_splits),
+         num_warps=1,
+diff --git a/python/sglang/srt/layers/attention/qwen_sparse_attn_backend.py b/python/sglang/srt/layers/attention/qwen_sparse_attn_backend.py
+index 9a217a55d4..2a306c3df2 100644
+--- a/python/sglang/srt/layers/attention/qwen_sparse_attn_backend.py
++++ b/python/sglang/srt/layers/attention/qwen_sparse_attn_backend.py
+@@ -15,6 +15,8 @@ from typing import Dict, Optional, Tuple
+ import msgspec
+ import torch
+ import torch.nn.functional as F
++import triton
++import triton.language as tl
+ 
+ from sglang.srt.layers.attention.base_attn_backend import AttentionBackend
+ from sglang.srt.layers.attention.qsa.config import (
+@@ -45,6 +47,41 @@ logger = logging.getLogger(__name__)
+ _TRTLLM_SPARSE_PAGE_SIZE = 64
+ 
+ 
++@triton.jit
++def _mtp_shared_sparse_indices_lookup_kernel(
++    indices,
++    captured_len,
++    req_pool_indices,
++    current_positions,
++    out,
++    indices_row_stride,
++    req_pool_indices_stride,
++    current_positions_stride,
++    out_row_stride,
++    num_columns: tl.constexpr,
++    tail_width: tl.constexpr,
++    BLOCK: tl.constexpr,
++):
++    row = tl.program_id(0)
++    columns = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
++    column_mask = columns < num_columns
++    source_row = tl.load(req_pool_indices + row * req_pool_indices_stride).to(tl.int64)
++    frozen = tl.load(
++        indices + source_row * indices_row_stride + columns,
++        mask=column_mask,
++        other=0,
++    )
++
++    tail_start = num_columns - tail_width
++    tail_offset = columns - tail_start
++    base = tl.load(captured_len + source_row).to(tl.int64)
++    position = tl.load(current_positions + row * current_positions_stride).to(tl.int64)
++    tail_value = base + tail_offset
++    tail_value = tl.where(tail_value <= position, tail_value, -1)
++    value = tl.where(columns >= tail_start, tail_value, frozen)
++    tl.store(out + row * out_row_stride + columns, value, mask=column_mask)
++
++
+ @lru_cache(maxsize=1)
+ def _resolve_trtllm_sparse_decode():
+     """trtllm-gen paged decode for the post-gather sparse attention.
+@@ -181,6 +218,36 @@ class QSAMTPSharedSparseIndices:
+         downstream) where the gap is shorter than the tail width.
+         """
+         slot = self.layer_slots[int(layer_id)]
++        if self.indices.is_cuda:
++            indices = self.indices[slot]
++            captured_len = self.captured_len[slot]
++            num_rows = req_pool_indices.shape[0]
++            num_columns = indices.shape[1]
++            out = torch.empty(
++                (num_rows, num_columns), dtype=torch.int32, device=indices.device
++            )
++            if num_rows == 0:
++                return out
++            block = 256
++            _mtp_shared_sparse_indices_lookup_kernel[
++                (num_rows, triton.cdiv(num_columns, block))
++            ](
++                indices,
++                captured_len,
++                req_pool_indices,
++                current_positions,
++                out,
++                indices.stride(0),
++                req_pool_indices.stride(0),
++                current_positions.stride(0),
++                out.stride(0),
++                num_columns,
++                self.tail_width,
++                BLOCK=block,
++                num_warps=4,
++            )
++            return out
++
+         rows = req_pool_indices.to(torch.long)
+         out = self.indices[slot, rows]
+         base = self.captured_len[slot, rows].to(torch.int64)
+diff --git a/python/sglang/srt/speculative/eagle_worker_v2.py b/python/sglang/srt/speculative/eagle_worker_v2.py
+index 3203969a70..af5470d56e 100644
+--- a/python/sglang/srt/speculative/eagle_worker_v2.py
++++ b/python/sglang/srt/speculative/eagle_worker_v2.py
+@@ -728,7 +728,6 @@ class EagleDraftWorker(EagleDraftWorkerBase):
+         if (
+             topk1_chain_fits
+             and _is_cuda
+-            and self.hot_token_id is None
+             and not get_spec().speculative_use_rejection_sampling
+         ):
+             draft_tokens_topk1 = torch.empty(
+@@ -806,6 +805,11 @@ class EagleDraftWorker(EagleDraftWorkerBase):
+                             forward_batch.positions,
+                             draft_tokens_topk1,
+                             i + 1,
++                            hot_token_id=(
++                                self.hot_token_id
++                                if draft_tokens_topk1 is not None
++                                else None
++                            ),
+                         )
+                     else:
+                         topk_index = torch.argmax(
+@@ -821,13 +825,18 @@ class EagleDraftWorker(EagleDraftWorkerBase):
+                     )
+                     topk_p, topk_index = fast_topk(probs, self.topk, dim=-1)
+                     forward_batch.positions.add_(1)
++                topk_index_vocab_size = (
++                    self.target_worker.model_config.vocab_size
++                    if draft_tokens_topk1 is not None and self.hot_token_id is not None
++                    else logits_output.next_token_logits.shape[-1]
++                )
+                 maybe_detect_oob(
+                     topk_index,
+                     0,
+-                    logits_output.next_token_logits.shape[-1],
+-                    f"draft_forward step {i}: topk_index OOB vs vocab_size={logits_output.next_token_logits.shape[-1]}",
++                    topk_index_vocab_size,
++                    f"draft_forward step {i}: topk_index OOB vs vocab_size={topk_index_vocab_size}",
+                 )
+-                if self.hot_token_id is not None:
++                if self.hot_token_id is not None and draft_tokens_topk1 is None:
+                     topk_index = self.hot_token_id[topk_index]
+                 hidden_states = logits_output.hidden_states
+ 
+diff --git a/test/srt/speculative/test_draft_fuse.py b/test/srt/speculative/test_draft_fuse.py
+new file mode 100644
+index 0000000000..53d88f3141
+--- /dev/null
++++ b/test/srt/speculative/test_draft_fuse.py
+@@ -0,0 +1,113 @@
++import pytest
++import torch
++
++from sglang.kernels.ops.speculative.topk1 import draft_topk1_postprocess
++from sglang.srt.layers.attention.qwen_sparse_attn_backend import (
++    QSAMTPSharedSparseIndices,
++)
++
++pytestmark = pytest.mark.skipif(
++    not torch.cuda.is_available(), reason="CUDA is required"
++)
++
++
++@pytest.mark.parametrize("batch_size", [1, 4])
++@pytest.mark.parametrize("use_token_map", [False, True])
++def test_draft_topk1_finalize_matches_torch(batch_size, use_token_map):
++    device = torch.device("cuda")
++    hot_vocab_size = 32768
++    generator = torch.Generator(device=device).manual_seed(1234 + batch_size)
++    logits = torch.randn(
++        (batch_size, hot_vocab_size),
++        dtype=torch.float32,
++        device=device,
++        generator=generator,
++    )
++    # Make the maximum unique so the reference does not depend on tie-breaking.
++    expected_hot_index = torch.randint(
++        hot_vocab_size,
++        (batch_size, 1),
++        device=device,
++        generator=generator,
++    )
++    logits.scatter_(1, expected_hot_index, 1000.0)
++    expected_hot_index = torch.argmax(logits, dim=-1, keepdim=True)
++
++    hot_token_id = None
++    expected_token = expected_hot_index
++    if use_token_map:
++        hot_token_id = (
++            torch.randperm(
++                hot_vocab_size, device=device, generator=generator, dtype=torch.int64
++            )
++            + 100_000
++        )
++        expected_token = hot_token_id[expected_hot_index]
++
++    positions = torch.arange(batch_size, device=device, dtype=torch.int64)
++    expected_positions = positions + 1
++    draft_tokens = torch.full((batch_size, 3), -1, device=device, dtype=torch.int64)
++
++    topk_p, topk_index = draft_topk1_postprocess(
++        logits,
++        positions,
++        draft_tokens,
++        draft_token_column=1,
++        hot_token_id=hot_token_id,
++    )
++
++    torch.testing.assert_close(topk_index, expected_token, rtol=0, atol=0)
++    torch.testing.assert_close(draft_tokens[:, 1:2], expected_token, rtol=0, atol=0)
++    torch.testing.assert_close(draft_tokens[:, 0], torch.full_like(positions, -1))
++    torch.testing.assert_close(draft_tokens[:, 2], torch.full_like(positions, -1))
++    torch.testing.assert_close(topk_p, torch.ones_like(topk_p), rtol=0, atol=0)
++    torch.testing.assert_close(positions, expected_positions, rtol=0, atol=0)
++
++
++def _lookup_torch_reference(shared, req_pool_indices, current_positions, layer_id):
++    slot = shared.layer_slots[int(layer_id)]
++    rows = req_pool_indices.to(torch.long)
++    out = shared.indices[slot, rows]
++    base = shared.captured_len[slot, rows].to(torch.int64)
++    tail_offsets = torch.arange(shared.tail_width, device=out.device)
++    tail = base.unsqueeze(1) + tail_offsets.unsqueeze(0)
++    valid = tail <= current_positions.to(torch.int64).unsqueeze(1)
++    out[:, -shared.tail_width :] = torch.where(valid, tail, -1).to(out.dtype)
++    return out
++
++
++@pytest.mark.parametrize("batch_size", [1, 4])
++@pytest.mark.parametrize("index_dtype", [torch.int32, torch.int64])
++def test_mtp_shared_sparse_indices_lookup_matches_torch(batch_size, index_dtype):
++    device = torch.device("cuda")
++    num_requests = 10
++    token_topk = 2048
++    tail_width = 8
++    layer_id = 7
++    shared = QSAMTPSharedSparseIndices(
++        layer_ids=[layer_id],
++        num_requests=num_requests,
++        token_topk=token_topk,
++        tail_width=tail_width,
++        device=device,
++    )
++    generator = torch.Generator(device=device).manual_seed(4321 + batch_size)
++    shared.indices.random_(-1, 4096, generator=generator)
++    shared.captured_len.random_(32, 256, generator=generator)
++    req_pool_indices = torch.randperm(
++        num_requests, device=device, generator=generator, dtype=torch.int64
++    )[:batch_size].to(index_dtype)
++    slot = shared.layer_slots[layer_id]
++    bases = shared.captured_len[slot, req_pool_indices.to(torch.long)].to(index_dtype)
++    # Include truncated tails: row 0 admits none; remaining rows admit only a prefix.
++    admitted = torch.arange(batch_size, device=device, dtype=index_dtype) % tail_width
++    current_positions = bases + admitted - 1
++
++    expected = _lookup_torch_reference(
++        shared, req_pool_indices, current_positions, layer_id
++    )
++    actual = shared.lookup(req_pool_indices, current_positions, layer_id)
++
++    assert actual.dtype == torch.int32
++    assert actual.shape == (batch_size, token_topk + tail_width)
++    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+-- 
+2.43.0
+

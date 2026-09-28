@@ -1,0 +1,194 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: aiueo52 <aiueo52@users.noreply.github.com>
+Date: Thu, 3 Sep 2026 06:40:27 +0900
+Subject: [PATCH 022/105] mtp: make the mtp_dense weight-only FP8 category
+ reach the in-model MTP draft
+
+With --speculative-draft-model-quantization modelopt_fp4 the draft is built
+with the non-serialized _ModelOptFp4OnlineConfig, whose get_quant_method left
+every Linear layer unquantized, so the opt-in mtp_dense category never applied
+(draft q/o/shared-expert projections stayed BF16 cuBLAS). _mtp_quant_config now
+marks that draft config and the online adapter routes marked LinearBase layers
+through the Qwen4ExpDenseFp8LinearMethod (W8A16 Triton gemv) via a host
+ModelOptFp4Config for bookkeeping. The MTP router stays BF16 (FP8 routing
+lowers acceptance).
+
+W16 code-edit: draft phase 4.93 -> 4.18 ms/step, 4 modules 109 MB -> 55 MB;
+greedy acceptance unchanged (code 10.8-11.5, prose 2.7, agent 5.2-5.6), needle PASS.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+---
+ .../srt/layers/quantization/modelopt_quant.py | 46 ++++++++++++++++---
+ .../srt/layers/quantization/nvfp4_online.py   | 27 +++++++++++
+ python/sglang/srt/models/qwen3_5_mtp.py       | 21 ++++++++-
+ python/sglang/srt/qwen4_exp_dense_fp8.py      |  5 +-
+ 4 files changed, 90 insertions(+), 9 deletions(-)
+
+diff --git a/python/sglang/srt/layers/quantization/modelopt_quant.py b/python/sglang/srt/layers/quantization/modelopt_quant.py
+index 8f0a7b4b33..860e0d9a6e 100755
+--- a/python/sglang/srt/layers/quantization/modelopt_quant.py
++++ b/python/sglang/srt/layers/quantization/modelopt_quant.py
+@@ -1508,12 +1508,26 @@ class ModelOptFp4Config(ModelOptQuantConfig):
+         self._qwen4_exp_dense_fp8_categories = enabled_categories
+         return select_qwen4_exp_dense_fp8_category(prefix, enabled_categories)
+ 
+-    def _get_excluded_linear_method(
+-        self, layer: torch.nn.Module, prefix: str
+-    ) -> LinearMethodBase:
+-        category = self.qwen4_exp_dense_fp8_category(prefix)
+-        if category is None:
+-            return super()._get_excluded_linear_method(layer, prefix)
++    def _qwen4_exp_mtp_dense_category(self, prefix: str) -> Optional[str]:
++        """`mtp_dense` category for the non-serialized MTP draft config.
++
++        The draft registers its modules without an "mtp" prefix segment
++        (weights are remapped mtp.* -> model.*), so one is prepended for the
++        category selector's MTP rules.
++        """
++        try:
++            enabled = get_model().qwen4_exp_dense_fp8
++        except Exception:
++            return None
++        if enabled is None:
++            return None
++        enabled_categories = parse_qwen4_exp_dense_fp8_categories(enabled)
++        self._qwen4_exp_dense_fp8_categories = enabled_categories
++        if "mtp" not in prefix.split("."):
++            prefix = f"mtp.{prefix}"
++        return select_qwen4_exp_dense_fp8_category(prefix, enabled_categories)
++
++    def _qwen4_exp_dense_fp8_linear_method(self, category: str) -> LinearMethodBase:
+         if self._qwen4_exp_dense_fp8_config is None:
+             self._qwen4_exp_dense_fp8_config = Fp8Config(
+                 is_checkpoint_fp8_serialized=False,
+@@ -1526,6 +1540,14 @@ class ModelOptFp4Config(ModelOptQuantConfig):
+             fp8_config=self._qwen4_exp_dense_fp8_config,
+         )
+ 
++    def _get_excluded_linear_method(
++        self, layer: torch.nn.Module, prefix: str
++    ) -> LinearMethodBase:
++        category = self.qwen4_exp_dense_fp8_category(prefix)
++        if category is None:
++            return super()._get_excluded_linear_method(layer, prefix)
++        return self._qwen4_exp_dense_fp8_linear_method(category)
++
+     def _record_qwen4_exp_dense_fp8_module(
+         self, category: str, before_bytes: int, after_bytes: int
+     ) -> None:
+@@ -1729,7 +1751,17 @@ class ModelOptFp4Config(ModelOptQuantConfig):
+ 
+         if not self.is_checkpoint_nvfp4_serialized:
+             if isinstance(layer, (LinearBase, ParallelLMHead)):
+-                # Load-time quantization applies only to MoE weights.
++                # Load-time quantization applies only to MoE weights -- except
++                # the opt-in Qwen4-Exp `mtp_dense` category: the in-model MTP
++                # draft is built with a non-serialized modelopt_fp4 config
++                # (--speculative-draft-model-quantization modelopt_fp4), so
++                # its dense projections would otherwise stay BF16 cuBLAS.
++                if isinstance(layer, LinearBase) and getattr(
++                    self, "_qwen4_exp_mtp_draft", False
++                ):
++                    category = self._qwen4_exp_mtp_dense_category(prefix)
++                    if category is not None:
++                        return self._qwen4_exp_dense_fp8_linear_method(category)
+                 return UnquantizedLinearMethod()
+             if isinstance(layer, FusedMoE):
+                 if self.is_layer_excluded(prefix):
+diff --git a/python/sglang/srt/layers/quantization/nvfp4_online.py b/python/sglang/srt/layers/quantization/nvfp4_online.py
+index 3ad711f960..7203e1823c 100644
+--- a/python/sglang/srt/layers/quantization/nvfp4_online.py
++++ b/python/sglang/srt/layers/quantization/nvfp4_online.py
+@@ -167,6 +167,33 @@ class _ModelOptFp4OnlineConfig(NvFp4OnlineConfig):
+     is_nvfp4_online = False
+     _use_per_token_activation = False
+ 
++    def get_quant_method(self, layer: torch.nn.Module, prefix: str):
++        from sglang.srt.layers.linear import LinearBase
++
++        # Qwen4-Exp in-model MTP draft (marked by qwen3_5_mtp._mtp_quant_config):
++        # route its dense projections to the opt-in `mtp_dense` weight-only FP8
++        # category instead of leaving them BF16. Weight stats/summary live on a
++        # host ModelOptFp4Config so the FP8 method's bookkeeping is unchanged.
++        if isinstance(layer, LinearBase) and getattr(
++            self, "_qwen4_exp_mtp_draft", False
++        ):
++            host = getattr(self, "_qwen4_exp_dense_fp8_host", None)
++            if host is None:
++                from sglang.srt.layers.quantization.modelopt_quant import (
++                    ModelOptFp4Config,
++                )
++
++                host = ModelOptFp4Config(
++                    is_checkpoint_nvfp4_serialized=False,
++                    packed_modules_mapping=self.packed_modules_mapping,
++                )
++                host._qwen4_exp_mtp_draft = True
++                self._qwen4_exp_dense_fp8_host = host
++            category = host._qwen4_exp_mtp_dense_category(prefix)
++            if category is not None:
++                return host._qwen4_exp_dense_fp8_linear_method(category)
++        return super().get_quant_method(layer, prefix)
++
+     @classmethod
+     def get_name(cls) -> str:
+         return "modelopt_fp4"
+diff --git a/python/sglang/srt/models/qwen3_5_mtp.py b/python/sglang/srt/models/qwen3_5_mtp.py
+index d5e98b8ba9..1c40535703 100644
+--- a/python/sglang/srt/models/qwen3_5_mtp.py
++++ b/python/sglang/srt/models/qwen3_5_mtp.py
+@@ -57,6 +57,18 @@ def _mtp_quant_config(quant_config):
+     # Serialized Qwen3.5 ModelOpt checkpoints keep embedded MTP weights in
+     # BF16. Disable quantization for those checkpoints; non-serialized
+     # modelopt_fp4 still converts MoE expert weights on load.
++    if (
++        quant_config
++        and quant_config.get_name() == "modelopt_fp4"
++        and not getattr(quant_config, "is_checkpoint_nvfp4_serialized", True)
++    ):
++        # Non-serialized modelopt_fp4 (the in-model MTP draft built with
++        # --speculative-draft-model-quantization modelopt_fp4): mark the config
++        # so ModelOptFp4Config.get_quant_method can route the draft's dense
++        # projections to the opt-in `mtp_dense` FP8 category. The draft's
++        # module prefixes do not carry an "mtp" segment.
++        quant_config._qwen4_exp_mtp_draft = True
++        logger.info("mtp quant config: non-serialized modelopt_fp4 draft config")
+     if quant_config and (
+         quant_config.get_name() == "modelopt_mixed"
+         or (
+@@ -77,8 +89,15 @@ def _mtp_quant_config(quant_config):
+             categories = parse_qwen4_exp_dense_fp8_categories(
+                 get_model().qwen4_exp_dense_fp8
+             )
+-        except Exception:
++        except Exception as exc:  # pragma: no cover - diagnostic
++            logger.info("mtp quant config: dense-FP8 categories unavailable (%r)", exc)
+             categories = frozenset()
++        logger.info(
++            "mtp quant config: checkpoint=%s categories=%s -> %s",
++            quant_config.get_name(),
++            sorted(categories),
++            "modelopt(mtp_dense)" if "mtp_dense" in categories else "None(bf16)",
++        )
+         if "mtp_dense" in categories:
+             return quant_config
+         return None
+diff --git a/python/sglang/srt/qwen4_exp_dense_fp8.py b/python/sglang/srt/qwen4_exp_dense_fp8.py
+index adb3e68ef5..542f4d1e51 100644
+--- a/python/sglang/srt/qwen4_exp_dense_fp8.py
++++ b/python/sglang/srt/qwen4_exp_dense_fp8.py
+@@ -102,7 +102,10 @@ def select_qwen4_exp_dense_fp8_category(
+         # The MTP draft layer's dense projections (attn q/k/v/o, fc_embedding,
+         # fc_hidden, shared expert, router) are one opt-in category; its
+         # hyper-connection mix stays on the fused BF16 kernel.
+-        if category in {"attn", "shared_expert", "mlp_gates", "mtp_dense"}:
++        # The MTP router (`mlp.gate`) stays BF16: FP8 routing flips expert
++        # choices and lowers draft acceptance (as it did for the target's
++        # `mlp_gates` category).
++        if category in {"attn", "shared_expert", "mtp_dense"}:
+             category = "mtp_dense"
+         else:
+             return None
+-- 
+2.43.0
+

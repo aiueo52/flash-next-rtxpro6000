@@ -1,0 +1,425 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: aiueo52 <aiueo52@users.noreply.github.com>
+Date: Sat, 5 Sep 2026 17:23:14 +0900
+Subject: [PATCH 063/105] adaptive: post-switch grace window + retuned
+ two-state config
+
+Measured on Qwen3.8-Flash-Next: a swap leaves the draft cold (its per-step
+KV branches and the state's QSA shared-index buffer were built for the other
+step count), so the verifies right after it under-report acceptance. With a
+5-batch decision interval the controller was reading its own transient and
+flipping back every interval.
+
+- AdaptiveStepSlot.switch_grace_batches: hold decisions for N batches after
+  a switch. The EMA keeps updating through the window; only the decision is
+  deferred, so the next one sees the new setting's steady state.
+- adaptive_w16_3_15.json: ema_alpha 0.1, update_interval 20,
+  switch_grace_batches 40, no EMA reseed (the carried EMA is what lets the
+  window measure rather than probe).
+- dbg/sim.py: offline controller simulation against the measured
+  per-workload accept distributions and the 9.74 + 0.70*S ms/iteration cost
+  model; reproduces the fixed-profile throughputs within 5%.
+- SGLANG_ADAPTIVE_DEBUG=1 logs what the EMA actually saw per decision
+  (samples seen/kept, mean, histogram) -- how the ping-pong was diagnosed.
+- Two upstream unit tests fed accept counts above the live step count, which
+  the stale-sample filter now drops; retargeted them at reachable values.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+---
+ adaptive_w16_3_15.json                        |   9 +-
+ dbg/pin15.json                                |   1 +
+ dbg/pin3.json                                 |   1 +
+ dbg/sim.py                                    | 103 ++++++++++++++++++
+ dbg/w16_3_15.json                             |   9 +-
+ .../srt/speculative/adaptive_spec_params.py   |  47 ++++++++
+ .../test_adaptive_runtime_state_sizing.py     |  32 +++---
+ .../unit/spec/test_adaptive_spec_params.py    |  27 +++--
+ 8 files changed, 199 insertions(+), 30 deletions(-)
+ create mode 100644 dbg/pin15.json
+ create mode 100644 dbg/pin3.json
+ create mode 100644 dbg/sim.py
+
+diff --git a/adaptive_w16_3_15.json b/adaptive_w16_3_15.json
+index 5e1933b4d5..fab7e65916 100644
+--- a/adaptive_w16_3_15.json
++++ b/adaptive_w16_3_15.json
+@@ -1,12 +1,13 @@
+ {
+   "1": {
+     "candidate_steps": [3, 15],
+-    "ema_alpha": 0.2,
+-    "update_interval": 5,
+-    "warmup_batches": 10,
++    "ema_alpha": 0.1,
++    "update_interval": 20,
++    "warmup_batches": 15,
++    "switch_grace_batches": 40,
+     "down_hysteresis": 3.5,
+     "up_hysteresis": 0.0,
+     "ceiling_coeff": 0,
+-    "reset_ema_on_switch": true
++    "reset_ema_on_switch": false
+   }
+ }
+diff --git a/dbg/pin15.json b/dbg/pin15.json
+new file mode 100644
+index 0000000000..d35296ae09
+--- /dev/null
++++ b/dbg/pin15.json
+@@ -0,0 +1 @@
++{"1": {"candidate_steps": [3, 15], "ema_alpha": 0.1, "update_interval": 20, "warmup_batches": 15, "down_hysteresis": -20.0, "up_hysteresis": 0.0}}
+diff --git a/dbg/pin3.json b/dbg/pin3.json
+new file mode 100644
+index 0000000000..f2b8f0b173
+--- /dev/null
++++ b/dbg/pin3.json
+@@ -0,0 +1 @@
++{"1": {"candidate_steps": [3, 15], "ema_alpha": 0.1, "update_interval": 20, "warmup_batches": 15, "down_hysteresis": 20.0, "up_hysteresis": 20.0}}
+diff --git a/dbg/sim.py b/dbg/sim.py
+new file mode 100644
+index 0000000000..ea4a0a7c73
+--- /dev/null
++++ b/dbg/sim.py
+@@ -0,0 +1,103 @@
++"""Offline controller simulation with realistic per-batch accept distributions.
++
++Distributions are shaped from the 2026-09-05 debug histograms (bimodal on
++code-edit) and normalised to the measured fixed-profile means:
++  drafts@15: code 10.85 agent 4.59 prose-en 1.99 prose-ja 1.64
++  drafts@3 : code  2.77 agent 2.22 prose-en 1.50 prose-ja 1.46
++"""
++import random, sys, json
++sys.path.insert(0, "python")
++from sglang.srt.speculative.adaptive_spec_params import AdaptiveStepSlot
++
++def pool(mean, steps, spread):  # noqa
++    """A bimodal pool of integers in [0, steps] with the given mean."""
++    if spread:   # bimodal: full chain or a short one
++        hi, lo = steps, max(0, steps // 5)
++        p = (mean - lo) / (hi - lo)
++        return lambda r: hi if r.random() < p else lo
++    return lambda r: min(steps, max(0, round(r.gauss(mean, 0.9))))
++
++WL = {  # name -> {steps: (mean, bimodal)}
++    "code-edit": {15: (10.85, True), 3: (2.77, True)},
++    "agent-loop": {15: (4.59, True), 3: (2.22, False)},
++    "prose-en": {15: (1.99, False), 3: (1.50, False)},
++    "prose-ja": {15: (1.64, False), 3: (1.46, False)},
++}
++# Cost model: ms/iteration = 9.74 + 0.70*S (prof/OVERHEAD_REPORT.md)
++STEP_MS = lambda s: 9.74 + 0.70 * s
++import os
++SWITCH_PENALTY_BATCHES = int(os.environ.get("SWPEN", "2"))  # cold batches after a swap
++
++def run(cfg, wl, batches=600, lag=2, seed=0):
++    r = random.Random(seed)
++    draws = {s: pool(WL[wl][s][0], s, WL[wl][s][1]) for s in (3, 15)}
++    slot = AdaptiveStepSlot(initial_steps=15, cfg=dict(cfg))
++    inflight = [slot.current_steps] * lag
++    switches = 0
++    tokens = 0.0
++    ms = 0.0
++    cold = 0
++    prev = slot.current_steps
++    for _ in range(batches):
++        live = slot.current_steps
++        n = draws[live](r)
++        if cold:                      # post-switch cold draft state
++            n = min(n, 1); cold -= 1
++        tokens += n + 1
++        ms += STEP_MS(live)
++        produced_by = inflight.pop(0)
++        slot.update([draws[produced_by](r) if produced_by != live else n])
++        inflight.append(slot.current_steps)
++        if slot.current_steps != prev:
++            switches += 1; cold = SWITCH_PENALTY_BATCHES; prev = slot.current_steps
++    return switches, tokens / ms * 1000, slot.current_steps
++
++def fixed(wl, steps, batches=600, seed=0):
++    r = random.Random(seed)
++    d = pool(WL[wl][steps][0], steps, WL[wl][steps][1])
++    tok = sum(d(r) + 1 for _ in range(batches))
++    return tok / (batches * STEP_MS(steps)) * 1000
++
++cfgs = {
++  "v1 (a2, shipped)": {"candidate_steps":[3,15],"ema_alpha":0.2,"update_interval":5,
++                       "warmup_batches":10,"down_hysteresis":3.5,"up_hysteresis":0.0,
++                       "reset_ema_on_switch":True},
++  "v2 alpha.1/int20": {"candidate_steps":[3,15],"ema_alpha":0.1,"update_interval":20,
++                       "warmup_batches":15,"down_hysteresis":3.5,"up_hysteresis":0.0,
++                       "reset_ema_on_switch":True},
++  "v3 grace40/noreseed": {"candidate_steps":[3,15],"ema_alpha":0.1,"update_interval":20,
++                       "warmup_batches":15,"switch_grace_batches":40,"down_hysteresis":3.5,
++                       "up_hysteresis":0.0,"reset_ema_on_switch":False},
++}
++for name, cfg in cfgs.items():
++    print(f"--- {name}")
++    for wl in WL:
++        rows = [run(cfg, wl, seed=s) for s in range(5)]
++        sw = sum(r[0] for r in rows)/5; tps = sum(r[1] for r in rows)/5
++        end = [r[2] for r in rows]
++        f3 = sum(fixed(wl,3,seed=s) for s in range(5))/5
++        f15 = sum(fixed(wl,15,seed=s) for s in range(5))/5
++        print(f"  {wl:11s} switches={sw:5.1f} tps={tps:6.0f}  (W4 {f3:.0f} / W16 {f15:.0f}) end={end}")
++
++print("\n=== warm start: controller already settled at steps=3, then this workload arrives")
++for name, cfg in cfgs.items():
++    print(f"--- {name}")
++    for wl in WL:
++        res=[]
++        for seed in range(5):
++            r = random.Random(seed)
++            draws = {s: pool(WL[wl][s][0], s, WL[wl][s][1]) for s in (3, 15)}
++            slot = AdaptiveStepSlot(initial_steps=15, cfg=dict(cfg))
++            slot.current_steps = 3; slot.ema_accept_len = 1.5; slot._batch_count = 100
++            inflight=[3,3]; sw=0; tok=0.0; ms=0.0; cold=0; prev=3
++            for _ in range(600):
++                live=slot.current_steps; n=draws[live](r)
++                if cold: n=min(n,1); cold-=1
++                tok+=n+1; ms+=STEP_MS(live)
++                pb=inflight.pop(0)
++                slot.update([draws[pb](r) if pb!=live else n]); inflight.append(slot.current_steps)
++                if slot.current_steps!=prev: sw+=1; cold=SWITCH_PENALTY_BATCHES; prev=slot.current_steps
++            res.append((sw, tok/ms*1000, slot.current_steps))
++        sw=sum(x[0] for x in res)/5; tps=sum(x[1] for x in res)/5
++        f3=sum(fixed(wl,3,seed=s) for s in range(5))/5; f15=sum(fixed(wl,15,seed=s) for s in range(5))/5
++        print(f"  {wl:11s} switches={sw:5.1f} tps={tps:6.0f}  (W4 {f3:.0f} / W16 {f15:.0f}) end={[x[2] for x in res]}")
+diff --git a/dbg/w16_3_15.json b/dbg/w16_3_15.json
+index 5e1933b4d5..fab7e65916 100644
+--- a/dbg/w16_3_15.json
++++ b/dbg/w16_3_15.json
+@@ -1,12 +1,13 @@
+ {
+   "1": {
+     "candidate_steps": [3, 15],
+-    "ema_alpha": 0.2,
+-    "update_interval": 5,
+-    "warmup_batches": 10,
++    "ema_alpha": 0.1,
++    "update_interval": 20,
++    "warmup_batches": 15,
++    "switch_grace_batches": 40,
+     "down_hysteresis": 3.5,
+     "up_hysteresis": 0.0,
+     "ceiling_coeff": 0,
+-    "reset_ema_on_switch": true
++    "reset_ema_on_switch": false
+   }
+ }
+diff --git a/python/sglang/srt/speculative/adaptive_spec_params.py b/python/sglang/srt/speculative/adaptive_spec_params.py
+index fe0d1ffdd7..c2b7df08c4 100644
+--- a/python/sglang/srt/speculative/adaptive_spec_params.py
++++ b/python/sglang/srt/speculative/adaptive_spec_params.py
+@@ -9,6 +9,7 @@ import bisect
+ import json
+ import logging
+ import math
++import os
+ from functools import cached_property
+ from typing import TYPE_CHECKING
+ 
+@@ -171,6 +172,16 @@ class AdaptiveStepSlot:
+         # candidate, and turns a switch into a probe that the next update
+         # confirms or undoes. Off by default (upstream behaviour).
+         self.reset_ema_on_switch = cfg.get("reset_ema_on_switch", False)
++        # Batches after a switch during which no new decision may be taken.
++        # A swap leaves the draft model cold (its per-step KV branches and the
++        # state's QSA shared-index buffers were captured for the other step
++        # count), so the first verifies after it under-report acceptance. With
++        # a short decision interval the controller reads its own transient,
++        # decides the new setting is bad, switches back -- and never observes
++        # either setting's steady state. The EMA keeps updating through the
++        # grace window; only the decision is held.
++        self.switch_grace_batches = cfg.get("switch_grace_batches", 0)
++        self._grace_until = 0
+ 
+         if initial_steps in self.candidate_steps:
+             self.current_steps = initial_steps
+@@ -180,6 +191,17 @@ class AdaptiveStepSlot:
+         # Initialize EMA at current steps - 1 (neutral starting point)
+         self.ema_accept_len = float(self.current_steps - 1)
+         self._batch_count = 0
++        # Debug accounting (SGLANG_ADAPTIVE_DEBUG=1): what the EMA actually saw
++        # since the last decision.
++        self._dbg = os.environ.get("SGLANG_ADAPTIVE_DEBUG", "") == "1"
++        self._dbg_reset()
++
++    def _dbg_reset(self) -> None:
++        self._dbg_n = 0
++        self._dbg_kept = 0
++        self._dbg_sum = 0.0
++        self._dbg_dropped_sum = 0.0
++        self._dbg_hist: dict[int, int] = {}
+ 
+     def update(self, num_correct_drafts_per_req: list[int]) -> bool:
+         """Update EMA with observed accept lengths. Returns True if params changed.
+@@ -204,6 +226,13 @@ class AdaptiveStepSlot:
+             fresh = [
+                 n for n in num_correct_drafts_per_req if n <= self.current_steps
+             ]
++            if self._dbg:
++                self._dbg_n += len(num_correct_drafts_per_req)
++                self._dbg_kept += len(fresh)
++                self._dbg_sum += sum(fresh)
++                self._dbg_dropped_sum += sum(num_correct_drafts_per_req) - sum(fresh)
++                for n in num_correct_drafts_per_req:
++                    self._dbg_hist[n] = self._dbg_hist.get(n, 0) + 1
+             if fresh:
+                 batch_avg = sum(fresh) / len(fresh)
+                 self.ema_accept_len = (
+@@ -214,9 +243,26 @@ class AdaptiveStepSlot:
+         if self._batch_count <= self.warmup_batches:
+             return False
+ 
++        if self._batch_count < self._grace_until:
++            return False
++
+         if (self._batch_count - self.warmup_batches) % self.update_interval != 0:
+             return False
+ 
++        if self._dbg:
++            kept_avg = self._dbg_sum / self._dbg_kept if self._dbg_kept else float("nan")
++            logger.info(
++                "[adaptive-dbg] steps=%d batch=%d ema=%.2f seen=%d kept=%d "
++                "kept_avg=%.2f hist=%s",
++                self.current_steps,
++                self._batch_count,
++                self.ema_accept_len,
++                self._dbg_n,
++                self._dbg_kept,
++                kept_avg,
++                sorted(self._dbg_hist.items()),
++            )
++            self._dbg_reset()
+         return self._recompute_params()
+ 
+     def _recompute_params(self) -> bool:
+@@ -273,6 +319,7 @@ class AdaptiveStepSlot:
+         if target != old_steps:
+             decided_at = self.ema_accept_len
+             self.current_steps = target
++            self._grace_until = self._batch_count + self.switch_grace_batches
+             if self.reset_ema_on_switch and target > 0:
+                 self.ema_accept_len = float(target - 1)
+             log_info_on_rank0(
+diff --git a/test/registered/unit/spec/test_adaptive_runtime_state_sizing.py b/test/registered/unit/spec/test_adaptive_runtime_state_sizing.py
+index 444c46921d..5049f66ce3 100644
+--- a/test/registered/unit/spec/test_adaptive_runtime_state_sizing.py
++++ b/test/registered/unit/spec/test_adaptive_runtime_state_sizing.py
+@@ -127,17 +127,18 @@ class TestDraftExtendGraphStateNoShrink(CustomTestCase):
+         self.assertEqual(backend.calls, [(2, 8)])
+ 
+ 
+-class TestResetEmaOnSwitch(CustomTestCase):
++class TestControllerSettles(CustomTestCase):
+     """The shipped w16_3_15 controller must settle, not oscillate."""
+ 
+     CFG = {
+         "candidate_steps": [3, 15],
+-        "ema_alpha": 0.2,
+-        "update_interval": 5,
+-        "warmup_batches": 10,
++        "ema_alpha": 0.1,
++        "update_interval": 20,
++        "warmup_batches": 15,
++        "switch_grace_batches": 40,
+         "down_hysteresis": 3.5,
+         "up_hysteresis": 0.0,
+-        "reset_ema_on_switch": True,
++        "reset_ema_on_switch": False,
+     }
+ 
+     LAG = 2  # verify results reach the controller this many batches late
+@@ -199,17 +200,20 @@ class TestResetEmaOnSwitch(CustomTestCase):
+                 switches = sum(a != b for a, b in zip(trace, trace[1:]))
+                 self.assertLessEqual(switches, 4, f"{name}: {switches} switches")
+ 
+-    def test_without_reset_the_same_config_oscillates(self):
++    def test_grace_window_holds_decisions_after_a_switch(self):
++        """No second decision until the post-switch transient has passed."""
+         cfg = dict(self.CFG)
+-        cfg["reset_ema_on_switch"] = False
+         slot = AdaptiveStepSlot(initial_steps=15, cfg=cfg)
+-        trace = []
+-        for _ in range(200):
+-            slot.update([{15: 1.96, 3: 1.54}[slot.current_steps]])
+-            trace.append(slot.current_steps)
+-        # Documents why the reset exists: the shared EMA carries a steps=15
+-        # reading into steps=3, where it reads as a near-perfect chain.
+-        self.assertGreater(len(set(trace[:60])), 1)
++        # Force a switch, then feed values that would otherwise decide again.
++        while slot.current_steps == 15:
++            slot.update([1.0])
++        switched_at = slot._batch_count
++        for _ in range(cfg["switch_grace_batches"] - 1):
++            self.assertFalse(slot.update([3.0]), "decided inside the grace window")
++        self.assertEqual(slot.current_steps, 3)
++        self.assertGreaterEqual(
++            slot._grace_until - switched_at, cfg["switch_grace_batches"] - 1
++        )
+ 
+ 
+ if __name__ == "__main__":
+diff --git a/test/registered/unit/spec/test_adaptive_spec_params.py b/test/registered/unit/spec/test_adaptive_spec_params.py
+index 6cb71f1fbf..fb50015d73 100644
+--- a/test/registered/unit/spec/test_adaptive_spec_params.py
++++ b/test/registered/unit/spec/test_adaptive_spec_params.py
+@@ -141,14 +141,18 @@ class TestAdaptiveStepSlot(unittest.TestCase):
+                 "ema_alpha": 1.0,
+                 "warmup_batches": 0,
+                 "update_interval": 1,
+-                "up_hysteresis": 0.75,
++                # Thresholds must stay inside the reachable range: at
++                # steps=3 a verify accepts at most 3 drafts, so anything
++                # above that is not an observable reading (update() drops
++                # such samples as stale leftovers from a previous step count).
++                "up_hysteresis": 0.25,
+             },
+         )
+ 
+-        self.assertFalse(params.update([3, 3]))
++        self.assertFalse(params.update([2, 2]))
+         self.assertEqual(params.current_steps, 3)
+ 
+-        self.assertTrue(params.update([4, 4]))
++        self.assertTrue(params.update([3, 3]))
+         self.assertEqual(params.current_steps, 7)
+ 
+     def test_down_hysteresis_can_prevent_premature_downshift(self):
+@@ -182,21 +186,28 @@ class TestAdaptiveStepSlot(unittest.TestCase):
+             },
+         )
+ 
+-        self.assertTrue(params.update([4, 4]))
++        # steps=3 caps an observable reading at 3 accepted drafts, so the
++        # ramp up needs two full-chain batches (ema 2.0 -> 2.5 -> 2.75) to
++        # clear the 2.5 step-up threshold.
++        self.assertFalse(params.update([3, 3]))
++        self.assertEqual(params.current_steps, 3)
++        self.assertEqual(params.ema_accept_len, 2.5)
++
++        self.assertTrue(params.update([3, 3]))
+         self.assertEqual(params.current_steps, 7)
+-        self.assertEqual(params.ema_accept_len, 3.0)
++        self.assertEqual(params.ema_accept_len, 2.75)
+ 
+         self.assertTrue(params.update([0, 0]))
+         self.assertEqual(params.current_steps, 3)
+-        self.assertEqual(params.ema_accept_len, 1.5)
++        self.assertEqual(params.ema_accept_len, 1.375)
+ 
+         self.assertFalse(params.update([0, 0]))
+         self.assertEqual(params.current_steps, 3)
+-        self.assertEqual(params.ema_accept_len, 0.75)
++        self.assertEqual(params.ema_accept_len, 0.6875)
+ 
+         self.assertTrue(params.update([0, 0]))
+         self.assertEqual(params.current_steps, 1)
+-        self.assertEqual(params.ema_accept_len, 0.375)
++        self.assertEqual(params.ema_accept_len, 0.34375)
+ 
+     def test_zero_step_mixed_slot_drops_probes_and_rechecks(self):
+         params = self._make_params_from_config(
+-- 
+2.43.0
+

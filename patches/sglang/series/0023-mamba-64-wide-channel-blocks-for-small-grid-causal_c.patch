@@ -1,0 +1,68 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: aiueo52 <aiueo52@users.noreply.github.com>
+Date: Thu, 3 Sep 2026 07:10:26 +0900
+Subject: [PATCH 023/105] mamba: 64-wide channel blocks for small-grid
+ causal_conv1d_update
+
+grid = (batch, cdiv(dim, BLOCK_N)); at batch=1, dim=10240 the 256-wide block
+left only 40 CTAs for the serial per-timestep loop and the 16-token target
+verify update took 18.8us per GDN layer. 64-wide blocks (160 CTAs) take 6.2us
+with identical math: 0.76 -> 0.26 ms per W16 decode step. Small grids
+(batch * cdiv(dim, 256) < 128) now use 64; SGLANG_CONV1D_UPDATE_BLOCK_N overrides.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+---
+ .../kernels/ops/mamba/causal_conv1d_triton.py | 23 ++++++++++++++++++-
+ 1 file changed, 22 insertions(+), 1 deletion(-)
+
+diff --git a/python/sglang/kernels/ops/mamba/causal_conv1d_triton.py b/python/sglang/kernels/ops/mamba/causal_conv1d_triton.py
+index 4e789ce2e3..8d9a0efb4b 100644
+--- a/python/sglang/kernels/ops/mamba/causal_conv1d_triton.py
++++ b/python/sglang/kernels/ops/mamba/causal_conv1d_triton.py
+@@ -6,6 +6,8 @@
+ 
+ from typing import List, Optional, Union
+ 
++import os
++
+ import torch
+ import triton
+ import triton.language as tl
+@@ -15,6 +17,25 @@ from sglang.kernels.jit.utils import is_arch_support_pdl
+ PAD_SLOT_ID = -1
+ 
+ 
++# Channel block of the decode/verify update kernel. The grid is
++# (batch, cdiv(dim, BLOCK_N)): at batch=1 with dim=10240 a 256-wide block
++# gives only 40 CTAs for the serial per-timestep loop, so the 16-token
++# target-verify update took 18.8us; 64-wide blocks (160 CTAs) take 6.2us with
++# identical math (measured on RTX PRO 6000, 2026-09-03). Small grids therefore
++# use 64; large batches keep 256. Override with SGLANG_CONV1D_UPDATE_BLOCK_N.
++_UPDATE_BLOCK_N_ENV = os.environ.get("SGLANG_CONV1D_UPDATE_BLOCK_N")
++_UPDATE_BLOCK_N_SMALL_GRID = 64
++_UPDATE_BLOCK_N_LARGE_GRID = 256
++
++
++def _update_block_n(batch: int, dim: int) -> int:
++    if _UPDATE_BLOCK_N_ENV:
++        return int(_UPDATE_BLOCK_N_ENV)
++    if batch * triton.cdiv(dim, _UPDATE_BLOCK_N_LARGE_GRID) < 128:
++        return _UPDATE_BLOCK_N_SMALL_GRID
++    return _UPDATE_BLOCK_N_LARGE_GRID
++
++
+ @triton.jit()
+ def _causal_conv1d_fwd_kernel(  # continuous batching
+     # Pointers to matrices
+@@ -1211,7 +1232,7 @@ def causal_conv1d_update(
+         NP2_STATELEN=np2_statelen,
+         NP2_SEQLEN=np2_seqlen,
+         USE_PAD_SLOT=pad_slot_id is not None,
+-        BLOCK_N=256,
++        BLOCK_N=_update_block_n(batch, dim),
+         SAVE_INTERMEDIATE=intermediate_conv_window is not None,
+         HAS_EAGLE_TREE_CUSTOM_ATTN_MASK=retrieve_next_token is not None,
+         **pdl_kwargs,
+-- 
+2.43.0
+

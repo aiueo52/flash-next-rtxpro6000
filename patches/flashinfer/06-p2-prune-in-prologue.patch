@@ -1,0 +1,178 @@
+--- a/flashinfer/data/csrc/nv_internal/tensorrt_llm/kernels/cutlass_kernels/include/moe_kernels.h
++++ b/flashinfer/data/csrc/nv_internal/tensorrt_llm/kernels/cutlass_kernels/include/moe_kernels.h
+@@ -481,6 +481,20 @@
+   float const* expand_act_global_scale = nullptr;
+   bool expand_use_per_expert_act_scale = false;
+   int64_t expand_hidden_size = 0;
++
++  // P2: singleton-route pruning folded into the same launch.  A route whose expert is used by
++  // exactly one row of this call (pre-prune count == 1), whose routing weight is < `prune_tau`
++  // and whose within-row rank is >= `prune_min_rank` is dropped *before* the radix rank, so the
++  // permutation, the expert offsets, the G1 packing and the G2-2 row expansion are all built
++  // from the pruned set.  `prune_tau <= 0` is off and leaves the upstream path byte-identical.
++  // The dropped routes are written back as id -1 / weight 0 (same convention as SGLang's P1
++  // Triton kernel) so the unfused finalize kernels skip them.
++  float prune_tau = 0.f;
++  int prune_min_rank = 1;
++  float const* prune_scales = nullptr;  // token_final_scales, [num_tokens, experts_per_token]
++  int* prune_ids_out = nullptr;         // token_selected_experts, written in place
++  float* prune_scales_out = nullptr;    // token_final_scales, written in place
++  bool prune_fused = false;             // set when the launch that ran carried the prune
+ };
+ 
+ class CutlassMoeFCRunnerInterface {
+--- a/flashinfer/data/csrc/fused_moe/cutlass_backend/cutlass_fused_moe_kernels.cuh
++++ b/flashinfer/data/csrc/fused_moe/cutlass_backend/cutlass_fused_moe_kernels.cuh
+@@ -1565,9 +1565,11 @@
+     float* expand_permuted_scales,
+     TmaWarpSpecializedGroupedGemmInput::ElementSF* expand_act_sf_flat,
+     float const* expand_act_global_scale, bool expand_use_per_expert_act_scale,
+-    int64_t expand_hidden_size) {
++    int64_t expand_hidden_size, float prune_tau, int prune_min_rank, float const* prune_scales,
++    int* prune_ids_out, float* prune_scales_out) {
+   using BlockRadixRank = FusedPrologueRadixRank<BLOCK_SIZE, LOG2_NUM_EXPERTS>;
+   static_assert(BlockRadixRank::BINS_TRACKED_PER_THREAD * BLOCK_SIZE >= (1 << LOG2_NUM_EXPERTS));
++  static_assert(EXPERTS_PER_TOKEN <= 32, "P2 keeps the prune mask in one 32-bit word");
+   assert(num_experts_per_node < (1 << LOG2_NUM_EXPERTS));
+   assert(num_experts_per_node == (end_expert - start_expert));
+ 
+@@ -1601,6 +1603,51 @@
+                                                         : num_experts_per_node;
+   }
+ 
++  // ---- P2: singleton-route prune, applied to the keys *before* the rank ------------------
++  // A route is dropped when, within this call, it is the only route to its expert (pre-prune
++  // count == 1, from a block-local histogram), its routing weight is < prune_tau, and its
++  // within-row rank (routes of the same row with a larger weight, ties broken by slot index --
++  // the same rule as SGLang's P1 Triton kernel) is >= prune_min_rank.  Dropping means re-keying
++  // it to `num_experts_per_node`, the "not on this node" bucket, which the radix rank sorts past
++  // every real expert: the permutation, the expert offsets, the G1 packing and the G2-2 row
++  // expansion below then all see the pruned set with no further change.  The histogram borrows
++  // `shared_offsets`, which is dead until after RankKeys.  prune_tau <= 0 skips all of it.
++  unsigned prune_mask = 0u;
++  if (prune_tau > 0.f) {
++    float local_w[EXPERTS_PER_TOKEN];
++#pragma unroll
++    for (int i = 0; i < EXPERTS_PER_TOKEN; i++) {
++      local_w[i] = is_valid_token ? prune_scales[token * EXPERTS_PER_TOKEN + i] : 0.f;
++    }
++    for (int e = threadIdx.x; e < num_experts_per_node; e += BLOCK_SIZE) {
++      shared_offsets[e] = 0;
++    }
++    __syncthreads();
++#pragma unroll
++    for (int i = 0; i < EXPERTS_PER_TOKEN; i++) {
++      if (local_token_selected_experts[i] < num_experts_per_node) {
++        atomicAdd(&shared_offsets[local_token_selected_experts[i]], 1);
++      }
++    }
++    __syncthreads();
++#pragma unroll
++    for (int i = 0; i < EXPERTS_PER_TOKEN; i++) {
++      int const key = local_token_selected_experts[i];
++      if (key < num_experts_per_node) {
++        int rank = 0;
++#pragma unroll
++        for (int j = 0; j < EXPERTS_PER_TOKEN; j++) {
++          rank += (local_w[j] > local_w[i] || (local_w[j] == local_w[i] && j < i)) ? 1 : 0;
++        }
++        if (shared_offsets[key] == 1 && local_w[i] < prune_tau && rank >= prune_min_rank) {
++          prune_mask |= 1u << i;
++          local_token_selected_experts[i] = num_experts_per_node;
++        }
++      }
++    }
++    __syncthreads();  // every histogram read precedes the shared_offsets writes below
++  }
++
+   int local_expert_first_token_offset[BlockRadixRank::BINS_TRACKED_PER_THREAD];
+   cub::BFEDigitExtractor<int> extractor(0, LOG2_NUM_EXPERTS);
+   BlockRadixRank(sort_temp).RankKeys(local_token_selected_experts, local_token_permuted_indices,
+@@ -1615,6 +1662,21 @@
+       permuted_row_to_unpermuted_row[permuted_row] = unpermuted_row;
+       unpermuted_row_to_permuted_row[unpermuted_row] = permuted_row;
+     }
++    // P2: publish the dropped routes as id -1 / weight 0 (P1's convention) so the unfused
++    // finalize kernels skip them.  Other blocks of this grid re-read these tensors for their own
++    // copy of the rank; a block that observes the written state derives the same keys (a -1 id
++    // maps straight to the not-on-node bucket, and a zeroed weight only lowers the ranks of
++    // routes that were dropped anyway), so the order of these writes against those reads does
++    // not matter.
++    if (prune_mask != 0u) {
++#pragma unroll
++      for (int i = 0; i < EXPERTS_PER_TOKEN; i++) {
++        if (prune_mask & (1u << i)) {
++          prune_ids_out[token * EXPERTS_PER_TOKEN + i] = -1;
++          prune_scales_out[token * EXPERTS_PER_TOKEN + i] = 0.f;
++        }
++      }
++    }
+   }
+ 
+ #pragma unroll
+@@ -1805,6 +1867,31 @@
+   return enabled;
+ }
+ 
++// P2: FLASHINFER_MOE_PRUNE_SINGLETON_TAU=<float> folds singleton-route pruning into the fused
++// routing prologue (see fusedBuildExpertMapsSortFirstTokenAndStridesKernel).  Unset / 0 = off,
++// upstream path byte-identical.  The three companions mirror SGLang's P1 knobs: MIN_RANK is the
++// lowest 0-based within-row rank eligible (>= 1, a row must keep its top-1), MIN_ROWS/MAX_ROWS
++// bound the batch sizes touched (default 2..64; the fused prologue itself stops at 32).
++struct MoePruneConfig {
++  float tau = 0.f;
++  int min_rank = 1;
++  int min_rows = 2;
++  int max_rows = 64;
++};
++inline MoePruneConfig const& moePruneConfig() {
++  static MoePruneConfig const cfg = [] {
++    MoePruneConfig c{};
++    if (char const* s = std::getenv("FLASHINFER_MOE_PRUNE_SINGLETON_TAU")) c.tau = std::atof(s);
++    if (char const* s = std::getenv("FLASHINFER_MOE_PRUNE_MIN_RANK")) c.min_rank = std::atoi(s);
++    if (char const* s = std::getenv("FLASHINFER_MOE_PRUNE_MIN_ROWS")) c.min_rows = std::atoi(s);
++    if (char const* s = std::getenv("FLASHINFER_MOE_PRUNE_MAX_ROWS")) c.max_rows = std::atoi(s);
++    if (!(c.tau > 0.f)) c.tau = 0.f;
++    if (c.min_rank < 1) c.min_rank = 1;
++    return c;
++  }();
++  return cfg;
++}
++
+ // FLASHINFER_MOE_FUSED_STRIDES=0 keeps computeStridesTmaWarpSpecialized as its own launch.
+ inline bool fusedStridesEnabled() {
+   static bool const enabled = [] {
+@@ -1874,7 +1961,10 @@
+       gemm2_output, router_scales, req.g1, stride_blocks,
+       reinterpret_cast<InputAct const*>(req.expand_input), reinterpret_cast<T*>(req.expand_output),
+       req.expand_unpermuted_scales, req.expand_permuted_scales, req.expand_act_sf_flat,
+-      req.expand_act_global_scale, req.expand_use_per_expert_act_scale, req.expand_hidden_size));
++      req.expand_act_global_scale, req.expand_use_per_expert_act_scale, req.expand_hidden_size,
++      req.prune_tau, req.prune_min_rank, req.prune_scales, req.prune_ids_out,
++      req.prune_scales_out));
++  req.prune_fused = req.prune_tau > 0.f;
+   return true;
+ }
+ 
+@@ -4466,6 +4556,21 @@
+             use_fp4 ? quant_params.fp4.fc1.use_per_expert_act_scale : false;
+         fused_prologue_req.expand_hidden_size = hidden_size;
+       }
++      // P2: ask for the singleton-route prune.  Single-node routing only (the -1 write-back is
++      // per-rank state); the fused prologue's own gates (num_rows <= 32, ...) still apply, and
++      // when it declines nothing is pruned.
++      {
++        auto const& pc = moePruneConfig();
++        if (pc.tau > 0.f && token_final_scales != nullptr && parallelism_config.ep_size == 1 &&
++            num_rows >= pc.min_rows && num_rows <= pc.max_rows &&
++            pc.min_rank < experts_per_token) {
++          fused_prologue_req.prune_tau = pc.tau;
++          fused_prologue_req.prune_min_rank = pc.min_rank;
++          fused_prologue_req.prune_scales = token_final_scales;
++          fused_prologue_req.prune_ids_out = const_cast<int*>(token_selected_experts);
++          fused_prologue_req.prune_scales_out = const_cast<float*>(token_final_scales);
++        }
++      }
+       std::tie(a3_gemm1_input, a3_gemm2_input) = setupTmaWarpSpecializedInputs(
+           num_rows, expanded_num_rows, fc1_activation_type, hidden_size, unpadded_hidden_size,
+           inter_size, num_experts_per_node, input_activations_void, input_sf, final_output,

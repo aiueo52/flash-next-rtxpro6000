@@ -1,0 +1,138 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: aiueo52 <aiueo52@users.noreply.github.com>
+Date: Sun, 6 Sep 2026 17:33:07 +0900
+Subject: [PATCH 097/105] N1: make the wide-M fallback CUDA-graph safe
+
+Server A/B caught this: the draft-extend graph capture failed with 'Cannot copy between
+CPU and CUDA tensors during CUDA graph capture'. dequantize_nvfp4 built its e2m1 level
+table with torch.tensor(list, device=cuda) on every call - a host->device copy - and
+read the global scale with .item(), a sync. Both are illegal inside a capture, and
+draft-extend is captured.
+
+The level table is now cached per device and the global scale stays a tensor. The
+fallback also splits by M: up to 128 rows it loops the decode GEMV (capture-safe, and
+only a few slices at draft-extend widths), and only above that does it dequantise and
+GEMM, which is the never-captured prefill regime where amortising the weight read over
+all M rows is what matters.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+---
+ .../srt/layers/quantization/nvfp4_dense.py    | 40 ++++++++++++++-----
+ .../layers/quantization/w4a16_nvfp4_gemv.py   | 30 ++++++++++++--
+ 2 files changed, 55 insertions(+), 15 deletions(-)
+
+diff --git a/python/sglang/srt/layers/quantization/nvfp4_dense.py b/python/sglang/srt/layers/quantization/nvfp4_dense.py
+index a0c23a6103..aaa5033be4 100644
+--- a/python/sglang/srt/layers/quantization/nvfp4_dense.py
++++ b/python/sglang/srt/layers/quantization/nvfp4_dense.py
+@@ -169,8 +169,11 @@ def build_or_load(
+ # Serving-side linear method
+ # ---------------------------------------------------------------------------
+ 
+-#: Rows dequantised at a time in the wide-M fallback, bounding its transient.
++#: Rows dequantised at a time in the large-M fallback, bounding its transient.
+ _FALLBACK_ROW_CHUNK = 16384
++#: Up to this many rows, the fallback loops the GEMV instead of dequantising; this is
++#: the CUDA-graph-captured draft-extend regime, where a dequant is not capture-safe.
++_CHUNK_M_MAX = 128
+ 
+ 
+ class NVFP4DenseLinearMethod:
+@@ -240,21 +243,36 @@ class NVFP4DenseLinearMethod:
+         )
+ 
+     def _wide_m(self, layer, x: torch.Tensor) -> torch.Tensor:
+-        """Prefill / extend fallback: dequantise in row chunks and matmul.
+-
+-        The GEMV is a decode kernel (M <= 16). Wider calls are rare and large, so the
+-        right fallback is a real GEMM; dequantising in chunks of output rows keeps the
+-        transient at ~80 MB instead of materialising the whole 250 MB BF16 head. Looping
+-        the GEMV over 16-row slices instead would re-stream the entire weight per slice.
++        """The M > 16 path the decode GEMV cannot serve.
++
++        Two regimes, because they have different constraints:
++
++        - **Modest M (<= _CHUNK_M_MAX): loop the GEMV over 16-row slices.** This is the
++          draft-extend path, and draft-extend *is* CUDA-graph captured, so it has to be
++          capture-safe -- no host->device copies, no syncs, no data-dependent shapes.
++          Re-streaming the weight per slice costs bandwidth, but at these M it is a
++          handful of slices.
++        - **Large M: dequantise in row chunks and GEMM.** Real prefill, never captured.
++          Looping the GEMV here would re-read the whole weight ~M/16 times; a GEMM
++          amortises the weight read across all M rows instead. Chunking the dequant by
++          output rows keeps the transient near 80 MB rather than the full BF16 weight.
+         """
+-        from sglang.srt.layers.quantization.w4a16_nvfp4_gemv import dequantize_nvfp4
++        from sglang.srt.layers.quantization.w4a16_nvfp4_gemv import (
++            dequantize_nvfp4,
++            w4a16_nvfp4_gemv,
++        )
+ 
+         wq, bs, gs = layer.nvfp4_wq, layer.nvfp4_bs, layer.nvfp4_gscale
+-        N = wq.shape[0]
+-        y = torch.empty((x.shape[0], N), dtype=torch.bfloat16, device=x.device)
++        M, N = x.shape[0], wq.shape[0]
++        y = torch.empty((M, N), dtype=torch.bfloat16, device=x.device)
++        if M <= _CHUNK_M_MAX and x.dtype == torch.bfloat16 and x.is_cuda:
++            for m0 in range(0, M, 16):
++                m1 = min(M, m0 + 16)
++                w4a16_nvfp4_gemv(x[m0:m1], wq, bs, gs, out=y[m0:m1])
++            return y
+         for r0 in range(0, N, _FALLBACK_ROW_CHUNK):
+             r1 = min(N, r0 + _FALLBACK_ROW_CHUNK)
+             w = dequantize_nvfp4(wq[r0:r1], bs[r0:r1], gs).to(torch.bfloat16)
+-            torch.mm(x, w.t(), out=y[:, r0:r1])
++            torch.mm(x.to(torch.bfloat16), w.t(), out=y[:, r0:r1])
+             del w
+         return y
+diff --git a/python/sglang/srt/layers/quantization/w4a16_nvfp4_gemv.py b/python/sglang/srt/layers/quantization/w4a16_nvfp4_gemv.py
+index e67e6eebff..6cacb4b5d4 100644
+--- a/python/sglang/srt/layers/quantization/w4a16_nvfp4_gemv.py
++++ b/python/sglang/srt/layers/quantization/w4a16_nvfp4_gemv.py
+@@ -466,17 +466,39 @@ def quantize_nvfp4(
+     return wq, bs, gscale.reshape(1)
+ 
+ 
++#: Per-device e2m1 level LUT. Built once: `torch.tensor(list, device="cuda")` is a
++#: host->device copy, which is illegal inside a CUDA graph capture, and the draft-extend
++#: graph does capture this path.
++_LEVELS: dict = {}
++
++
++def _levels(device) -> torch.Tensor:
++    t = _LEVELS.get(device)
++    if t is None:
++        t = torch.tensor(_E2M1_LEVELS, dtype=torch.float32, device=device)
++        _LEVELS[device] = t
++    return t
++
++
+ def dequantize_nvfp4(wq: torch.Tensor, bs: torch.Tensor, gscale: torch.Tensor,
+                      block: int = FP4_SCALE_BLOCK) -> torch.Tensor:
+-    """Reference dequant (fp32) for the numerics check and the offline emulation."""
++    """Reference dequant (fp32) for the numerics check, the offline emulation, and the
++    wide-M serving fallback.
++
++    CUDA-graph safe: the level table is cached per device and the global scale stays a
++    tensor. An earlier version built the table per call and used ``gscale.item()``,
++    which made draft-extend graph capture fail with "Cannot copy between CPU and CUDA
++    tensors during CUDA graph capture".
++    """
+     N, KH = wq.shape
+     K = KH * 2
+-    lvl = torch.tensor(_E2M1_LEVELS, dtype=torch.float32, device=wq.device)
++    lvl = _levels(wq.device)
+     code = torch.empty((N, K), dtype=torch.uint8, device=wq.device)
+     code[:, 0::2] = wq & 0x0F
+     code[:, 1::2] = wq >> 4
+     mag = lvl[(code & 0x07).long()]
+     val = torch.where((code & 0x08) > 0, -mag, mag)
+-    s = bs.view(torch.float8_e4m3fn).float() * gscale.float().reshape(-1, 1).to(bs.device) \
+-        if gscale.numel() > 1 else bs.view(torch.float8_e4m3fn).float() * gscale.item()
++    g = gscale.to(wq.device, torch.float32).reshape(-1)
++    g = g.reshape(-1, 1) if g.numel() > 1 else g.reshape(1, 1)
++    s = bs.view(torch.float8_e4m3fn).float() * g
+     return val * s.repeat_interleave(block, dim=1)
+-- 
+2.43.0
+

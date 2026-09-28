@@ -1,0 +1,67 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: aiueo52 <aiueo52@users.noreply.github.com>
+Date: Thu, 3 Sep 2026 21:00:12 +0900
+Subject: [PATCH 038/105] bench: size the GDN WY working set to the state slots
+ the kernel actually reads
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+---
+ bench/glue_e/bench_gdn_wy_t16.py           | 13 +++++--------
+ test/srt/layers/test_gdn_wy_t16_strided.py |  4 ++--
+ 2 files changed, 7 insertions(+), 10 deletions(-)
+
+diff --git a/bench/glue_e/bench_gdn_wy_t16.py b/bench/glue_e/bench_gdn_wy_t16.py
+index 994781ea24..0db3d058d3 100644
+--- a/bench/glue_e/bench_gdn_wy_t16.py
++++ b/bench/glue_e/bench_gdn_wy_t16.py
+@@ -33,20 +33,17 @@ L2 = 128 << 20
+ 
+ 
+ def build(B: int, T: int, copies: int):
+-    sets = []
+-    for i in range(copies):
+-        sets.append(_make_inputs(B, T, seed=i))
+-    return sets
++    # pool=B so the allocated bytes equal the touched bytes: the kernel only reads
++    # the B state slots it is indexed at, and the working set has to be real.
++    return [_make_inputs(B, T, seed=i, pool=B) for i in range(copies)]
+ 
+ 
+ def main(cases):
+     ref, pat = _load_modules()
+     print(clocks_note())
+     for B, T in cases:
+-        one = _make_inputs(B, T)
+-        h0_bytes = one["initial_state_source"].numel() * 2
+-        per_call = h0_bytes // one["initial_state_source"].shape[0] * B + B * T * CONV_DIM * 2
+-        copies = max(8, min(160, -(-4 * L2 // max(per_call, 1))))
++        per_call = B * (HV * V_DIM * K_DIM * 2 + T * CONV_DIM * 2)
++        copies = max(8, min(320, -(-4 * L2 // max(per_call, 1))))
+         sets = build(B, T, copies)
+         ws_mb = copies * per_call / (1 << 20)
+         print(f"\n=== B={B} T={T}  working set x{copies} (~{ws_mb:.0f} MB, L2 is 128 MB)")
+diff --git a/test/srt/layers/test_gdn_wy_t16_strided.py b/test/srt/layers/test_gdn_wy_t16_strided.py
+index 515cbb9f22..12f3f42fc3 100644
+--- a/test/srt/layers/test_gdn_wy_t16_strided.py
++++ b/test/srt/layers/test_gdn_wy_t16_strided.py
+@@ -87,7 +87,7 @@ def _load_modules():
+     return ref, pat
+ 
+ 
+-def _make_inputs(B: int, T: int, seed: int = 0):
++def _make_inputs(B: int, T: int, seed: int = 0, pool: int = POOL):
+     """Post-conv fused row plus the strided q/k/v column slices the backend passes."""
+     g = torch.Generator(device="cuda").manual_seed(seed)
+     conv_out = torch.randn(
+@@ -107,7 +107,7 @@ def _make_inputs(B: int, T: int, seed: int = 0):
+     dt_bias = torch.randn(HV, dtype=torch.float32, device="cuda", generator=g)
+     h0 = (
+         torch.randn(
+-            POOL, HV, V_DIM, K_DIM, dtype=torch.float32, device="cuda", generator=g
++            pool, HV, V_DIM, K_DIM, dtype=torch.float32, device="cuda", generator=g
+         )
+         .mul_(0.05)
+         .to(torch.bfloat16)
+-- 
+2.43.0
+

@@ -1,0 +1,111 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: aiueo52 <aiueo52@users.noreply.github.com>
+Date: Sun, 6 Sep 2026 19:45:10 +0900
+Subject: [PATCH 099/105] N1: fix the stage B OOM and the stage C silent miss
+ on attention qkv
+
+Both were found by the server run, not by any test.
+
+Stage B died with torch.OutOfMemoryError trying to allocate 2.37 GiB: quantize_nvfp4
+cast the whole weight to fp32 at once (2.5 GB for the 248320-row target head) and the
+server reaches that hook with ~2 GB free at mem_fraction 0.935. The global amax is now
+taken chunk-wise, no full fp32 copy is ever made, and build_or_load packs on the CPU and
+moves only the packed tensors (0.5625 B/element) to the device. Full head packs in 4.5s
+cold; the cached file is 357.6 MB against the FP8 head's 635.7 MB, so stage B also frees
+278 MB of VRAM.
+
+Stage C packed the 36 GDN projections and zero attention ones, with no error, because
+QKVParallelLinear never set self.prefix while its sibling MergedColumnParallelLinear
+does - so every attention qkv presented an empty prefix to the matcher. Set it, and make
+the matcher warn rather than silently decline when a layer has no prefix.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+---
+ python/sglang/srt/layers/linear.py                |  5 +++++
+ .../sglang/srt/layers/quantization/nvfp4_dense.py | 15 ++++++++++++++-
+ .../srt/layers/quantization/w4a16_nvfp4_gemv.py   | 12 +++++++++---
+ 3 files changed, 28 insertions(+), 4 deletions(-)
+
+diff --git a/python/sglang/srt/layers/linear.py b/python/sglang/srt/layers/linear.py
+index 3260f00f5a..e581c6665c 100644
+--- a/python/sglang/srt/layers/linear.py
++++ b/python/sglang/srt/layers/linear.py
+@@ -988,6 +988,11 @@ class QKVParallelLinear(ColumnParallelLinear):
+         kv_tp_size: Optional[int] = None,
+     ):
+         self.with_bias = bias
++        # Its sibling MergedColumnParallelLinear records this and QKVParallelLinear
++        # did not, so anything identifying a layer by `layer.prefix` silently saw ""
++        # for every attention qkv -- which is exactly how N1 stage C came to pack the
++        # 36 GDN projections and none of the attention ones without erroring.
++        self.prefix = prefix
+         self.hidden_size = hidden_size
+         self.head_size = head_size
+         self.v_head_size = v_head_size if v_head_size is not None else head_size
+diff --git a/python/sglang/srt/layers/quantization/nvfp4_dense.py b/python/sglang/srt/layers/quantization/nvfp4_dense.py
+index 1cc3aee062..b6bdf0e8c8 100644
+--- a/python/sglang/srt/layers/quantization/nvfp4_dense.py
++++ b/python/sglang/srt/layers/quantization/nvfp4_dense.py
+@@ -152,8 +152,13 @@ def build_or_load(
+     w = read_bf16_rows(model_dir, tensor_name, rows)
+     t_read = time.time() - t0
+     t0 = time.time()
+-    wq, bs, gscale = quantize_nvfp4(w.to(device))
++    # Packed on the CPU, then only the *packed* tensors go to the device. The server
++    # runs at mem_fraction 0.935 and reaches this with ~2 GB of VRAM free, while the
++    # full target head would need 1.27 GB bf16 + an fp32 working set on top of it.
++    # The packed result is 0.5625 B/element, and host RAM is not the constraint here.
++    wq, bs, gscale = quantize_nvfp4(w)
+     del w
++    wq, bs, gscale = wq.to(device), bs.to(device), gscale.to(device)
+     t_pack = time.time() - t0
+     os.makedirs(CACHE_DIR, exist_ok=True)
+     tmp = path + f".tmp{os.getpid()}"
+@@ -320,6 +325,14 @@ def maybe_pack_dense_nvfp4(layer) -> bool:
+     if not cats:
+         return False
+     prefix = getattr(layer, "prefix", "") or ""
++    if not prefix:
++        # Never silently skip: a layer with no prefix cannot be matched, and that is a
++        # bug in the layer class rather than a reason to leave it FP8.
++        logger.warning(
++            "NVFP4 dense: %s has no .prefix, cannot match it against %s",
++            type(layer).__name__, cats,
++        )
++        return False
+     if not any(prefix.endswith(c) or f".{c}" in prefix for c in cats):
+         return False
+     w = getattr(layer, "weight", None)
+diff --git a/python/sglang/srt/layers/quantization/w4a16_nvfp4_gemv.py b/python/sglang/srt/layers/quantization/w4a16_nvfp4_gemv.py
+index 6cacb4b5d4..244c55ecfc 100644
+--- a/python/sglang/srt/layers/quantization/w4a16_nvfp4_gemv.py
++++ b/python/sglang/srt/layers/quantization/w4a16_nvfp4_gemv.py
+@@ -438,8 +438,14 @@ def quantize_nvfp4(
+     """
+     assert w.dim() == 2 and w.shape[1] % block == 0
+     N, K = w.shape
+-    wf = w.float()
+-    gscale = (wf.abs().amax() / (E4M3_MAX * E2M1_MAX)).clamp_(min=1e-30)
++    # The global amax is taken chunk-wise and `w` is never cast to fp32 whole. A single
++    # `w.float()` is 2x the weight -- 2.5 GB for the 248320-row target head -- and the
++    # server reaches this with ~2 GB free at mem_fraction 0.935, which is exactly how
++    # stage B first died (torch.OutOfMemoryError: tried to allocate 2.37 GiB).
++    gmax = w.new_zeros((), dtype=torch.float32)
++    for r0 in range(0, N, row_chunk):
++        gmax = torch.maximum(gmax, w[r0 : r0 + row_chunk].float().abs().amax())
++    gscale = (gmax / (E4M3_MAX * E2M1_MAX)).clamp_(min=1e-30)
+     # The *encode* scale, and multiplication by it, are the fork's own convention
+     # (nvfp4_online.py:296 hands flashinfer `1.0 / weight_scale_2`). The form matters
+     # beyond taste: `amax/6/gscale` and `amax/6*enc` differ by one fp32 ulp, and e4m3's
+@@ -452,7 +458,7 @@ def quantize_nvfp4(
+     bs = torch.empty((N, K // block), dtype=torch.uint8, device=w.device)
+     for r0 in range(0, N, row_chunk):
+         r1 = min(N, r0 + row_chunk)
+-        blk = wf[r0:r1].view(r1 - r0, K // block, block)
++        blk = w[r0:r1].float().view(r1 - r0, K // block, block)
+         amax = blk.abs().amax(dim=-1)
+         sb = (amax / E2M1_MAX * enc).clamp_(min=0.0, max=E4M3_MAX)
+         sb8 = sb.to(torch.float8_e4m3fn)
+-- 
+2.43.0
+

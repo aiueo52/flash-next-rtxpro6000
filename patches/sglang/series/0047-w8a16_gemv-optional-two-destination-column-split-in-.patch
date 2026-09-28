@@ -1,0 +1,263 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: aiueo52 <aiueo52@users.noreply.github.com>
+Date: Sat, 5 Sep 2026 14:15:22 +0900
+Subject: [PATCH 047/105] w8a16_gemv: optional two-destination column split in
+ the epilogue
+
+`w8a16_gemv` / `bf16_gemv` gain `out2=` + `split_n=`: the [M, N] result is
+written to two caller-owned row-contiguous buffers, columns [0, split_n) to
+`out` and [split_n, N) to `out2`. Only the store epilogue changes -- the k
+loop, the fp32 accumulation order, the per-channel scale index and the bf16
+rounding are untouched -- so the two buffers hold exactly the bytes a single
+[M, N] output would have held. `SPLIT_N` is a constexpr defaulting to 0, so
+every existing call compiles the original single-store epilogue.
+
+This is the mechanism the GDN projection needs to produce mixed_qkv/z and b/a
+directly, without the per-layer re-layout copy kernel.
+
+Bit-exactness checked on GPU against the single-destination result for
+(N=16384, split 10240) and (N=96, split 48) at M=1/4/16, plus an unaligned
+split (37 of 96) that straddles a BLOCK_N tile: torch.equal on both halves.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+---
+ .../srt/layers/quantization/w8a16_gemv.py     | 139 +++++++++++++++---
+ 1 file changed, 118 insertions(+), 21 deletions(-)
+
+diff --git a/python/sglang/srt/layers/quantization/w8a16_gemv.py b/python/sglang/srt/layers/quantization/w8a16_gemv.py
+index 0c44da3725..33b7e6cd8a 100644
+--- a/python/sglang/srt/layers/quantization/w8a16_gemv.py
++++ b/python/sglang/srt/layers/quantization/w8a16_gemv.py
+@@ -34,12 +34,59 @@ import triton
+ import triton.language as tl
+ 
+ 
++@triton.jit
++def _store_split(
++    acc,
++    y_ptr,
++    y2_ptr,
++    offs_m,
++    offs_n,
++    stride_ym,
++    stride_yn,
++    stride_y2m,
++    m_mask,
++    n_mask,
++    SPLIT_N: tl.constexpr,
++):
++    """Write the rounded accumulator to `y`, or to `y`/`y2` split at column SPLIT_N.
++
++    SPLIT_N == 0 is the default single-destination store, byte-for-byte the
++    original epilogue. With SPLIT_N > 0 columns [0, SPLIT_N) land in `y` and
++    columns [SPLIT_N, N) land in `y2` at column `n - SPLIT_N`; both stores see
++    the same rounded value, so the numerics are identical either way.
++    """
++    # Round to bf16 first even when the destination is fp32: an fp32 destination
++    # is only ever the shared logits buffer, whose old contents were a bf16
++    # result widened by `.copy_()`. Rounding here keeps that bit-identical.
++    val = acc.to(tl.bfloat16).to(y_ptr.dtype.element_ty)
++    if SPLIT_N > 0:
++        lo = offs_n < SPLIT_N
++        tl.store(
++            y_ptr + offs_m[:, None] * stride_ym + offs_n[None, :] * stride_yn,
++            val,
++            mask=m_mask[:, None] & n_mask[None, :] & lo[None, :],
++        )
++        n2 = tl.maximum(offs_n - SPLIT_N, 0)
++        tl.store(
++            y2_ptr + offs_m[:, None] * stride_y2m + n2[None, :] * stride_yn,
++            val,
++            mask=m_mask[:, None] & n_mask[None, :] & (offs_n >= SPLIT_N)[None, :],
++        )
++    else:
++        tl.store(
++            y_ptr + offs_m[:, None] * stride_ym + offs_n[None, :] * stride_yn,
++            val,
++            mask=m_mask[:, None] & n_mask[None, :],
++        )
++
++
+ @triton.jit
+ def _w8a16_gemv_kernel(
+     x_ptr,
+     w_ptr,
+     s_ptr,
+     y_ptr,
++    y2_ptr,
+     ws_ptr,
+     cnt_ptr,
+     M,
+@@ -51,6 +98,8 @@ def _w8a16_gemv_kernel(
+     stride_wk,
+     stride_ym,
+     stride_yn,
++    stride_y2m,
++    SPLIT_N: tl.constexpr,
+     PER_CHANNEL: tl.constexpr,
+     BLOCK_N: tl.constexpr,
+     BLOCK_K: tl.constexpr,
+@@ -112,14 +161,18 @@ def _w8a16_gemv_kernel(
+             acc = acc * tl.load(s_ptr + offs_n, mask=n_mask, other=0.0)[None, :]
+         else:
+             acc = acc * tl.load(s_ptr)
+-        y_ptrs = y_ptr + offs_m[:, None] * stride_ym + offs_n[None, :] * stride_yn
+-        # Round to bf16 first even when `y` is fp32: an fp32 destination is only
+-        # ever the shared logits buffer, whose old contents were a bf16 result
+-        # widened by `.copy_()`. Rounding here keeps that bit-identical.
+-        tl.store(
+-            y_ptrs,
+-            acc.to(tl.bfloat16).to(y_ptr.dtype.element_ty),
+-            mask=m_mask[:, None] & n_mask[None, :],
++        _store_split(
++            acc,
++            y_ptr,
++            y2_ptr,
++            offs_m,
++            offs_n,
++            stride_ym,
++            stride_yn,
++            stride_y2m,
++            m_mask,
++            n_mask,
++            SPLIT_N,
+         )
+         return
+ 
+@@ -138,11 +191,18 @@ def _w8a16_gemv_kernel(
+             tot = tot * tl.load(s_ptr + offs_n, mask=n_mask, other=0.0)[None, :]
+         else:
+             tot = tot * tl.load(s_ptr)
+-        y_ptrs = y_ptr + offs_m[:, None] * stride_ym + offs_n[None, :] * stride_yn
+-        tl.store(
+-            y_ptrs,
+-            tot.to(tl.bfloat16).to(y_ptr.dtype.element_ty),
+-            mask=m_mask[:, None] & n_mask[None, :],
++        _store_split(
++            tot,
++            y_ptr,
++            y2_ptr,
++            offs_m,
++            offs_n,
++            stride_ym,
++            stride_yn,
++            stride_y2m,
++            m_mask,
++            n_mask,
++            SPLIT_N,
+         )
+         # Every increment for this N block has happened, so a plain store is enough to
+         # leave the counter at 0 for the next launch / graph replay.
+@@ -360,7 +420,7 @@ def _fit(M: int, N: int, cfg):
+     return cfg
+ 
+ 
+-def _launch(x, w, s, y, M, N, K, per_channel, cfg):
++def _launch(x, w, s, y, M, N, K, per_channel, cfg, y2=None, split_n=0):
+     block_n, block_k, splits, use_dot, w_kn, num_warps, num_stages = cfg
+     use_dot = use_dot or M > 1
+     m_pad = 16 if use_dot else 1
+@@ -370,6 +430,7 @@ def _launch(x, w, s, y, M, N, K, per_channel, cfg):
+         w,
+         s,
+         y,
++        y if y2 is None else y2,
+         ws,
+         cnt,
+         M,
+@@ -381,6 +442,8 @@ def _launch(x, w, s, y, M, N, K, per_channel, cfg):
+         w.stride(1),
+         y.stride(0),
+         y.stride(1),
++        y.stride(0) if y2 is None else y2.stride(0),
++        SPLIT_N=split_n,
+         PER_CHANNEL=per_channel,
+         BLOCK_N=block_n,
+         BLOCK_K=block_k,
+@@ -417,42 +480,76 @@ def _out_or_new(out, M: int, N: int, device):
+     return out
+ 
+ 
++def _split_dests(out, out2, split_n: int, M: int, N: int, device):
++    """Validate a two-destination (`out` | `out2`) column split of the [M, N] result.
++
++    Returns ``(y, y2, split_n)``; ``split_n == 0`` means the usual single
++    destination. Column ``n < split_n`` goes to ``out``, ``n >= split_n`` to
++    ``out2`` at column ``n - split_n``. The GEMV itself is untouched -- same
++    k-loop, same fp32 accumulation order, same per-channel scale index, same
++    bf16 rounding -- so the two destinations hold exactly the values a single
++    [M, N] output would have held.
++    """
++    if out2 is None:
++        return _out_or_new(out, M, N, device), None, 0
++    if not (0 < split_n < N):
++        raise ValueError(f"w8a16 gemv split_n must be in (0, {N}); got {split_n}")
++    y = _out_or_new(out, M, split_n, device)
++    y2 = _out_or_new(out2, M, N - split_n, device)
++    if y.dtype != y2.dtype or y.stride(1) != 1 or y2.stride(1) != 1:
++        raise ValueError("w8a16 gemv out/out2 must share a dtype and be row-contiguous")
++    return y, y2, split_n
++
++
+ def w8a16_gemv(
+     x: torch.Tensor,
+     w: torch.Tensor,
+     scale: torch.Tensor,
+     cfg=None,
+     out: Optional[torch.Tensor] = None,
++    out2: Optional[torch.Tensor] = None,
++    split_n: int = 0,
+ ):
+-    """x: [M,K] bf16; w: [N,K] fp8_e4m3 (any strides); scale: [N] or [N,1] or scalar fp32."""
++    """x: [M,K] bf16; w: [N,K] fp8_e4m3 (any strides); scale: [N] or [N,1] or scalar fp32.
++
++    With ``out2``, the N columns are split at ``split_n`` across two
++    caller-owned destinations instead of one [M, N] buffer (see _split_dests).
++    """
+     M, K = x.shape
+     N = w.shape[0]
+     assert w.shape[1] == K and M <= 16
+-    y = _out_or_new(out, M, N, x.device)
++    y, y2, split_n = _split_dests(out, out2, split_n, M, N, x.device)
+     s = scale.reshape(-1)
+     if s.dtype != torch.float32 or not s.is_contiguous():
+         s = s.contiguous().float()
+     if cfg is None:
+         cfg = _plan(M, N, K, w.stride(0) == 1, w.element_size(), _num_sms(x.device))
+-    return _launch(x, w, s, y, M, N, K, s.numel() > 1, cfg)
++    _launch(x, w, s, y, M, N, K, s.numel() > 1, cfg, y2, split_n)
++    return y if y2 is None else (y, y2)
+ 
+ 
+ def bf16_gemv(
+-    x: torch.Tensor, w: torch.Tensor, cfg=None, out: Optional[torch.Tensor] = None
++    x: torch.Tensor,
++    w: torch.Tensor,
++    cfg=None,
++    out: Optional[torch.Tensor] = None,
++    out2: Optional[torch.Tensor] = None,
++    split_n: int = 0,
+ ):
+     """Skinny BF16 GEMM y = x @ w^T for tiny-N linears where cuBLAS picks a poor kernel.
+-    x: [M,K] bf16 (M<=16); w: [N,K] bf16."""
++    x: [M,K] bf16 (M<=16); w: [N,K] bf16. ``out2``/``split_n``: see w8a16_gemv."""
+     M, K = x.shape
+     N = w.shape[0]
+     assert w.shape[1] == K and M <= 16
+-    y = _out_or_new(out, M, N, x.device)
++    y, y2, split_n = _split_dests(out, out2, split_n, M, N, x.device)
+     one = _ONES.get(x.device)
+     if one is None:
+         one = torch.ones(1, dtype=torch.float32, device=x.device)
+         _ONES[x.device] = one
+     if cfg is None:
+         cfg = _plan(M, N, K, w.stride(0) == 1, w.element_size(), _num_sms(x.device))
+-    return _launch(x, w, one, y, M, N, K, False, cfg)
++    _launch(x, w, one, y, M, N, K, False, cfg, y2, split_n)
++    return y if y2 is None else (y, y2)
+ 
+ 
+ # ---------------------------------------------------------------------------
+-- 
+2.43.0
+

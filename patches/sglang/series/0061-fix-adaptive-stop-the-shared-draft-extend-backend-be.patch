@@ -1,0 +1,487 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: aiueo52 <aiueo52@users.noreply.github.com>
+Date: Sat, 5 Sep 2026 14:49:33 +0900
+Subject: [PATCH 061/105] fix(adaptive): stop the shared draft-extend backend
+ being re-sized per state
+
+--speculative-adaptive died with an illegal memory access on
+Qwen3.8-Flash-Next (NEXTN, topk=1) at the first decode after warmup.
+
+Root cause: for compressed-QSA draft models
+DraftBackendFactory.create_draft_extend_backend() (draft_utils.py:139)
+returns draft_model_runner.attn_backend rather than a fresh backend, so
+every adaptive runtime state's EAGLEDraftExtendCudaGraphRunner shares one
+backend object.  Its __init__ calls
+draft_extend_attn_backend.init_cuda_graph_state(max_bs, max_num_token),
+which in QwenSparseAttnBackend (qwen_sparse_attn_backend.py:897) *replaces*
+_graph_seq_lens / _graph_compressed_page_table / _graph_fa2_* and friends.
+Building the steps=3 and steps=7 states therefore freed exactly the tensors
+the already-captured steps=15 draft-extend graphs point at.
+
+- init_cuda_graph_state_no_shrink(): under adaptive, size the backend once
+  (the launch state is the largest) and skip every later, smaller request;
+  sharing the metadata tensors between states is safe because they are
+  refilled immediately before each capture/replay.  Non-adaptive servers
+  keep the plain upstream call.
+- AdaptiveController.validate_candidates(): reject candidate_steps above
+  --speculative-num-steps at start-up.  Every start-up-sized buffer (KV /
+  mamba reservation, chain buffers, that graph state) is dimensioned for the
+  launch value, so a larger candidate cannot be served.
+- AdaptiveStepSlot: opt-in reset_ema_on_switch.  One EMA is shared by all
+  candidates but its scale is bounded by the current step count, so an EMA
+  that justified leaving steps=15 reads as a near-perfect chain at steps=3
+  and bounces straight back.  Re-seeding at target-1 turns each switch into
+  a probe the next update confirms or undoes.
+- adaptive_w16_3_15.json: the tuned two-state config for this model
+  (drop 15->3 at ema<=6.0, rise 3->15 at ema>2.35, EMA reseeded).
+
+CPU tests cover the sizing invariants and simulate the shipped config
+against the measured per-workload acceptance.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+---
+ adaptive_w16_3_15.json                        |  12 ++
+ dbg/cand_15.json                              |   1 +
+ dbg/cand_3_15.json                            |   1 +
+ dbg/cand_3_7_15.json                          |   1 +
+ dbg/w16_3_15.json                             |  12 ++
+ .../srt/speculative/adaptive_runtime_state.py |  71 +++++++
+ .../srt/speculative/adaptive_spec_params.py   |  20 +-
+ .../eagle_draft_extend_cuda_graph_runner.py   |   8 +-
+ .../test_adaptive_runtime_state_sizing.py     | 184 ++++++++++++++++++
+ 9 files changed, 306 insertions(+), 4 deletions(-)
+ create mode 100644 adaptive_w16_3_15.json
+ create mode 100644 dbg/cand_15.json
+ create mode 100644 dbg/cand_3_15.json
+ create mode 100644 dbg/cand_3_7_15.json
+ create mode 100644 dbg/w16_3_15.json
+ create mode 100644 test/registered/unit/spec/test_adaptive_runtime_state_sizing.py
+
+diff --git a/adaptive_w16_3_15.json b/adaptive_w16_3_15.json
+new file mode 100644
+index 0000000000..21c92c4cbc
+--- /dev/null
++++ b/adaptive_w16_3_15.json
+@@ -0,0 +1,12 @@
++{
++  "1": {
++    "candidate_steps": [3, 15],
++    "ema_alpha": 0.2,
++    "update_interval": 5,
++    "warmup_batches": 10,
++    "down_hysteresis": 3.5,
++    "up_hysteresis": -0.15,
++    "ceiling_coeff": 0,
++    "reset_ema_on_switch": true
++  }
++}
+diff --git a/dbg/cand_15.json b/dbg/cand_15.json
+new file mode 100644
+index 0000000000..6bd8516f45
+--- /dev/null
++++ b/dbg/cand_15.json
+@@ -0,0 +1 @@
++{"1": {"candidate_steps": [15], "up_hysteresis": 0.0, "down_hysteresis": -0.25, "ceiling_coeff": 0}}
+diff --git a/dbg/cand_3_15.json b/dbg/cand_3_15.json
+new file mode 100644
+index 0000000000..c016fe79cb
+--- /dev/null
++++ b/dbg/cand_3_15.json
+@@ -0,0 +1 @@
++{"1": {"candidate_steps": [3, 15], "up_hysteresis": 0.0, "down_hysteresis": -0.25, "ceiling_coeff": 0}}
+diff --git a/dbg/cand_3_7_15.json b/dbg/cand_3_7_15.json
+new file mode 100644
+index 0000000000..f1a16711b6
+--- /dev/null
++++ b/dbg/cand_3_7_15.json
+@@ -0,0 +1 @@
++{"1": {"candidate_steps": [3, 7, 15], "up_hysteresis": 0.0, "down_hysteresis": -0.25, "ceiling_coeff": 0}}
+diff --git a/dbg/w16_3_15.json b/dbg/w16_3_15.json
+new file mode 100644
+index 0000000000..21c92c4cbc
+--- /dev/null
++++ b/dbg/w16_3_15.json
+@@ -0,0 +1,12 @@
++{
++  "1": {
++    "candidate_steps": [3, 15],
++    "ema_alpha": 0.2,
++    "update_interval": 5,
++    "warmup_batches": 10,
++    "down_hysteresis": 3.5,
++    "up_hysteresis": -0.15,
++    "ceiling_coeff": 0,
++    "reset_ema_on_switch": true
++  }
++}
+diff --git a/python/sglang/srt/speculative/adaptive_runtime_state.py b/python/sglang/srt/speculative/adaptive_runtime_state.py
+index 180156ced5..0acc6f261a 100644
+--- a/python/sglang/srt/speculative/adaptive_runtime_state.py
++++ b/python/sglang/srt/speculative/adaptive_runtime_state.py
+@@ -18,6 +18,54 @@ if TYPE_CHECKING:
+     )
+ 
+ 
++def init_cuda_graph_state_no_shrink(
++    attn_backend, max_bs: int, max_num_token: int
++) -> None:
++    """``init_cuda_graph_state`` that never shrinks an already-sized backend.
++
++    Adaptive speculative decoding (``--speculative-adaptive``) builds one
++    runtime state per candidate step count, each with its own draft-extend
++    graph runner.  For compressed-QSA draft models
++    ``DraftBackendFactory.create_draft_extend_backend()`` returns the draft
++    runner's *own* attention backend (draft_utils.py), so **every** state's
++    draft-extend runner shares one backend object.  ``init_cuda_graph_state``
++    reallocates that backend's metadata tensors (``_graph_seq_lens``,
++    ``_graph_compressed_page_table``, ...).  Re-running it for a smaller
++    candidate frees exactly the tensors the already-captured graphs of the
++    larger state baked in, so their next replay touches freed memory ->
++    ``illegal memory access``.
++
++    Sharing the (larger) tensors between states is safe: the metadata is
++    written immediately before each capture/replay and only one state is
++    active at a time -- the same argument ``share_input_buffer`` makes for the
++    forward input buffers.  So allocate only when the request does not already
++    fit.  For a non-adaptive server this runs exactly once and is a no-op
++    change.
++
++    A candidate *larger* than what is already allocated would still have to
++    reallocate (and would break the earlier graphs); ``AdaptiveController``
++    rejects such configs up front, and the assertion here documents the
++    invariant.
++    """
++    from sglang.srt.runtime_context import get_spec
++
++    if not get_spec().speculative_adaptive:
++        # Single runtime state: the backend is sized exactly once, so keep the
++        # upstream call (and do not stamp anything onto the backend).
++        attn_backend.init_cuda_graph_state(max_bs, max_num_token)
++        return
++    prev = getattr(attn_backend, "_spec_graph_state_extent", None)
++    if prev is not None and prev[0] >= max_bs and prev[1] >= max_num_token:
++        return
++    assert prev is None, (
++        "draft-extend attention backend is shared across speculative runtime "
++        f"states and is being re-sized upward ({prev} -> {(max_bs, max_num_token)}); "
++        "this frees buffers already captured into earlier CUDA graphs"
++    )
++    attn_backend.init_cuda_graph_state(max_bs, max_num_token)
++    attn_backend._spec_graph_state_extent = (max_bs, max_num_token)
++
++
+ @dataclass
+ class SpecRuntimeState:
+     """A complete set of runtime resources bound to a specific speculative
+@@ -77,6 +125,7 @@ class AdaptiveController:
+ 
+     def __init__(self, worker: AdaptiveSpecWorker, config_path: str | None = None):
+         self.worker = worker
++        self.initial_steps = worker.speculative_num_steps
+         self.params = AdaptiveSpeculativeParams(
+             initial_steps=worker.speculative_num_steps,
+             cfg_path=config_path,
+@@ -102,6 +151,7 @@ class AdaptiveController:
+         max_batch_size: int | None = None,
+     ) -> None:
+         """Build and register runtime states for all candidate steps."""
++        self.validate_candidates()
+         self.params.set_cuda_graph_bs(cuda_graph_bs)
+ 
+         for steps in self.candidate_steps:
+@@ -124,6 +174,27 @@ class AdaptiveController:
+             )
+             self._states[steps] = state
+ 
++    def validate_candidates(self) -> None:
++        """No candidate may exceed the step count the server started with.
++
++        Everything sized once at start-up from ``--speculative-num-steps`` --
++        the per-request KV / mamba reservation, the chain buffers, and (for
++        draft models whose draft-extend backend is the draft runner's own
++        backend, i.e. compressed QSA) that backend's CUDA-graph metadata
++        tensors -- is dimensioned for the launch value.  A larger candidate
++        would have to grow those buffers *after* the initial state's graphs
++        were captured against them, which frees what those graphs point at
++        (illegal memory access at the next replay).  Raise at start-up instead.
++        """
++        over = [s for s in self.candidate_steps if s > self.initial_steps]
++        if over:
++            raise ValueError(
++                f"speculative_adaptive_config candidate_steps {sorted(over)} exceed "
++                f"--speculative-num-steps ({self.initial_steps}). Launch the server "
++                "with the largest candidate as --speculative-num-steps and list the "
++                "smaller ones as candidates."
++            )
++
+     def activate_step_by_batch(self, batch_size: int) -> None:
+         target = (
+             self._pending_steps
+diff --git a/python/sglang/srt/speculative/adaptive_spec_params.py b/python/sglang/srt/speculative/adaptive_spec_params.py
+index 2ad4640020..c3e0348ba3 100644
+--- a/python/sglang/srt/speculative/adaptive_spec_params.py
++++ b/python/sglang/srt/speculative/adaptive_spec_params.py
+@@ -161,6 +161,16 @@ class AdaptiveStepSlot:
+         self.down_hysteresis = cfg.get("down_hysteresis", -0.25)
+         self.up_hysteresis = cfg.get("up_hysteresis", 0.0)
+         self.ceiling_coeff = cfg.get("ceiling_coeff", 0)
++        # One EMA is shared by every candidate, but the quantity it tracks
++        # (accepted drafts per verify) is bounded by the *current* step count,
++        # so its scale changes with every switch: an EMA of 5.9 that justified
++        # leaving steps=15 is an impossibly high reading at steps=3 and would
++        # bounce straight back up. Re-seeding it at the new step's neutral
++        # value (target - 1, the same convention __init__ and the steps=0 probe
++        # use) makes each candidate's threshold a statement about that
++        # candidate, and turns a switch into a probe that the next update
++        # confirms or undoes. Off by default (upstream behaviour).
++        self.reset_ema_on_switch = cfg.get("reset_ema_on_switch", False)
+ 
+         if initial_steps in self.candidate_steps:
+             self.current_steps = initial_steps
+@@ -249,11 +259,19 @@ class AdaptiveStepSlot:
+ 
+     def _apply_target_steps(self, old_steps: int, target: int) -> bool:
+         if target != old_steps:
++            decided_at = self.ema_accept_len
+             self.current_steps = target
++            if self.reset_ema_on_switch and target > 0:
++                self.ema_accept_len = float(target - 1)
+             log_info_on_rank0(
+                 logger,
+                 f"Adaptive spec params updated: steps {old_steps} -> {target} "
+-                f"(ema_accept_len={self.ema_accept_len:.2f})",
++                f"(ema_accept_len={decided_at:.2f}"
++                + (
++                    f", ema reseeded to {self.ema_accept_len:.2f})"
++                    if self.ema_accept_len != decided_at
++                    else ")"
++                ),
+             )
+             return True
+         return False
+diff --git a/python/sglang/srt/speculative/eagle_draft_extend_cuda_graph_runner.py b/python/sglang/srt/speculative/eagle_draft_extend_cuda_graph_runner.py
+index 2ee2f7c280..948c442200 100644
+--- a/python/sglang/srt/speculative/eagle_draft_extend_cuda_graph_runner.py
++++ b/python/sglang/srt/speculative/eagle_draft_extend_cuda_graph_runner.py
+@@ -40,6 +40,9 @@ from sglang.srt.runtime_context import (
+     get_parallel,
+     get_spec,
+ )
++from sglang.srt.speculative.adaptive_runtime_state import (
++    init_cuda_graph_state_no_shrink,
++)
+ from sglang.srt.speculative.eagle_info import EagleDraftExtendInput
+ from sglang.srt.speculative.eagle_utils import get_draft_input_from_target_hidden_dim
+ from sglang.srt.speculative.spec_utils import resolve_num_tokens_per_req
+@@ -73,7 +76,6 @@ class EagleDraftExtendInputBuffers(ForwardInputBuffers):
+     global_num_tokens_for_logprob_gpu: Optional[torch.Tensor]
+     dsa_seed_topk_capture: Optional[torch.Tensor] = None
+ 
+-
+ class EAGLEDraftExtendCudaGraphRunner(DecodeCudaGraphRunner):
+     """EAGLE draft-extend cuda-graph runner.
+ 
+@@ -138,8 +140,8 @@ class EAGLEDraftExtendCudaGraphRunner(DecodeCudaGraphRunner):
+         self.max_bs = max(self.capture_bs)
+         self.max_num_token = self.max_bs * self.captured_req_width
+ 
+-        self.draft_extend_attn_backend.init_cuda_graph_state(
+-            self.max_bs, self.max_num_token
++        init_cuda_graph_state_no_shrink(
++            self.draft_extend_attn_backend, self.max_bs, self.max_num_token
+         )
+         self.seq_len_fill_value = (
+             self.draft_extend_attn_backend.get_cuda_graph_seq_len_fill_value()
+diff --git a/test/registered/unit/spec/test_adaptive_runtime_state_sizing.py b/test/registered/unit/spec/test_adaptive_runtime_state_sizing.py
+new file mode 100644
+index 0000000000..21a43e7b5c
+--- /dev/null
++++ b/test/registered/unit/spec/test_adaptive_runtime_state_sizing.py
+@@ -0,0 +1,184 @@
++"""Regression tests for adaptive speculative runtime-state sizing.
++
++Covers the two start-up invariants that make several runtime states able to
++coexist on one server:
++
++* a candidate step count may never exceed ``--speculative-num-steps``; and
++* the draft-extend attention backend, which compressed-QSA draft models share
++  across every runtime state, is sized once and never re-sized downward.
++
++The second one is what crashed Qwen3.8-Flash-Next with
++``--speculative-adaptive``: ``DraftBackendFactory.create_draft_extend_backend``
++returns ``draft_runner.attn_backend`` for those models, so building the
++steps=3 / steps=7 states re-ran ``init_cuda_graph_state`` on the very backend
++whose old metadata tensors the already-captured steps=15 draft-extend graphs
++point at, freeing them (illegal memory access at the next replay).
++"""
++
++import json
++import tempfile
++import unittest
++from unittest.mock import patch
++
++from sglang.srt.speculative.adaptive_runtime_state import (
++    AdaptiveController,
++    SpecRuntimeState,
++    init_cuda_graph_state_no_shrink,
++)
++from sglang.srt.speculative.adaptive_spec_params import AdaptiveStepSlot
++from sglang.test.ci.ci_register import register_cpu_ci
++from sglang.test.test_utils import CustomTestCase
++
++register_cpu_ci(est_time=1, suite="base-a-test-cpu")
++
++_MODULE = "sglang.srt.runtime_context"
++
++
++class _StubWorker:
++    def __init__(self, steps=15):
++        self.speculative_num_steps = steps
++        self.built = []
++
++    def build_adaptive_runtime_state(
++        self, speculative_num_steps, speculative_num_draft_tokens, cuda_graph_bs=None
++    ):
++        self.built.append(speculative_num_steps)
++        return SpecRuntimeState(
++            speculative_num_steps=speculative_num_steps,
++            speculative_num_draft_tokens=speculative_num_draft_tokens,
++            draft_attn_backend=None,
++            cuda_graph_runner=None,
++            target_attn_backend=object(),
++            target_graph_runner=None,
++            draft_extend_attn_backend=None,
++            cuda_graph_runner_for_draft_extend=None,
++            qsa_mtp_shared_sparse_indices=None,
++        )
++
++    def apply_runtime_state(self, state):
++        self.speculative_num_steps = state.speculative_num_steps
++
++
++class _StubBackend:
++    """Stands in for the shared compressed-QSA draft-extend backend."""
++
++    def __init__(self):
++        self.calls = []
++
++    def init_cuda_graph_state(self, max_bs, max_num_tokens):
++        self.calls.append((max_bs, max_num_tokens))
++
++
++def _controller(candidates, initial_steps=15):
++    with tempfile.NamedTemporaryFile("w", suffix=".json") as f:
++        json.dump({"1": {"candidate_steps": candidates}}, f)
++        f.flush()
++        return AdaptiveController(_StubWorker(initial_steps), config_path=f.name)
++
++
++class TestAdaptiveCandidateValidation(CustomTestCase):
++    def test_candidate_above_launch_steps_is_rejected(self):
++        controller = _controller([3, 15, 31], initial_steps=15)
++        with self.assertRaises(ValueError) as ctx:
++            controller.init_states(cuda_graph_bs=[1, 2], max_batch_size=2)
++        self.assertIn("31", str(ctx.exception))
++        self.assertIn("speculative-num-steps", str(ctx.exception))
++
++    def test_candidates_within_launch_steps_are_built(self):
++        controller = _controller([3, 15], initial_steps=15)
++        controller.register(
++            controller.worker.build_adaptive_runtime_state(15, 16), steps=15
++        )
++        controller.worker.built.clear()
++        controller.init_states(cuda_graph_bs=[1, 2], max_batch_size=2)
++        # 15 was pre-registered, so only the smaller candidate is built.
++        self.assertEqual(controller.worker.built, [3])
++
++
++class TestDraftExtendGraphStateNoShrink(CustomTestCase):
++    def test_non_adaptive_call_is_passed_through_unstamped(self):
++        backend = _StubBackend()
++        with patch(f"{_MODULE}.get_spec") as get_spec:
++            get_spec.return_value.speculative_adaptive = False
++            init_cuda_graph_state_no_shrink(backend, 2, 32)
++            init_cuda_graph_state_no_shrink(backend, 2, 8)
++        self.assertEqual(backend.calls, [(2, 32), (2, 8)])
++        self.assertFalse(hasattr(backend, "_spec_graph_state_extent"))
++
++    def test_smaller_candidate_does_not_reallocate_shared_backend(self):
++        backend = _StubBackend()
++        with patch(f"{_MODULE}.get_spec") as get_spec:
++            get_spec.return_value.speculative_adaptive = True
++            # steps=15 state (num_draft_tokens=16, capture bs [1, 2]).
++            init_cuda_graph_state_no_shrink(backend, 2, 32)
++            # steps=3 state (num_draft_tokens=4) and a bs=1-only variant.
++            init_cuda_graph_state_no_shrink(backend, 2, 8)
++            init_cuda_graph_state_no_shrink(backend, 1, 4)
++        self.assertEqual(backend.calls, [(2, 32)])
++        self.assertEqual(backend._spec_graph_state_extent, (2, 32))
++
++    def test_growing_a_shared_backend_is_refused(self):
++        backend = _StubBackend()
++        with patch(f"{_MODULE}.get_spec") as get_spec:
++            get_spec.return_value.speculative_adaptive = True
++            init_cuda_graph_state_no_shrink(backend, 2, 8)
++            with self.assertRaises(AssertionError):
++                init_cuda_graph_state_no_shrink(backend, 2, 32)
++        self.assertEqual(backend.calls, [(2, 8)])
++
++
++class TestResetEmaOnSwitch(CustomTestCase):
++    """The shipped w16_3_15 controller must settle, not oscillate."""
++
++    CFG = {
++        "candidate_steps": [3, 15],
++        "ema_alpha": 0.2,
++        "update_interval": 5,
++        "warmup_batches": 10,
++        "down_hysteresis": 3.5,
++        "up_hysteresis": -0.15,
++        "reset_ema_on_switch": True,
++    }
++
++    def _run(self, accept_at_steps, batches=200):
++        """Feed a workload whose accepted-draft count depends on the step count."""
++        slot = AdaptiveStepSlot(initial_steps=15, cfg=dict(self.CFG))
++        trace = []
++        for _ in range(batches):
++            slot.update([accept_at_steps[slot.current_steps]])
++            trace.append(slot.current_steps)
++        return slot, trace
++
++    def test_prose_settles_at_three(self):
++        # measured num_correct_drafts (acc - 1): prose-en 1.96 @15, 1.54 @3
++        slot, trace = self._run({15: 1.96, 3: 1.54})
++        self.assertEqual(slot.current_steps, 3)
++        self.assertEqual(trace[-50:], [3] * 50)
++
++    def test_code_settles_at_fifteen(self):
++        # code-edit 8.85 @15, 2.81 @3
++        slot, trace = self._run({15: 8.85, 3: 2.81})
++        self.assertEqual(slot.current_steps, 15)
++        self.assertEqual(trace[-50:], [15] * 50)
++
++    def test_agent_settles_at_three(self):
++        # agent-loop 3.76 @15, 2.24 @3 -- W4 is the faster profile there
++        slot, trace = self._run({15: 3.76, 3: 2.24})
++        self.assertEqual(slot.current_steps, 3)
++        self.assertEqual(trace[-50:], [3] * 50)
++
++    def test_without_reset_the_same_config_oscillates(self):
++        cfg = dict(self.CFG)
++        cfg["reset_ema_on_switch"] = False
++        slot = AdaptiveStepSlot(initial_steps=15, cfg=cfg)
++        trace = []
++        for _ in range(200):
++            slot.update([{15: 1.96, 3: 1.54}[slot.current_steps]])
++            trace.append(slot.current_steps)
++        # Documents why the reset exists: the shared EMA carries a steps=15
++        # reading into steps=3, where it reads as a near-perfect chain.
++        self.assertGreater(len(set(trace[:60])), 1)
++
++
++if __name__ == "__main__":
++    unittest.main()
+-- 
+2.43.0
+

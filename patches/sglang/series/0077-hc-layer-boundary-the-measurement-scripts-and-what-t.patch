@@ -1,0 +1,406 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: aiueo52 <aiueo52@users.noreply.github.com>
+Date: Sun, 6 Sep 2026 01:35:05 +0900
+Subject: [PATCH 077/105] hc layer boundary: the measurement scripts, and what
+ they said
+
+`numerics_check.py` is the load-bearing one: it pulls real HC weights out
+of the checkpoint and compares apply-then-mix against the fused prologue
+for M in {1, 4, 16} x {bf16, fp8 mix weights} x {with, without the shared
+fold}. `applied`, `normed` and the gate partials come back bit-identical
+in all 12 cases. `mixed` differs on a few elements in 2 of 12, and
+`mix_nondeterminism.py` is why that is not a finding: K1 accumulates
+`t_raw` with device-scope atomics, so re-running the *same* unfused call
+on the same input already differs 5 times out of 5 at M=16 bf16.
+
+`bench_k0_prologue.py` / `bench_k0_variants.py` time the prologue in
+isolation; `trace_budget.py` reads the two kernels the fold moves work
+between out of a decode trace, trimming the handful of per-profile K0
+launches that land in the hundreds of us (profiler artefacts that swamp a
+raw sum).
+
+Same-build flag-off vs flag-on, W4 verify step, per-step totals:
+
+    apply2  51 -> 5 launches   64.6 -> 6.0 us   (code-edit)
+                                63.8 -> 6.0 us   (prose-en)
+    K0                        193.4 -> 210.4 us (code-edit)
+                              194.6 -> 210.0 us (prose-en)
+    net                              -41.6 / -42.4 us/step
+    kernels/step (TARGET_VERIFY)   1399 -> 1353
+
+W16, same accounting:
+
+    apply2  63 -> 17 launches  102.9 -> 21.9 us  (code-edit)
+                              101.3 -> 22.2 us  (prose-en)
+    K0 (trimmed)              239.2 -> 274.3 us (code-edit)
+                              237.7 -> 269.0 us (prose-en)
+    net                              -45.9 / -47.8 us/step
+    kernels/step (TARGET_VERIFY)   1447 -> 1401
+
+Step wall moved by less than the run-to-run spread at both widths (+-0.2 ms
+on a 9.8 / 16.7 ms step), so the kernel accounting is the honest number.
+
+MODE=full with the flag on: acceptance W4 code 3.82-3.88 / prose-en
+2.58-2.65 / agent-loop 3.10-3.34; W16 code 11.21-11.76 / prose-en
+3.07-3.12 / agent-loop 5.17-5.26 -- all in band and level with the last
+full run of this fork. Needle 18.5k PASS and sanity_gen PASS at both
+widths.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+---
+ bench/hc_layer_boundary/bench_k0_prologue.py  |  66 +++++++++++
+ bench/hc_layer_boundary/bench_k0_variants.py  | 112 ++++++++++++++++++
+ bench/hc_layer_boundary/mix_nondeterminism.py |  26 ++++
+ bench/hc_layer_boundary/numerics_check.py     |  92 ++++++++++++++
+ bench/hc_layer_boundary/trace_budget.py       |  15 +++
+ 5 files changed, 311 insertions(+)
+ create mode 100644 bench/hc_layer_boundary/bench_k0_prologue.py
+ create mode 100644 bench/hc_layer_boundary/bench_k0_variants.py
+ create mode 100644 bench/hc_layer_boundary/mix_nondeterminism.py
+ create mode 100644 bench/hc_layer_boundary/numerics_check.py
+ create mode 100644 bench/hc_layer_boundary/trace_budget.py
+
+diff --git a/bench/hc_layer_boundary/bench_k0_prologue.py b/bench/hc_layer_boundary/bench_k0_prologue.py
+new file mode 100644
+index 0000000000..fa1225d50a
+--- /dev/null
++++ b/bench/hc_layer_boundary/bench_k0_prologue.py
+@@ -0,0 +1,66 @@
++"""K0 cost of each prologue variant, isolated (graph-replayed, CUDA-event timed)."""
++import os, sys, json, torch
++sys.path.insert(0,"/home/user/tools/sglang-h2/python")
++import sglang.srt.layers.hc_mix2_triton as T
++from sglang.kernels.ops.elementwise.hc_combine import hc_combine_apply, hc_combine_gate
++from safetensors.torch import safe_open
++MODEL="/home/user/models/RadixArk/Qwen3.8-Flash-Next-NVFP4-mtpft3"
++idx=json.load(open(os.path.join(MODEL,"model.safetensors.index.json")))["weight_map"]
++def get(n):
++    with safe_open(os.path.join(MODEL, idx[n]), framework="pt") as fh:
++        return fh.get_tensor(n).cuda().bfloat16().contiguous()
++P="model.language_model.layers.6.attn_hyper_connection."
++norm_w=get(P+"hc_norm.weight"); inj=get(P+"block_inject_weight.weight")
++injp=get("model.language_model.layers.5.mlp_hyper_connection.block_inject_weight.weight")
++HC,HS=4,2560; K=HC*HS
++cfg=T._DEFAULT_CONFIG
++def build(M):
++    g=torch.Generator(device="cuda").manual_seed(7)
++    return dict(
++        x=(torch.randn(M,K,generator=g,device="cuda")*3).bfloat16(),
++        applied=torch.empty(M,K,dtype=torch.bfloat16,device="cuda"),
++        normed=torch.empty(M,K,dtype=torch.bfloat16,device="cuda"),
++        inv=torch.empty(M*HC,dtype=torch.float32,device="cuda"),
++        t_raw=torch.zeros(16,320,dtype=torch.float32,device="cuda"),
++        gp=torch.empty(M,HC,HC,dtype=torch.float32,device="cuda"),
++        y=(torch.randn(M,HS,generator=g,device="cuda")*.5).bfloat16(),
++        sh=(torch.randn(M,HS,generator=g,device="cuda")*.5).bfloat16(),
++        sg=torch.rand(M,generator=g,device="cuda",dtype=torch.float32),
++        part=hc_combine_gate((torch.randn(M,K,generator=g,device="cuda")).bfloat16(), injp.data, HC, HS).contiguous(),
++    )
++def launch(b,M,fuse_apply,fuse_shared):
++    T._hc_branch_stats_kernel[(M*HC,)](
++        b["applied"] if fuse_apply else b["x"], norm_w, b["inv"], b["normed"], b["t_raw"],
++        inj, b["gp"], b["x"], b["y"], b["part"],
++        b["sh"] if fuse_shared else b["x"], b["sg"] if fuse_shared else b["x"],
++        M*HC, M*320, K, HS, 1e-6,
++        HC=HC, BLOCK_S=cfg.stats_block, ZERO_BLOCK=128, WRITE_NORMED=True,
++        SINGLE_TILE=True, FUSE_GATE=True, FUSE_APPLY=fuse_apply,
++        FUSE_SHARED=fuse_shared, PREV_SPLITS=b["part"].shape[1],
++        num_warps=cfg.stats_warps)
++def apply_launch(b,shared):
++    hc_combine_apply(b["y"], b["x"], b["part"], HC, HS, out=b["applied"],
++                     shared_output=b["sh"] if shared else None,
++                     shared_gate=b["sg"] if shared else None)
++def timeit(fn, n=2000):
++    for _ in range(50): fn()
++    torch.cuda.synchronize()
++    s,e=torch.cuda.Event(True),torch.cuda.Event(True)
++    g=torch.cuda.CUDAGraph()
++    with torch.cuda.graph(g):
++        for _ in range(20): fn()
++    torch.cuda.synchronize()
++    s.record()
++    for _ in range(n//20): g.replay()
++    e.record(); torch.cuda.synchronize()
++    return s.elapsed_time(e)*1000/((n//20)*20)
++for M in (4,16):
++    b=build(M)
++    p =timeit(lambda: launch(b,M,False,False))
++    fa=timeit(lambda: launch(b,M,True,False))
++    fs=timeit(lambda: launch(b,M,True,True))
++    a0=timeit(lambda: apply_launch(b,False))
++    a1=timeit(lambda: apply_launch(b,True))
++    print(f"M={M:2d}  K0 plain={p:.3f}  K0+apply={fa:.3f} (+{fa-p:.3f})  "
++          f"K0+apply+shared={fs:.3f} (+{fs-p:.3f})  |  apply={a0:.3f}  apply+shared={a1:.3f}")
++    print(f"      net R7-style = {fa-p-a0:+.3f} us/boundary ; net H2 (shared) = {fs-p-a1:+.3f} us/boundary")
+diff --git a/bench/hc_layer_boundary/bench_k0_variants.py b/bench/hc_layer_boundary/bench_k0_variants.py
+new file mode 100644
+index 0000000000..a55339b7e3
+--- /dev/null
++++ b/bench/hc_layer_boundary/bench_k0_variants.py
+@@ -0,0 +1,112 @@
++"""Which part of the shared fold costs 0.5us? Variants of the K0 prologue."""
++import os, sys, json, torch, triton, triton.language as tl
++sys.path.insert(0,"/home/user/tools/sglang-h2/python")
++from sglang.kernels.triton_pdl import pdl_wait, pdl_trigger
++from sglang.kernels.ops.elementwise.hc_combine import hc_combine_gate
++
++@triton.jit
++def k0(x_ptr, norm_w_ptr, inv_rms_ptr, normed_ptr, t_raw_ptr, inject_w_ptr,
++       gate_partials_ptr, apply_resid_ptr, apply_block_ptr, apply_part_ptr,
++       apply_shared_ptr, apply_sgate_ptr, num_tasks, zero_span, K, HS, eps,
++       HC: tl.constexpr, BLOCK_S: tl.constexpr, ZERO_BLOCK: tl.constexpr,
++       FUSE_APPLY: tl.constexpr, FUSE_SHARED: tl.constexpr, PREV_SPLITS: tl.constexpr,
++       VARIANT: tl.constexpr):
++    pid = tl.program_id(0); m = pid // HC; c = pid % HC
++    base = m * K + c * HS
++    offs = tl.arange(0, BLOCK_S); mask_s = offs < HS
++    if FUSE_APPLY:
++        if VARIANT == 0:      # current: gate reduction first
++            total = 0.0
++            for ps in tl.static_range(PREV_SPLITS):
++                total += tl.load(apply_part_ptr + (m * PREV_SPLITS + ps) * HC + c)
++            a = 2.0 / (1.0 + tl.exp(-total / HC))
++            y = tl.load(apply_block_ptr + m * HS + offs, mask=mask_s, other=0.0).to(tl.float32)
++            if FUSE_SHARED:
++                g = tl.load(apply_sgate_ptr + m)
++                sh = tl.load(apply_shared_ptr + m * HS + offs, mask=mask_s, other=0.0).to(tl.float32)
++                y = (y + g * sh).to(x_ptr.dtype.element_ty).to(tl.float32)
++            r = tl.load(apply_resid_ptr + base + offs, mask=mask_s, other=0.0).to(tl.float32)
++        elif VARIANT == 1:    # hoist every row load above the gate reduction
++            y = tl.load(apply_block_ptr + m * HS + offs, mask=mask_s, other=0.0).to(tl.float32)
++            if FUSE_SHARED:
++                sh = tl.load(apply_shared_ptr + m * HS + offs, mask=mask_s, other=0.0).to(tl.float32)
++                g = tl.load(apply_sgate_ptr + m)
++            r = tl.load(apply_resid_ptr + base + offs, mask=mask_s, other=0.0).to(tl.float32)
++            total = 0.0
++            for ps in tl.static_range(PREV_SPLITS):
++                total += tl.load(apply_part_ptr + (m * PREV_SPLITS + ps) * HC + c)
++            a = 2.0 / (1.0 + tl.exp(-total / HC))
++            if FUSE_SHARED:
++                y = (y + g * sh).to(x_ptr.dtype.element_ty).to(tl.float32)
++        else:                 # VARIANT 2: hoisted, and no bf16 round-trip (diagnostic only)
++            y = tl.load(apply_block_ptr + m * HS + offs, mask=mask_s, other=0.0).to(tl.float32)
++            if FUSE_SHARED:
++                sh = tl.load(apply_shared_ptr + m * HS + offs, mask=mask_s, other=0.0).to(tl.float32)
++                g = tl.load(apply_sgate_ptr + m)
++            r = tl.load(apply_resid_ptr + base + offs, mask=mask_s, other=0.0).to(tl.float32)
++            total = 0.0
++            for ps in tl.static_range(PREV_SPLITS):
++                total += tl.load(apply_part_ptr + (m * PREV_SPLITS + ps) * HC + c)
++            a = 2.0 / (1.0 + tl.exp(-total / HC))
++            if FUSE_SHARED:
++                y = y + g * sh
++        xb = (r + a * y).to(x_ptr.dtype.element_ty)
++        tl.store(x_ptr + base + offs, xb, mask=mask_s)
++        x = xb.to(tl.float32)
++    else:
++        x = tl.load(x_ptr + base + offs, mask=mask_s, other=0.0).to(tl.float32)
++    w = tl.load(norm_w_ptr + c * HS + offs, mask=mask_s, other=0.0).to(tl.float32)
++    inv_rms = tl.rsqrt(tl.sum(x * x, axis=0) / HS + eps)
++    tl.store(inv_rms_ptr + pid, inv_rms)
++    nrm = (x * inv_rms * (1.0 + w)).to(normed_ptr.dtype.element_ty)
++    tl.store(normed_ptr + base + offs, nrm, mask=mask_s)
++    nrm32 = nrm.to(tl.float32)
++    for cc in tl.static_range(HC):
++        gw = tl.load(inject_w_ptr + cc * K + c * HS + offs, mask=mask_s, other=0.0).to(tl.float32)
++        tl.store(gate_partials_ptr + pid * HC + cc, tl.sum(nrm32 * gw, axis=0))
++    offs_z = tl.arange(0, ZERO_BLOCK)
++    for z0 in range(pid * ZERO_BLOCK, zero_span, num_tasks * ZERO_BLOCK):
++        idx = z0 + offs_z
++        tl.store(t_raw_ptr + idx, 0.0, mask=idx < zero_span)
++
++HC,HS=4,2560; K=HC*HS
++def build(M):
++    g=torch.Generator(device="cuda").manual_seed(7)
++    return dict(x=(torch.randn(M,K,generator=g,device="cuda")*3).bfloat16(),
++        applied=torch.empty(M,K,dtype=torch.bfloat16,device="cuda"),
++        normed=torch.empty(M,K,dtype=torch.bfloat16,device="cuda"),
++        inv=torch.empty(M*HC,dtype=torch.float32,device="cuda"),
++        t_raw=torch.zeros(16,320,dtype=torch.float32,device="cuda"),
++        inj=torch.randn(HC,K,device="cuda").bfloat16(),
++        nw=torch.randn(K,device="cuda").bfloat16(),
++        gp=torch.empty(M,HC,HC,dtype=torch.float32,device="cuda"),
++        y=(torch.randn(M,HS,generator=g,device="cuda")*.5).bfloat16(),
++        sh=(torch.randn(M,HS,generator=g,device="cuda")*.5).bfloat16(),
++        sg=torch.rand(M,generator=g,device="cuda",dtype=torch.float32),
++        part=hc_combine_gate((torch.randn(M,K,generator=g,device="cuda")).bfloat16(),
++                             torch.randn(HC,K,device="cuda").bfloat16(), HC, HS).contiguous())
++def launch(b,M,fa,fs,var):
++    k0[(M*HC,)](b["applied"] if fa else b["x"], b["nw"], b["inv"], b["normed"], b["t_raw"],
++        b["inj"], b["gp"], b["x"], b["y"], b["part"],
++        b["sh"] if fs else b["x"], b["sg"] if fs else b["x"], M*HC, M*320, K, HS, 1e-6,
++        HC=HC, BLOCK_S=4096, ZERO_BLOCK=128, FUSE_APPLY=fa, FUSE_SHARED=fs,
++        PREV_SPLITS=b["part"].shape[1], VARIANT=var, num_warps=8)
++def timeit(fn,n=2000):
++    for _ in range(50): fn()
++    torch.cuda.synchronize()
++    g=torch.cuda.CUDAGraph()
++    with torch.cuda.graph(g):
++        for _ in range(20): fn()
++    torch.cuda.synchronize()
++    s,e=torch.cuda.Event(True),torch.cuda.Event(True); s.record()
++    for _ in range(n//20): g.replay()
++    e.record(); torch.cuda.synchronize()
++    return s.elapsed_time(e)*1000/n
++for M in (4,16):
++    b=build(M)
++    base=timeit(lambda: launch(b,M,False,False,0))
++    fa  =timeit(lambda: launch(b,M,True,False,0))
++    print(f"M={M:2d} plain={base:.3f}  +apply={fa:.3f} ({fa-base:+.3f})")
++    for v in (0,1,2):
++        t=timeit(lambda: launch(b,M,True,True,v))
++        print(f"     +apply+shared VARIANT{v} = {t:.3f} ({t-base:+.3f} vs plain, {t-fa:+.3f} vs apply-only)")
+diff --git a/bench/hc_layer_boundary/mix_nondeterminism.py b/bench/hc_layer_boundary/mix_nondeterminism.py
+new file mode 100644
+index 0000000000..32d4c3bb9c
+--- /dev/null
++++ b/bench/hc_layer_boundary/mix_nondeterminism.py
+@@ -0,0 +1,26 @@
++"""Control: is `mixed` reproducible at all on the fp8 path? (K1 uses atomics.)"""
++import os, sys, json, torch
++sys.path.insert(0, "/home/user/tools/sglang-h2/python")
++from sglang.srt.layers.hc_mix2_triton import hc_norm_mix2, quantize_hc_mix2_weights_fp8
++from safetensors.torch import safe_open
++MODEL="/home/user/models/RadixArk/Qwen3.8-Flash-Next-NVFP4-mtpft3"
++idx=json.load(open(os.path.join(MODEL,"model.safetensors.index.json")))["weight_map"]
++def get(n):
++    with safe_open(os.path.join(MODEL, idx[n]), framework="pt") as fh:
++        return fh.get_tensor(n).cuda().bfloat16().contiguous()
++P="model.language_model.layers.6.attn_hyper_connection."
++norm_w=get(P+"hc_norm.weight"); wd=get(P+"input_mix_weight_down.weight"); wu=get(P+"input_mix_weight_up.weight")
++wd8,sd,wu8,su=quantize_hc_mix2_weights_fp8(wd.data,wu.data)
++HC,HS=4,2560; K=HC*HS
++for M in (1,4,16):
++    g=torch.Generator(device="cuda").manual_seed(1234+M)
++    x=(torch.randn(M,K,generator=g,device="cuda")*3.0).bfloat16()
++    outs=[hc_norm_mix2(x,norm_w,1e-6,wd8,wu8,HC,HS,None,sd,su)[0].clone() for _ in range(6)]
++    torch.cuda.synchronize()
++    ndiff=sum(0 if torch.equal(outs[0],o) else 1 for o in outs[1:])
++    md=max((outs[0].float()-o.float()).abs().max().item() for o in outs[1:])
++    print(f"fp8 M={M}: {ndiff}/5 repeats differ from run 0, maxabs={md:.3e}")
++    outs=[hc_norm_mix2(x,norm_w,1e-6,wd,wu,HC,HS)[0].clone() for _ in range(6)]
++    torch.cuda.synchronize()
++    ndiff=sum(0 if torch.equal(outs[0],o) else 1 for o in outs[1:])
++    print(f"bf16 M={M}: {ndiff}/5 repeats differ from run 0")
+diff --git a/bench/hc_layer_boundary/numerics_check.py b/bench/hc_layer_boundary/numerics_check.py
+new file mode 100644
+index 0000000000..3139f86f2a
+--- /dev/null
++++ b/bench/hc_layer_boundary/numerics_check.py
+@@ -0,0 +1,92 @@
++"""H2 numerics: the layer->layer apply moved into the next mix's K0.
++
++Compares, on real HC weights pulled out of the checkpoint shards:
++  reference : hc_combine_apply(block, resid, partials[, shared, gate]) -> hc_norm_mix2
++  fused     : hc_norm_mix2(resid, ..., apply_inputs=(block, partials[, shared, gate]))
++"""
++import os, sys, torch
++
++sys.path.insert(0, "/home/user/tools/sglang-h2/python")
++from sglang.srt.layers.hc_mix2_triton import hc_norm_mix2, quantize_hc_mix2_weights_fp8
++from sglang.kernels.ops.elementwise.hc_combine import hc_combine_apply, hc_combine_gate
++
++torch.manual_seed(0)
++dev = "cuda"
++HC, HS, LR = 4, 2560, 320
++K = HC * HS
++
++W = {}
++import glob, json
++from safetensors.torch import safe_open
++MODEL = "/home/user/models/RadixArk/Qwen3.8-Flash-Next-NVFP4-mtpft3"
++want = {
++    "model.language_model.layers.5.mlp_hyper_connection.block_inject_weight.weight": "inject_prev",
++    "model.language_model.layers.6.attn_hyper_connection.hc_norm.weight": "norm_w",
++    "model.language_model.layers.6.attn_hyper_connection.input_mix_weight_down.weight": "w_down",
++    "model.language_model.layers.6.attn_hyper_connection.input_mix_weight_up.weight": "w_up",
++    "model.language_model.layers.6.attn_hyper_connection.block_inject_weight.weight": "inject_next",
++}
++idx = json.load(open(os.path.join(MODEL, "model.safetensors.index.json")))["weight_map"]
++for name, key in want.items():
++    f = idx[name]
++    with safe_open(os.path.join(MODEL, f), framework="pt") as fh:
++        W[key] = fh.get_tensor(name).to(dev).to(torch.bfloat16).contiguous()
++for k, v in W.items():
++    print(k, tuple(v.shape), v.dtype)
++
++norm_w = W["norm_w"]
++w_down_bf16, w_up_bf16 = W["w_down"], W["w_up"]
++wd8, sd, wu8, su = quantize_hc_mix2_weights_fp8(w_down_bf16.data, w_up_bf16.data)
++eps = 1e-6
++
++def run(M, fp8, use_shared, gate_early_next):
++    g = torch.Generator(device=dev).manual_seed(1234 + M)
++    resid = (torch.randn(M, K, generator=g, device=dev) * 3.0).bfloat16()
++    normed_prev = (torch.randn(M, K, generator=g, device=dev)).bfloat16()
++    block = (torch.randn(M, HS, generator=g, device=dev) * 0.5).bfloat16()
++    shared = (torch.randn(M, HS, generator=g, device=dev) * 0.5).bfloat16()
++    sgate = torch.rand(M, generator=g, device=dev, dtype=torch.float32)
++    partials = hc_combine_gate(normed_prev, W["inject_prev"].data, HC, HS)
++    wd, wu, s_d, s_u = (wd8, wu8, sd, su) if fp8 else (w_down_bf16, w_up_bf16, None, None)
++    inj = W["inject_next"].data if gate_early_next else None
++
++    # reference: standalone apply, then the mix
++    applied_ref = hc_combine_apply(
++        block, resid, partials, HC, HS,
++        shared_output=shared if use_shared else None,
++        shared_gate=sgate if use_shared else None,
++    )
++    ref = hc_norm_mix2(applied_ref, norm_w, eps, wd, wu, HC, HS, None, s_d, s_u,
++                       inject_weight=inj)
++
++    ai = (block, partials) if not use_shared else (block, partials, shared, sgate)
++    fus = hc_norm_mix2(resid, norm_w, eps, wd, wu, HC, HS, None, s_d, s_u,
++                       inject_weight=inj, apply_inputs=ai)
++    applied_fus = fus[-1]
++    torch.cuda.synchronize()
++
++    def cmp(name, a, b):
++        eq = torch.equal(a, b)
++        if eq:
++            return f"{name}: EQUAL"
++        af, bf = a.float(), b.float()
++        d = (af - bf).abs()
++        n = int((a != b).sum())
++        # ulp distance for bf16
++        return (f"{name}: DIFF n={n}/{a.numel()} maxabs={d.max().item():.3e} "
++                f"maxrel={(d/bf.abs().clamp_min(1e-30)).max().item():.3e}")
++
++    out = [cmp("applied", applied_ref, applied_fus),
++           cmp("mixed  ", ref[0], fus[0]),
++           cmp("normed ", ref[1], fus[1])]
++    if gate_early_next:
++        out.append(cmp("gatepar", ref[2], fus[2]))
++    return out
++
++for fp8 in (False, True):
++    for use_shared in (False, True):
++        for M in (1, 4, 16):
++            tag = f"M={M:<3} fp8={int(fp8)} shared={int(use_shared)}"
++            for line in run(M, fp8, use_shared, gate_early_next=True):
++                print(f"{tag} | {line}")
++print("done")
+diff --git a/bench/hc_layer_boundary/trace_budget.py b/bench/hc_layer_boundary/trace_budget.py
+new file mode 100644
+index 0000000000..73756933ef
+--- /dev/null
++++ b/bench/hc_layer_boundary/trace_budget.py
+@@ -0,0 +1,15 @@
++#!/usr/bin/env python3
++"""Outlier-trimmed per-step budget for the two kernels the fold moves work between.
++A handful of K0 launches per profile land in the hundreds of us (profiler/scheduler
++artefacts); they swamp a raw sum, so drop anything over 10 us and report both."""
++import gzip, json, sys, statistics
++for path in sys.argv[1:]:
++    ev=json.load(gzip.open(path,"rt"))["traceEvents"]
++    n=len([e for e in ev if e.get("ph")=="X" and e.get("cat")=="user_annotation" and e["name"].startswith("step[")]) or 1
++    out=[]
++    for key,label in (("branch_stats","K0"),("hc_combine_apply2","apply")):
++        d=[e["dur"] for e in ev if e.get("ph")=="X" and e.get("cat")=="kernel" and key in e["name"]]
++        t=[x for x in d if x<=10.0]
++        out.append(f"{label}: n={len(d)/n:5.1f}/step raw={sum(d)/n:7.1f} trimmed={sum(t)/n:7.1f} "
++                   f"med={statistics.median(d):.2f} dropped={len(d)-len(t)}")
++    print(f"{path.split('/')[-2]:26s} " + " | ".join(out))
+-- 
+2.43.0
+

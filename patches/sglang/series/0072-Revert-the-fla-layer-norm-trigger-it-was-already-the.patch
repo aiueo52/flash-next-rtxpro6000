@@ -1,0 +1,61 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: aiueo52 <aiueo52@users.noreply.github.com>
+Date: Sat, 5 Sep 2026 18:38:58 +0900
+Subject: [PATCH 072/105] Revert the fla layer-norm trigger: it was already
+ there
+
+_layer_norm_fwd_1pass_kernel already ends with
+`if USE_GDC: gdc_launch_dependents()`, so the GDC_TRIGGER constexpr added in
+d8ea3c55f5 was a second, redundant copy of the same instruction. Back it out;
+the _fused_sigmoid_mul_kernel half of that commit stands.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+---
+ .../kernels/ops/attention/fla/layernorm_gated.py       | 10 ----------
+ 1 file changed, 10 deletions(-)
+
+diff --git a/python/sglang/kernels/ops/attention/fla/layernorm_gated.py b/python/sglang/kernels/ops/attention/fla/layernorm_gated.py
+index ba825e0673..a599e761f0 100644
+--- a/python/sglang/kernels/ops/attention/fla/layernorm_gated.py
++++ b/python/sglang/kernels/ops/attention/fla/layernorm_gated.py
+@@ -16,7 +16,6 @@ import triton.language as tl
+ from einops import rearrange
+ 
+ from sglang.kernels.jit.utils import is_arch_support_pdl
+-from sglang.kernels.triton_pdl import PDL as _TRITON_PDL
+ from sglang.srt.batch_invariant_ops import is_batch_invariant_mode_enabled
+ from sglang.srt.model_executor.cuda_graph_config import (
+     Backend,
+@@ -95,7 +94,6 @@ def _layer_norm_fwd_1pass_kernel(
+     IS_RMS_NORM: tl.constexpr,
+     ACTIVATION: tl.constexpr,
+     USE_GDC: tl.constexpr = False,
+-    GDC_TRIGGER: tl.constexpr = False,
+ ):
+     if USE_GDC:
+         tl.extra.cuda.gdc_wait()
+@@ -181,12 +179,6 @@ def _layer_norm_fwd_1pass_kernel(
+     # Write output
+     tl.store(Y_base, y, mask=mask)
+ 
+-    # The successor (the GDN out_proj gemv) carries launch_pdl under
+-    # SGLANG_TRITON_PDL, so releasing it here lets it schedule its blocks while
+-    # this grid drains. Its own gdc_wait keeps its loads behind these stores.
+-    if GDC_TRIGGER:
+-        tl.extra.cuda.gdc_launch_dependents()
+-
+     if USE_GDC:
+         tl.extra.cuda.gdc_launch_dependents()
+ 
+@@ -263,8 +255,6 @@ def _layer_norm_fwd(
+     # Update grid to use rows_per_block
+     grid = (cdiv(M, rows_per_block), ngroups)
+     pdl_kwargs = {"USE_GDC": True, "launch_pdl": True} if is_arch_support_pdl() else {}
+-    if pdl_kwargs and _TRITON_PDL:
+-        pdl_kwargs["GDC_TRIGGER"] = True
+     # Workaround for PyTorch <= 2.12: torch.xpu.device is not Dynamo-compatible
+     # in that release — it creates a DynamoConfigPatchProxy that
+     # SourcelessBuilder cannot wrap, causing a hard error under
+-- 
+2.43.0
+

@@ -1,0 +1,128 @@
+--- a/flashinfer/data/csrc/fused_moe/cutlass_backend/cutlass_fused_moe_kernels.cuh
++++ b/flashinfer/data/csrc/fused_moe/cutlass_backend/cutlass_fused_moe_kernels.cuh
+@@ -2396,6 +2396,25 @@
+ 
+ // ============================== Activation =================================
+ 
++// FLASHINFER_MOE_FAST_ACTIVATION selects the doActivationKernel variant (A8-lite):
++//   0 = upstream exactly (per-thread binary search over global memory, PDL wait at the top)
++//   1 = stage expert_first_token_offset in shared memory, then binary-search that  [default]
++//   2 = (1) + defer the PDL grid dependency wait to just before the first gemm_result read
++inline int fastActivationMode() {
++  static int const mode = [] {
++    char const* v = std::getenv("FLASHINFER_MOE_FAST_ACTIVATION");
++    if (!v || !v[0]) return 1;
++    int m = std::atoi(v);
++    return (m < 0 || m > 2) ? 1 : m;
++  }();
++  return mode;
++}
++
++// A8-lite: shared-memory staging cap for expert_first_token_offset (entries, not bytes).
++// 1025 int64 = 8200 B of static shared memory; doActivationKernel uses none today and runs at
++// most one block per SM, so this cannot cost occupancy.
++constexpr static int ACTIVATION_SMEM_EXPERT_OFFSETS = 1025;
++
+ template <class T, class GemmOutputType, class ScaleBiasType, class ActFn,
+           TmaWarpSpecializedGroupedGemmInput::FpXBlockScalingType BlockScalingType,
+           bool DISABLE_FP4_QUANT_FAST_MATH = false, typename NVFP4_4OVER6_CONFIG = std::false_type>
+@@ -2404,7 +2423,7 @@
+     ScaleBiasType const* bias_ptr, bool bias_is_broadcast, int64_t const* expert_first_token_offset,
+     int num_experts_per_node, int64_t inter_size, float const* fc2_act_global_scale,
+     bool use_per_expert_act_scale, TmaWarpSpecializedGroupedGemmInput::ElementSF* fc2_act_sf_flat,
+-    ActivationParams activation_params) {
++    ActivationParams activation_params, int fast_activation) {
+ #ifdef ENABLE_FP4
+   constexpr bool IsNVFP4 =
+       std::is_same_v<T, __nv_fp4_e2m1> &&
+@@ -2442,8 +2461,33 @@
+ 
+   int64_t const num_valid_tokens = expert_first_token_offset[num_experts_per_node];
+ 
++  // A8-lite: the upstream kernel makes every thread binary-search expert_first_token_offset in
++  // *global* memory. The probes are warp-uniform but land on ~log2(E) different cache lines of a
++  // 4 KB array that nothing has touched yet, so each level of the search is an L2 round trip on
++  // the critical path of a kernel with no occupancy to hide it. Staging the array in shared
++  // memory turns that into one coalesced pass plus a shared-memory search. The search code is
++  // unchanged, so the answer is bit-identical.
++  __shared__ int64_t smem_expert_offsets[ACTIVATION_SMEM_EXPERT_OFFSETS];
++  bool const use_smem_offsets =
++      (fast_activation >= 1) && (num_experts_per_node + 1 <= ACTIVATION_SMEM_EXPERT_OFFSETS);
++  if (use_smem_offsets) {
++    for (int i = threadIdx.x; i <= num_experts_per_node; i += ACTIVATION_THREADS_PER_BLOCK) {
++      smem_expert_offsets[i] = expert_first_token_offset[i];
++    }
++    __syncthreads();
++  }
++  int64_t const* const offsets_for_search =
++      use_smem_offsets ? &smem_expert_offsets[0] : expert_first_token_offset;
++
++  // A8-lite (mode 2): defer the grid dependency wait to just before the first read of
++  // `gemm_result` -- the only thing this kernel consumes that GEMM1 produces. Everything above
++  // that point comes from the routing prologue, which completed before GEMM1 even started (the
++  // upstream kernel already relies on that: it reads expert_first_token_offset before the wait).
+ #if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
+-  cudaGridDependencySynchronize();
++  bool grid_dep_synced = (fast_activation < 2);
++  if (grid_dep_synced) {
++    cudaGridDependencySynchronize();
++  }
+ #endif
+   for (int64_t token = blockIdx.x; token < num_valid_tokens; token += gridDim.x) {
+     size_t gemm_result_offset = token * inter_size * gated_size_mul;
+@@ -2456,10 +2500,7 @@
+     if (bias_ptr || IsNVFP4 || IsMXFP8 || use_per_expert_act_scale ||
+         activation_params.swiglu_alpha || activation_params.swiglu_beta ||
+         activation_params.swiglu_limit) {
+-      // TODO this is almost certainly faster as a linear scan
+-      expert =
+-          findTotalEltsLessThanTarget(expert_first_token_offset, num_experts_per_node, token + 1) -
+-          1;
++      expert = findTotalEltsLessThanTarget(offsets_for_search, num_experts_per_node, token + 1) - 1;
+ 
+       gate_alpha = activation_params.swiglu_alpha ? activation_params.swiglu_alpha[expert] : 1.0f;
+       gate_beta = activation_params.swiglu_beta ? activation_params.swiglu_beta[expert] : 0.0f;
+@@ -2472,7 +2513,7 @@
+ 
+     // Some globals for FP4
+     float global_scale_val = fc2_act_global_scale ? fc2_act_global_scale[act_scale_idx] : 1.0f;
+-    int64_t num_tokens_before_expert = (IsNVFP4 || IsMXFP8) ? expert_first_token_offset[expert] : 0;
++    int64_t num_tokens_before_expert = (IsNVFP4 || IsMXFP8) ? offsets_for_search[expert] : 0;
+ 
+     size_t bias_offset = 0;
+     if (bias_ptr) {
+@@ -2497,6 +2538,14 @@
+     assert(gated_off % ACTIVATION_ELEM_PER_THREAD == 0);
+     int64_t const gated_off_vec = gated_off / ACTIVATION_ELEM_PER_THREAD;
+ 
++    // A8-lite: everything above depends only on the prologue; from here on we touch gemm_result.
++#if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
++    if (!grid_dep_synced) {
++      cudaGridDependencySynchronize();
++      grid_dep_synced = true;
++    }
++#endif
++
+     ActFn fn{};
+     fn.alpha = gate_alpha;
+     fn.beta = gate_beta;
+@@ -2563,6 +2612,10 @@
+   }
+ 
+ #if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
++  // A8-lite: a block with no rows never reaches the deferred wait above; honour the PDL contract.
++  if (!grid_dep_synced) {
++    cudaGridDependencySynchronize();
++  }
+   cudaTriggerProgrammaticLaunchCompletion();
+ #endif
+ 
+@@ -2681,7 +2734,7 @@
+   cudaLaunchKernelEx(&config, fn, output, gemm_result, fp8_quant, bias, bias_is_broadcast,
+                      expert_first_token_offset, num_experts_per_node, inter_size,
+                      quant_params.fp4.fc2.act_global_scale, use_per_expert_act_scale,
+-                     fc2_act_sf_flat, activation_type);
++                     fc2_act_sf_flat, activation_type, fastActivationMode());
+ }
+ 
+ // ============================== Lora Add Bias =================================

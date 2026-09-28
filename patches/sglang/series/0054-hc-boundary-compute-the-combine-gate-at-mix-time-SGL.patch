@@ -1,0 +1,664 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: aiueo52 <aiueo52@users.noreply.github.com>
+Date: Sat, 5 Sep 2026 15:11:01 +0900
+Subject: [PATCH 054/105] hc boundary: compute the combine gate at mix time
+ (SGLANG_HC_GATE_EARLY)
+
+The HC combine's gate depends only on `normed_residual` and the fixed inject
+weight, yet today it runs after the block output is ready, so its launch sits
+on the boundary's post-block critical path (2.0 us x 102 boundaries/step at
+W4, 2.2-4.8 us x 126 at W16, prod-0905 traces).
+
+Two modes, both leaving only the apply stage after the block:
+
+* FUSED (=1): the HC mix K0 branch CTAs already hold the normed row, so each
+  one dots its branch slice against all HC inject rows and leaves one partial
+  per (row, branch, gate). No gate kernel is launched at all. The reduction
+  runs over branches instead of the gate kernel's 8 strided splits, so the
+  gate value is not bit-identical (same fp32 accumulation, different order).
+* MOVED (=2): the same split gate kernel, launched right after the mix.
+  Bit-identical values; only its position in the stream changes.
+
+The apply stage becomes its own JIT export whose partial count is a runtime
+value, so it takes either layout. It also carries the (unused here) shared-
+expert fold that the next commit turns on. Default off; the default path is
+byte-identical to today.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+---
+ .../jit/csrc/elementwise/hc_combine.cuh       | 191 ++++++++++++++++++
+ .../kernels/ops/elementwise/hc_combine.py     |  68 +++++++
+ python/sglang/srt/environ.py                  |  23 +++
+ python/sglang/srt/layers/hc_mix2_triton.py    |  48 ++++-
+ python/sglang/srt/layers/hyperconnection.py   | 136 ++++++++++++-
+ 5 files changed, 457 insertions(+), 9 deletions(-)
+
+diff --git a/python/sglang/kernels/jit/csrc/elementwise/hc_combine.cuh b/python/sglang/kernels/jit/csrc/elementwise/hc_combine.cuh
+index 5892d8826e..9508de2196 100644
+--- a/python/sglang/kernels/jit/csrc/elementwise/hc_combine.cuh
++++ b/python/sglang/kernels/jit/csrc/elementwise/hc_combine.cuh
+@@ -340,6 +340,38 @@ struct HcCombineSplitKernel {
+   static constexpr auto gate_kernel = hc_combine_gate_kernel<kHcCount, kHiddenSize, kUsePDL, DType>;
+   static constexpr auto apply_kernel = hc_combine_apply_kernel<kHcCount, kHiddenSize, kUsePDL, DType>;
+ 
++  /// Gate stage only: the split partial dots, for a caller that runs the apply
++  /// stage later (SGLANG_HC_GATE_EARLY). Bit-identical to `run`'s first launch.
++  static void
++  run_gate(
++      const tvm::ffi::TensorView normed_residual,
++      const tvm::ffi::TensorView inject_weight,
++      const tvm::ffi::TensorView partials) {
++    using namespace host;
++    using namespace hc_combine_split_detail;
++    auto M = SymbolicSize{"num_tokens"};
++    auto device = SymbolicDevice{};
++    device.set_options<kDLCUDA>();
++
++    TensorMatcher({M, kHcCount * kHiddenSize}).with_dtype<DType>().with_device(device).verify(normed_residual);
++    TensorMatcher({kHcCount, kHcCount * kHiddenSize}).with_dtype<DType>().with_device(device).verify(inject_weight);
++    auto part_rows = SymbolicSize{"partial_rows"};
++    TensorMatcher({part_rows, kSplit, kHcCount}).with_dtype<fp32_t>().with_device(device).verify(partials);
++
++    const auto params = HcCombineSplitParams{
++        .block_output = nullptr,
++        .residual = nullptr,
++        .normed_residual = normed_residual.data_ptr(),
++        .inject_weight = inject_weight.data_ptr(),
++        .output = nullptr,
++        .partials = static_cast<float*>(partials.data_ptr()),
++    };
++
++    const auto num_tokens = static_cast<uint32_t>(M.unwrap());
++    LaunchKernel(dim3(num_tokens, kSplit * kHcCount, 1), kGateThreads, device.unwrap())
++        .enable_pdl(kUsePDL)(gate_kernel, params);
++  }
++
+   static void
+   run(const tvm::ffi::TensorView block_output,
+       const tvm::ffi::TensorView residual,
+@@ -380,4 +412,163 @@ struct HcCombineSplitKernel {
+   }
+ };
+ 
++struct HcCombineApplyParams {
++  const void* block_output;     // [M, H]  routed / block output
++  const void* residual;         // [M, HC * H]
++  const void* shared_output;    // [M, H], only read when kUseShared
++  const float* shared_gate;     // [M],    only read when kUseShared
++  const float* partials;        // [M, num_partials, HC]
++  void* output;                 // [M, HC * H]
++  int32_t num_partials;
++};
++
++/**
++ * \brief Apply-only stage of the HC combine, for a gate computed earlier.
++ *
++ * Same geometry and math as ``hc_combine_apply_kernel``, except that the number
++ * of gate partial slots is a runtime value: the standalone gate kernel emits
++ * kSplit=8 of them, while the HC-mix K0 epilogue (SGLANG_HC_GATE_EARLY) emits
++ * one per branch CTA, i.e. kHcCount.
++ *
++ * With kUseShared the shared-expert join is folded in as well
++ * (SGLANG_SHARED_GATE_EARLY):
++ *
++ *   y[m, i] = Float(routed[m, i] + gate[m] * shared[m, i])
++ *   out[m, c*H + i] = residual[m, c*H + i] + a[m, c] * y[m, i]
++ *
++ * The intermediate rounding to ``Float`` reproduces the bf16 store that
++ * ``fused_gate_sigmoid_mul_add`` performs before the combine reads it, so the
++ * folded path is bit-identical to the separate-kernel one.
++ */
++template <int64_t kHcCount, int64_t kHiddenSize, bool kUsePDL, typename Float, bool kUseShared>
++__global__ __launch_bounds__(hc_combine_split_detail::kApplyThreads) void hc_combine_apply2_kernel(
++    const HcCombineApplyParams __grid_constant__ params) {
++  using namespace device;
++  using namespace hc_combine_split_detail;
++  using Float2 = packed_t<Float>;
++  using Storage = AlignedVector<Float2, 4>;
++  constexpr int64_t kRowSize = kHcCount * kHiddenSize;
++  constexpr uint32_t kVecsPerRow = kRowSize / kVecLen;
++  constexpr uint32_t kVecsPerSplit = kVecsPerRow / kSplit;
++  constexpr uint32_t kVecsPerThread = kVecsPerSplit / kApplyThreads;
++  constexpr uint32_t kVecsPerBranch = kHiddenSize / kVecLen;
++  static_assert(kVecsPerBranch % kVecsPerSplit == 0);
++
++  const uint32_t m = blockIdx.x;
++  const uint32_t split = blockIdx.y;
++  const uint32_t vec_base = split * kVecsPerSplit;
++  const uint32_t branch = vec_base / kVecsPerBranch;
++
++  const auto y_ptr = pointer::offset<Float>(params.block_output, static_cast<int64_t>(m) * kHiddenSize);
++  const auto r_ptr = pointer::offset<Float>(params.residual, static_cast<int64_t>(m) * kRowSize);
++  const auto out_ptr = pointer::offset<Float>(params.output, static_cast<int64_t>(m) * kRowSize);
++
++  PDLWaitPrimary<kUsePDL>();
++
++  const int32_t num_partials = params.num_partials;
++  float total = 0.0f;
++  for (int32_t s = 0; s < num_partials; ++s) {
++    total += params.partials[(static_cast<int64_t>(m) * num_partials + s) * kHcCount + branch];
++  }
++  const float a = 2.0f / (1.0f + math::exp(-total / kHcCount));
++
++  float g = 0.0f;
++  const void* s_ptr = nullptr;
++  if constexpr (kUseShared) {
++    g = params.shared_gate[m];
++    s_ptr = pointer::offset<Float>(params.shared_output, static_cast<int64_t>(m) * kHiddenSize);
++  }
++
++#pragma unroll
++  for (uint32_t j = 0; j < kVecsPerThread; ++j) {
++    const uint32_t vec_idx = vec_base + threadIdx.x + j * kApplyThreads;
++    const uint32_t col_in_branch = (vec_idx % kVecsPerBranch);
++    Storage r_vec;
++    r_vec.load(r_ptr, vec_idx);
++    Storage y_vec;
++    y_vec.load(y_ptr, col_in_branch);
++    Storage s_vec;
++    if constexpr (kUseShared) {
++      s_vec.load(s_ptr, col_in_branch);
++    }
++    Storage out_vec;
++#pragma unroll
++    for (uint32_t i = 0; i < kVecLen / 2; ++i) {
++      const auto [rx, ry] = cast<fp32x2_t>(r_vec[i]);
++      auto [yx, yy] = cast<fp32x2_t>(y_vec[i]);
++      if constexpr (kUseShared) {
++        const auto [sx, sy] = cast<fp32x2_t>(s_vec[i]);
++        // Round the routed+shared sum to Float exactly like the standalone
++        // fused_gate_sigmoid_mul_add store does, then widen again.
++        const Float2 rounded = cast<Float2>(fp32x2_t{yx + g * sx, yy + g * sy});
++        const auto [wx, wy] = cast<fp32x2_t>(rounded);
++        yx = wx;
++        yy = wy;
++      }
++      out_vec[i] = cast<Float2>(fp32x2_t{rx + a * yx, ry + a * yy});
++    }
++    out_vec.store(out_ptr, vec_idx);
++  }
++
++  PDLTriggerSecondary<kUsePDL>();
++}
++
++template <int64_t kHcCount, int64_t kHiddenSize, bool kUsePDL, typename DType, bool kUseShared>
++struct HcCombineApplyKernel {
++  static_assert(sizeof(DType) == 2, "HcCombine only supports 2-byte dtypes");
++  static constexpr auto kernel = hc_combine_apply2_kernel<kHcCount, kHiddenSize, kUsePDL, DType, kUseShared>;
++
++  /// Apply without the shared-expert fold; `block_output` is the finished block output.
++  static void
++  run_plain(const tvm::ffi::TensorView block_output,
++            const tvm::ffi::TensorView residual,
++            const tvm::ffi::TensorView partials,
++            const tvm::ffi::TensorView output) {
++    static_assert(!kUseShared, "run_plain requires kUseShared == false");
++    run(block_output, residual, block_output, partials, partials, output);
++  }
++
++  static void
++  run(const tvm::ffi::TensorView block_output,
++      const tvm::ffi::TensorView residual,
++      const tvm::ffi::TensorView shared_output,
++      const tvm::ffi::TensorView shared_gate,
++      const tvm::ffi::TensorView partials,
++      const tvm::ffi::TensorView output) {
++    using namespace host;
++    using namespace hc_combine_split_detail;
++    auto M = SymbolicSize{"num_tokens"};
++    auto device = SymbolicDevice{};
++    device.set_options<kDLCUDA>();
++
++    TensorMatcher({M, kHiddenSize}).with_dtype<DType>().with_device(device).verify(block_output);
++    TensorMatcher({M, kHcCount * kHiddenSize})
++        .with_dtype<DType>()
++        .with_device(device)
++        .verify(residual)
++        .verify(output);
++    auto part_rows = SymbolicSize{"partial_rows"};
++    auto num_partials = SymbolicSize{"num_partials"};
++    TensorMatcher({part_rows, num_partials, kHcCount}).with_dtype<fp32_t>().with_device(device).verify(partials);
++    if constexpr (kUseShared) {
++      TensorMatcher({M, kHiddenSize}).with_dtype<DType>().with_device(device).verify(shared_output);
++      auto gate_rows = SymbolicSize{"gate_rows"};
++      TensorMatcher({gate_rows}).with_dtype<fp32_t>().with_device(device).verify(shared_gate);
++    }
++
++    const auto params = HcCombineApplyParams{
++        .block_output = block_output.data_ptr(),
++        .residual = residual.data_ptr(),
++        .shared_output = kUseShared ? shared_output.data_ptr() : nullptr,
++        .shared_gate = kUseShared ? static_cast<const float*>(shared_gate.data_ptr()) : nullptr,
++        .partials = static_cast<const float*>(partials.data_ptr()),
++        .output = output.data_ptr(),
++        .num_partials = static_cast<int32_t>(num_partials.unwrap()),
++    };
++
++    const auto num_tokens = static_cast<uint32_t>(M.unwrap());
++    LaunchKernel(dim3(num_tokens, kSplit, 1), kApplyThreads, device.unwrap()).enable_pdl(kUsePDL)(kernel, params);
++  }
++};
++
+ }  // namespace sglang
+diff --git a/python/sglang/kernels/ops/elementwise/hc_combine.py b/python/sglang/kernels/ops/elementwise/hc_combine.py
+index 4245cd07c3..09afe37386 100644
+--- a/python/sglang/kernels/ops/elementwise/hc_combine.py
++++ b/python/sglang/kernels/ops/elementwise/hc_combine.py
+@@ -42,6 +42,15 @@ def _jit_hc_combine_module(
+         cuda_wrappers=[
+             ("hc_combine", f"HcCombineKernel<{args}>::run"),
+             ("hc_combine_split", f"HcCombineSplitKernel<{args}>::run"),
++            ("hc_combine_gate", f"HcCombineSplitKernel<{args}>::run_gate"),
++            (
++                "hc_combine_apply",
++                f"HcCombineApplyKernel<{args}, false>::run_plain",
++            ),
++            (
++                "hc_combine_apply_shared",
++                f"HcCombineApplyKernel<{args}, true>::run",
++            ),
+         ],
+     )
+ 
+@@ -134,3 +143,62 @@ def hc_combine_split(
+     module = _jit_hc_combine_module(hc_count, hidden_size, residual.dtype)
+     module.hc_combine_split(y, r, n, inject_weight, out, partials)
+     return out.reshape(residual.shape)
++
++
++def hc_combine_apply(
++    block_output: torch.Tensor,
++    residual: torch.Tensor,
++    partials: torch.Tensor,
++    hc_count: int,
++    hidden_size: int,
++    out: Optional[torch.Tensor] = None,
++    shared_output: Optional[torch.Tensor] = None,
++    shared_gate: Optional[torch.Tensor] = None,
++) -> torch.Tensor:
++    """Apply stage only, for a gate whose partial dots are already in `partials`.
++
++    `partials` is fp32 [rows, splits, hc_count]; `splits` is a runtime value so
++    both the standalone gate kernel (8 splits) and the HC-mix K0 epilogue
++    (one slot per branch CTA, i.e. hc_count splits) can feed this.
++
++    With `shared_output`/`shared_gate` the shared-expert join is folded in:
++    ``block_output`` is then the routed-expert output only and the kernel forms
++    ``bf16(routed + gate * shared)`` before the residual update, matching the
++    order of the separate ``fused_gate_sigmoid_mul_add`` + combine pair.
++    """
++    y = block_output.reshape(-1, hidden_size)
++    r = residual.reshape(-1, hc_count * hidden_size)
++    if out is None:
++        out = torch.empty_like(r)
++    else:
++        out = out.reshape(-1, hc_count * hidden_size)
++    module = _jit_hc_combine_module(hc_count, hidden_size, residual.dtype)
++    if shared_output is None:
++        module.hc_combine_apply(y, r, partials, out)
++    else:
++        module.hc_combine_apply_shared(
++            y, r, shared_output.reshape(-1, hidden_size), shared_gate, partials, out
++        )
++    return out.reshape(residual.shape)
++
++
++def hc_combine_gate(
++    normed_residual: torch.Tensor,
++    inject_weight: torch.Tensor,
++    hc_count: int,
++    hidden_size: int,
++    partials: Optional[torch.Tensor] = None,
++) -> torch.Tensor:
++    """Gate stage only: the split partial dots, without touching block output.
++
++    Returns the fp32 [rows, 8, hc_count] partials that `hc_combine_apply`
++    reduces. Only the gate kernel of the split pair is launched, so the values
++    are bit-identical to what `hc_combine_split` computes internally.
++    """
++    n = normed_residual.reshape(-1, hc_count * hidden_size)
++    rows = n.shape[0]
++    if partials is None:
++        partials = _get_partials(hc_count, n.device, rows)[:rows]
++    module = _jit_hc_combine_module(hc_count, hidden_size, normed_residual.dtype)
++    module.hc_combine_gate(n, inject_weight, partials)
++    return partials
+diff --git a/python/sglang/srt/environ.py b/python/sglang/srt/environ.py
+index 4bd1a195a6..69fe7afedb 100644
+--- a/python/sglang/srt/environ.py
++++ b/python/sglang/srt/environ.py
+@@ -209,6 +209,20 @@ class GateGemvMode(IntEnum):
+     FUSED = 2
+ 
+ 
++class HCGateEarly(IntEnum):
++    """Where the HyperConnection combine gate is computed.
++
++    OFF:    after the block, as the first half of the split combine (today)
++    FUSED:  in the HC mix K0 branch CTAs, which already hold the normed row,
++            so no gate kernel is launched at all
++    MOVED:  the same split gate kernel, launched right after the mix
++    """
++
++    OFF = 0
++    FUSED = 1
++    MOVED = 2
++
++
+ class ToolStrictLevel(IntEnum):
+     """
+     Defines the strictness levels for tool call parsing and validation.
+@@ -1020,6 +1034,15 @@ class Envs:
+     SGLANG_BF16_GEMM_LOG_SHAPES = EnvBool(False)
+     # Split the HC combine gate dot across CTAs instead of one CTA per row.
+     SGLANG_HC_COMBINE_SPLIT = EnvBool(True)
++    # Compute the HC combine gate at mix time instead of after the block, so
++    # only the apply stage is left on the boundary's post-block critical path.
++    # 0 = off, 1 = fold the partial dots into the HC mix K0 branch CTAs (no
++    # gate launch at all), 2 = keep the split gate kernel but launch it early
++    # (bit-identical values).
++    SGLANG_HC_GATE_EARLY = EnvInt(HCGateEarly.OFF)
++    # Compute the shared-expert gate before the routed experts and fold the
++    # `routed + gate * shared` join into the HC combine's apply stage.
++    SGLANG_SHARED_GATE_EARLY = EnvBool(False)
+     SGLANG_DEEPGEMM_STANDARD_LAYOUT = EnvStr("auto")
+     SGLANG_DEEPGEMM_MASKED_MEMORY_BUDGET_FRACTION = EnvFloat(0.25)
+     # Cap the DeepGEMM masked grouped-GEMM per-expert padded capacity at
+diff --git a/python/sglang/srt/layers/hc_mix2_triton.py b/python/sglang/srt/layers/hc_mix2_triton.py
+index 38980cd1e8..f98be7fe0e 100644
+--- a/python/sglang/srt/layers/hc_mix2_triton.py
++++ b/python/sglang/srt/layers/hc_mix2_triton.py
+@@ -131,6 +131,8 @@ def _hc_branch_stats_kernel(
+     inv_rms_ptr,
+     normed_ptr,
+     t_raw_ptr,
++    inject_w_ptr,
++    gate_partials_ptr,
+     num_tasks,
+     zero_span,
+     K,
+@@ -141,6 +143,7 @@ def _hc_branch_stats_kernel(
+     ZERO_BLOCK: tl.constexpr,
+     WRITE_NORMED: tl.constexpr,
+     SINGLE_TILE: tl.constexpr,
++    FUSE_GATE: tl.constexpr,
+ ):
+     pid = tl.program_id(0)
+     m = pid // HC
+@@ -161,11 +164,26 @@ def _hc_branch_stats_kernel(
+         inv_rms = tl.rsqrt(tl.sum(x * x, axis=0) / HS + eps)
+         tl.store(inv_rms_ptr + pid, inv_rms)
+         if WRITE_NORMED:
+-            tl.store(
+-                normed_ptr + base + offs,
+-                (x * inv_rms * (1.0 + w)).to(normed_ptr.dtype.element_ty),
+-                mask=mask_s,
+-            )
++            nrm = (x * inv_rms * (1.0 + w)).to(normed_ptr.dtype.element_ty)
++            tl.store(normed_ptr + base + offs, nrm, mask=mask_s)
++            if FUSE_GATE:
++                # HC-combine gate epilogue (SGLANG_HC_GATE_EARLY): this CTA
++                # already holds branch `c` of the normed row, so the branch's
++                # slice of each of the HC inject-weight rows is dotted here and
++                # left as one partial per (row, branch, gate). The apply stage
++                # after the block sums the HC partials; the standalone gate
++                # kernel is then never launched.
++                nrm32 = nrm.to(tl.float32)
++                for cc in tl.static_range(HC):
++                    gw = tl.load(
++                        inject_w_ptr + cc * K + c * HS + offs,
++                        mask=mask_s,
++                        other=0.0,
++                    ).to(tl.float32)
++                    tl.store(
++                        gate_partials_ptr + pid * HC + cc,
++                        tl.sum(nrm32 * gw, axis=0),
++                    )
+     else:
+         acc = tl.zeros((BLOCK_S,), dtype=tl.float32)
+         for s0 in range(0, HS, BLOCK_S):
+@@ -453,6 +471,7 @@ def hc_norm_mix2(
+     config: HCMix2Config | None = None,
+     s_down: torch.Tensor | None = None,
+     s_up: torch.Tensor | None = None,
++    inject_weight: torch.Tensor | None = None,
+ ) -> tuple[torch.Tensor, torch.Tensor]:
+     """Per-branch Gemma RMSNorm followed by the gated low-rank mix.
+ 
+@@ -485,6 +504,18 @@ def hc_norm_mix2(
+     mixed = torch.empty((rows, hs), dtype=hyper_input.dtype, device=device)
+     redundant_stats = config.stats_mode == "redundant"
+     read_normed = config.stats_mode == "norm"
++    single_tile = config.stats_block >= hs
++    fuse_gate = (
++        inject_weight is not None
++        and not redundant_stats
++        and read_normed
++        and single_tile
++    )
++    gate_partials = (
++        torch.empty((rows, hc, hc), dtype=torch.float32, device=device)
++        if fuse_gate
++        else None
++    )
+     if redundant_stats:
+         # No K0 to fold the clear into, so the graph carries a 20 KB memset.
+         t_raw = torch.zeros((rows_pad, lowrank), dtype=torch.float32, device=device)
+@@ -500,6 +531,8 @@ def hc_norm_mix2(
+             inv_rms,
+             normed,
+             t_raw,
++            inject_weight if fuse_gate else normed,
++            gate_partials if fuse_gate else t_raw,
+             num_tasks,
+             zero_span,
+             k,
+@@ -509,7 +542,8 @@ def hc_norm_mix2(
+             BLOCK_S=config.stats_block,
+             ZERO_BLOCK=max(64, triton.next_power_of_2(zero_span // num_tasks)),
+             WRITE_NORMED=read_normed,
+-            SINGLE_TILE=config.stats_block >= hs,
++            SINGLE_TILE=single_tile,
++            FUSE_GATE=fuse_gate,
+             num_warps=config.stats_warps,
+         )
+ 
+@@ -560,4 +594,6 @@ def hc_norm_mix2(
+         W_FP8=w_fp8,
+         num_warps=config.up_warps,
+     )
++    if inject_weight is not None:
++        return mixed, normed, gate_partials
+     return mixed, normed
+diff --git a/python/sglang/srt/layers/hyperconnection.py b/python/sglang/srt/layers/hyperconnection.py
+index 05cbfc8099..4a066f2436 100644
+--- a/python/sglang/srt/layers/hyperconnection.py
++++ b/python/sglang/srt/layers/hyperconnection.py
+@@ -24,6 +24,21 @@ _HC_MIX2_FP8 = os.environ.get("SGLANG_HC_MIX2_FP8", "0") == "1"
+ _HC_MIX2_FP8_DROP_BF16 = os.environ.get("SGLANG_HC_MIX2_FP8_DROP_BF16", "0") == "1"
+ _HC_MIX_FP8 = os.environ.get("SGLANG_HC_MIX_FP8", "0") == "1"
+ 
++
++def _hc_gate_early_mode() -> int:
++    """R1: where the combine gate runs. See `HCGateEarly` in `srt.environ`.
++
++    `SGLANG_SHARED_GATE_EARLY` (R6) folds the shared-expert join into the apply
++    stage, which only exists as a separate launch once the gate has moved to
++    mix time, so it implies the bit-identical MOVED mode when R1 is left off.
++    """
++    from sglang.srt.environ import HCGateEarly, envs
++
++    mode = int(envs.SGLANG_HC_GATE_EARLY.get())
++    if not mode and envs.SGLANG_SHARED_GATE_EARLY.get():
++        return int(HCGateEarly.MOVED)
++    return mode
++
+ if TYPE_CHECKING:
+     from sglang.srt.layers.quantization.base_config import QuantizationConfig
+ 
+@@ -257,6 +272,19 @@ class GatedResidual(HyperConnectionBase):
+             # fits its grid barrier; the per-call row count decides that, so the
+             # rest of the check lives in hc_combine_fused_supported.
+             self._fused_combine_ok = _HC_COMBINE_FUSED and torch.cuda.is_available()
++            # R1 (SGLANG_HC_GATE_EARLY): partials for the mode-2 path, which
++            # reuses the split gate kernel's 8-slot layout. Allocated once here
++            # so a CUDA-graph capture never takes it from a graph-private pool.
++            self._early_partials_buf = None
++            self._gate_early = (
++                _hc_gate_early_mode() if self._split_combine_ok else 0
++            )
++            if self._gate_early:
++                self._early_partials_buf = torch.empty(
++                    (32, 8, self.hc_count),
++                    dtype=torch.float32,
++                    device=self.block_inject_weight.weight.device,
++                )
+ 
+         def _mix_compute(
+             hyper_input_normed: torch.Tensor,
+@@ -436,6 +464,27 @@ class GatedResidual(HyperConnectionBase):
+             from sglang.srt.layers.hc_mix2_triton import hc_norm_mix2
+ 
+             w_down, w_up, s_down, s_up = self._mix2_weights()
++            if self._gate_early_ok(hyper_input) and getattr(self, "_gate_early", 0) == 1:
++                mixed_input, hyper_input_normed, gate_partials = hc_norm_mix2(
++                    hyper_input,
++                    self.hc_norm.weight,
++                    self.hc_norm.variance_epsilon,
++                    w_down,
++                    w_up,
++                    self.hc_count,
++                    self.hidden_size,
++                    None,
++                    s_down,
++                    s_up,
++                    inject_weight=self.block_inject_weight.weight.data,
++                )
++                if gate_partials is not None:
++                    return mixed_input, (
++                        hyper_input,
++                        hyper_input_normed,
++                        gate_partials,
++                    )
++                return mixed_input, self._early_gate(hyper_input, hyper_input_normed)
+             mixed_input, hyper_input_normed = hc_norm_mix2(
+                 hyper_input,
+                 self.hc_norm.weight,
+@@ -448,6 +497,8 @@ class GatedResidual(HyperConnectionBase):
+                 s_down,
+                 s_up,
+             )
++            if self._gate_early_ok(hyper_input):
++                return mixed_input, self._early_gate(hyper_input, hyper_input_normed)
+             return mixed_input, (hyper_input, hyper_input_normed)
+ 
+         if self._fused_mix_supported(hyper_input):
+@@ -559,15 +610,94 @@ class GatedResidual(HyperConnectionBase):
+                 self.hc_count,
+                 self.hidden_size,
+             ).to(self.params_dtype)
++        if self._gate_early_ok(hyper_input):
++            return mixed_input, self._early_gate(hyper_input, hyper_input_normed)
+         return mixed_input, (hyper_input, hyper_input_normed)
+ 
+-    def combine(self, block_output: torch.Tensor, residuals) -> torch.Tensor:
+-        hyper_input, hyper_input_normed = residuals
++    def _gate_early_ok(self, hyper_input: torch.Tensor) -> bool:
++        """Whether the combine gate for this boundary can be run at mix time."""
++        return bool(
++            getattr(self, "_gate_early", 0)
++            and self._split_combine_ok
++            and hyper_input.is_cuda
++            and hyper_input.dtype == self.block_inject_weight.weight.dtype
++            and hyper_input.dtype in (torch.bfloat16, torch.float16)
++            and hyper_input.dim() == 2
++            and hyper_input.shape[0] <= 32
++        )
++
++    def _early_gate(self, hyper_input: torch.Tensor, hyper_input_normed: torch.Tensor):
++        """Run the split gate kernel now; `combine` is then apply-only.
++
++        Values are bit-identical to the gate stage inside `hc_combine_split`;
++        only its position in the stream changes.
++        """
++        from sglang.kernels.ops.elementwise.hc_combine import hc_combine_gate
++
++        rows = hyper_input_normed.shape[0]
++        partials = hc_combine_gate(
++            hyper_input_normed,
++            self.block_inject_weight.weight.data,
++            self.hc_count,
++            self.hidden_size,
++            partials=self._early_partials_buf[:rows],
++        )
++        return hyper_input, hyper_input_normed, partials
++
++    def combine(
++        self,
++        block_output: torch.Tensor,
++        residuals,
++        shared_output: Optional[torch.Tensor] = None,
++        shared_gate: Optional[torch.Tensor] = None,
++    ) -> torch.Tensor:
++        hyper_input, hyper_input_normed = residuals[0], residuals[1]
++        gate_partials = residuals[2] if len(residuals) > 2 else None
+         assert hyper_input.shape[-1] == self.hc_count * self.hidden_size
+         assert block_output.shape[-1] == self.hidden_size
+         if block_output.shape[0] == 0:
+             return hyper_input.to(self.params_dtype)
+ 
++        if (
++            gate_partials is not None
++            and block_output.is_cuda
++            and block_output.dtype == hyper_input.dtype
++            and block_output.shape[0] <= 32
++            and (
++                shared_output is None
++                or (
++                    shared_output.shape == block_output.shape
++                    and shared_output.dtype == block_output.dtype
++                    and shared_output.is_contiguous()
++                    and shared_gate is not None
++                )
++            )
++        ):
++            # R1/R6: the gate was computed at mix time and the shared-expert
++            # join (if any) is folded in here, so this is the only kernel left
++            # on the boundary's post-block critical path.
++            from sglang.kernels.ops.elementwise.hc_combine import hc_combine_apply
++
++            return hc_combine_apply(
++                block_output,
++                hyper_input,
++                gate_partials,
++                self.hc_count,
++                self.hidden_size,
++                shared_output=shared_output,
++                shared_gate=shared_gate,
++            )
++
++        if shared_output is not None:
++            # No fused apply for this shape: reproduce the standalone epilogue.
++            from sglang.kernels.ops.elementwise.elementwise import (
++                fused_gate_sigmoid_mul_add_precomputed,
++            )
++
++            block_output = fused_gate_sigmoid_mul_add_precomputed(
++                block_output, shared_output, shared_gate
++            )
++
+         if (
+             self._jit_combine_ok
+             and block_output.is_cuda
+@@ -639,7 +769,7 @@ class GatedResidual(HyperConnectionBase):
+         next_hc: "GatedResidual",
+     ):
+         """Combine this boundary and norm/mix the next one in one launch."""
+-        hyper_input, hyper_input_normed = residuals
++        hyper_input, hyper_input_normed = residuals[0], residuals[1]
+         inject_w = self.block_inject_weight.weight
+         if (
+             next_hc._fused_mix_supported(hyper_input)
+-- 
+2.43.0
+

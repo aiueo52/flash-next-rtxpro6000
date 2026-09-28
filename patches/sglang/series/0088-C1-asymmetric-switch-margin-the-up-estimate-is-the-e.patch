@@ -1,0 +1,81 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: aiueo52 <aiueo52@users.noreply.github.com>
+Date: Sun, 6 Sep 2026 16:13:45 +0900
+Subject: [PATCH 088/105] C1: asymmetric switch margin (the up estimate is the
+ extrapolated one)
+
+Server A/B 2026-09-06 16:07/16:10, fnbench 4 workloads x 2 repeats, needle
+PASS both, same hour:
+
+    workload     EMA (shipped)     confidence      delta
+    code-edit    acc 8.87 / 508    10.84 / 544     +7.1%
+    prose-en          2.58 / 246    2.59 / 246      0.0%
+    prose-ja          2.37 / 228    2.29 / 221     -3.1%
+    agent-loop        3.43 / 292    3.75 / 267     -8.6%
+    switches               13             3
+
+The agent-loop loss has a single identifiable cause, visible in the decision
+log: at 16:11:35 it predicted E@15 = 5.53 (323 tok/s) against a true ~3.5,
+stepped up mid-benchmark, and came back 5 s later. That is the upward
+estimator's known optimism, and it is not symmetric noise -- going DOWN uses
+min(accepted, S), which is exact, while going UP uses the hazard
+extrapolation. So the hysteresis should not be symmetric either: a candidate
+whose estimate is extrapolated now has to clear a wider margin (up_margin).
+The two cases separate cleanly, which is why one constant works: at S=3
+code-edit predicts +88% for the long chain, while agent-loop and both prose
+workloads predict within +/-5%.
+
+Offline (3000-batch in-order replay, exact min(a,S) counterfactual, switch
+penalty 4 batches), fraction of the better fixed profile:
+    shipped EMA   worst 0.957  mean 0.986   43 switches
+    confidence    worst 0.996  mean 0.997    3 switches
+and the ablation that removes the confidence buckets but keeps everything else
+(confidence_weight=0, i.e. option 3 on its own) falls to worst 0.860 / mean
+0.924 -- the buckets are load-bearing, not decoration.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+---
+ .../srt/speculative/adaptive_confidence.py    | 19 ++++++++++++++++---
+ 1 file changed, 16 insertions(+), 3 deletions(-)
+
+diff --git a/python/sglang/srt/speculative/adaptive_confidence.py b/python/sglang/srt/speculative/adaptive_confidence.py
+index cb714a968c..db40d9d875 100644
+--- a/python/sglang/srt/speculative/adaptive_confidence.py
++++ b/python/sglang/srt/speculative/adaptive_confidence.py
+@@ -384,6 +384,16 @@ class ConfidenceStepSlot:
+         self._grace = self.switch_grace_batches
+         self._last_dir = 0
+         self.switch_margin = float(cfg.get("switch_margin", 0.05))
++        # Asymmetric on purpose, because the two estimates are not equally
++        # trustworthy. Going DOWN uses min(accepted, S), which is exact. Going
++        # UP uses the hazard extrapolation, which measured 8-17% optimistic --
++        # and on the 2026-09-06 server A/B that optimism cost agent-loop 8.6%:
++        # it predicted E@15 = 5.53 (323 tok/s) against a true ~3.5, stepped up
++        # mid-benchmark and had to come back 5 s later. A candidate whose
++        # estimate is extrapolated must therefore clear a wider margin. It
++        # separates cleanly: at S=3 code-edit predicts +88% for the long chain
++        # while agent-loop and the prose workloads predict within +/-5%.
++        self.up_margin = float(cfg.get("up_margin", 0.30))
+         # The hazard extrapolation runs 8-17% optimistic against measurement.
+         self.tail_bias = float(cfg.get("tail_bias", 0.9))
+         # 0 pools every step into one estimate (option 3: a better statistic,
+@@ -540,10 +550,13 @@ class ConfidenceStepSlot:
+         for s in self.candidate_steps:
+             tps = self.value(s)
+             if s == self.current_steps:
+-                # The only hysteresis: a challenger must clear the incumbent by
+-                # this margin, which pays for the cold draft state a switch
+-                # leaves behind and covers the upward estimate's known bias.
++                # Hysteresis: a challenger must clear the incumbent, which pays
++                # for the cold draft state a switch leaves behind.
+                 tps *= 1.0 + self.switch_margin
++            elif s > self.current_steps:
++                # ... and clear it by more when its own estimate is the
++                # extrapolation rather than an exact observation.
++                tps /= 1.0 + self.up_margin
+             if tps > best_tps:
+                 best, best_tps = s, tps
+         return best, best_tps
+-- 
+2.43.0
+

@@ -1,0 +1,33 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: aiueo52 <aiueo52@users.noreply.github.com>
+Date: Sat, 5 Sep 2026 15:39:57 +0900
+Subject: [PATCH 9/9] mtp dump: do not collect taps inside a CUDA-graph capture
+
+The clone would allocate into the graph's private pool and bake two extra
+10240-wide buffers and their copies into every replay.  Only extend
+forwards are ever dumped, so a captured graph has nothing to collect.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+---
+ python/sglang/srt/models/qwen4_exp.py | 5 ++++-
+ 1 file changed, 4 insertions(+), 1 deletion(-)
+
+diff --git a/python/sglang/srt/models/qwen4_exp.py b/python/sglang/srt/models/qwen4_exp.py
+index 5cd614ddb1..172508baf8 100644
+--- a/python/sglang/srt/models/qwen4_exp.py
++++ b/python/sglang/srt/models/qwen4_exp.py
+@@ -1794,7 +1794,10 @@ class Qwen4ExpModel(Qwen3_5ForCausalLM):
+         # The generic captured_last_layer_outputs accumulator never fires here
+         # because these layers override forward and drop that kwarg.
+         taps = tap_layer_ids()
+-        tapped = [] if taps else None
++        # Not during capture: the clone below would allocate into the graph's
++        # private pool and bake two extra 10240-wide buffers plus their copies
++        # into every replay, and a graph never dumps anyway (only extend does).
++        tapped = [] if taps and not get_is_capture_mode() else None
+         for i in range(self.start_layer, self.end_layer):
+             layer = self.layers[i]
+             if i + 1 < self.end_layer:
+-- 
+2.43.0
+

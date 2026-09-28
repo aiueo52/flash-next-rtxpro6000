@@ -1,0 +1,60 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: aiueo52 <aiueo52@users.noreply.github.com>
+Date: Sun, 6 Sep 2026 13:54:04 +0900
+Subject: [PATCH 086/105] C1: fix the tracer's buffering, and timestamp every
+ row
+
+The offline per-workload split reads `wc -l` on the trace between fnbench
+invocations, and ChainTracer was block-buffered at 64 KB (~300 rows at
+steps=15), so every boundary was shifted and each segment was a blend of two
+workloads. Caught by comparing the traced per-segment mean acceptance against
+fnbench's own numbers for the same run: 8.94/4.01/1.81/2.68 traced vs
+7.30/2.16/1.45/4.19 measured.
+
+The tracer is now line-buffered and each row carries a wall clock, so the
+simulator snaps each recorded boundary to the largest idle gap near it (the
+server sits idle for seconds between fnbench invocations) instead of trusting
+a line count.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+---
+ .../sglang/srt/speculative/adaptive_confidence.py  | 14 +++++++++++++-
+ 1 file changed, 13 insertions(+), 1 deletion(-)
+
+diff --git a/python/sglang/srt/speculative/adaptive_confidence.py b/python/sglang/srt/speculative/adaptive_confidence.py
+index b7ffbd46db..666aa353f8 100644
+--- a/python/sglang/srt/speculative/adaptive_confidence.py
++++ b/python/sglang/srt/speculative/adaptive_confidence.py
+@@ -209,16 +209,28 @@ class ChainTracer:
+     """One line per verified decode step: the input to the offline simulator."""
+ 
+     def __init__(self, path: str):
+-        self._f = open(path, "a", buffering=1 << 16)
++        # Line buffered on purpose.  The offline split into per-workload
++        # segments is driven by `wc -l` on this file between fnbench
++        # invocations, so a 64 KB buffer (~300 rows at steps=15) silently
++        # shifts every boundary and each segment ends up a blend of two
++        # workloads -- which is exactly what happened to the first w16 trace
++        # (its per-segment mean acceptance disagreed with fnbench's own
++        # acc: 8.94/4.01/1.81/2.68 traced vs 7.30/2.16/1.45/4.19 measured).
++        self._f = open(path, "a", buffering=1)
+         self._n = 0
+ 
+     def write(self, steps: int, bs: int, chain, accepted: list[int]) -> None:
+         import json
++        import time
+ 
+         self._f.write(
+             json.dumps(
+                 {
+                     "i": self._n,
++                    # Wall clock, so the offline split into per-workload
++                    # segments can key off the idle gap between fnbench
++                    # invocations instead of trusting a line count.
++                    "t": round(time.time(), 3),
+                     "steps": steps,
+                     "bs": bs,
+                     "p": [[round(x, 5) for x in row] for row in chain]
+-- 
+2.43.0
+

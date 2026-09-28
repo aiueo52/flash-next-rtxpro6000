@@ -1,0 +1,582 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: aiueo52 <aiueo52@users.noreply.github.com>
+Date: Thu, 3 Sep 2026 20:45:34 +0900
+Subject: [PATCH 032/105] logits: let the W8A16 lm_head GEMV write the
+ next-token buffer directly (SGLANG_DRAFT_LOGITS_OUT=1)
+
+_copy_logits_to_buffer widens the draft head's bf16 logits into the shared fp32
+next_token_logits_buffer with a separate elementwise kernel: 14 launches / ~38 us per
+W16 decode step (grid [64,1,1], 32768 hot vocab rows).
+
+w8a16_gemv / bf16_gemv now take an optional out=, and the kernel stores
+acc.to(bf16).to(out dtype) -- the bf16 round is kept even for an fp32 destination, so
+the buffer ends up holding exactly what the old "bf16 result, then copy_" produced.
+For a bf16 destination the extra cast folds away and the emitted code is unchanged.
+
+Plumbing keeps the routing decision in one place: Fp8LinearMethod grows
+_w8a16_gemv_ok (shared with apply) and apply_into, which returns None whenever the
+GEMV path or the destination does not fit, so the caller falls back to apply.
+LogitsProcessor._direct_logits_buffer offers the buffer only when every step between
+the lm_head and the copy is a no-op for this batch (no logit_scale, no TP gather, no
+DP scatter, no embedding bias, fp32 row-contiguous buffer no wider than vocab_size),
+and _copy_logits_to_buffer short-circuits when the lm_head already wrote it.
+
+Default off.  test/srt/layers/test_draft_logits_out.py checks the gate on CPU and
+bit-identity of the fp32 out= path against the bf16 result at M in {1,2,4,16}.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+---
+ bench/glue_e/bench_draft_logits.py            |  65 +++++++
+ python/sglang/srt/layers/logits_processor.py  |  61 +++++-
+ python/sglang/srt/layers/quantization/fp8.py  |  54 +++++-
+ .../srt/layers/quantization/w8a16_gemv.py     |  54 +++++-
+ test/srt/layers/test_draft_logits_out.py      | 180 ++++++++++++++++++
+ 5 files changed, 397 insertions(+), 17 deletions(-)
+ create mode 100644 bench/glue_e/bench_draft_logits.py
+ create mode 100644 test/srt/layers/test_draft_logits_out.py
+
+diff --git a/bench/glue_e/bench_draft_logits.py b/bench/glue_e/bench_draft_logits.py
+new file mode 100644
+index 0000000000..c6b14d0369
+--- /dev/null
++++ b/bench/glue_e/bench_draft_logits.py
+@@ -0,0 +1,65 @@
++#!/usr/bin/env python3
++"""glue-E item 3: draft lm_head GEMV + logits copy vs. GEMV writing the buffer.
++
++    python bench/glue_e/bench_draft_logits.py
++
++Shape is the served draft head: [M, 2560] x [32768, 2560] fp8 per-channel, with the
++fp32 next-token logits buffer as the destination. The rotating weight working set
++follows bench/w8a16v2/harness.py (>= 4x L2), so the GEMV time is the HBM-bound one
++the server sees.
++"""
++
++from __future__ import annotations
++
++import pathlib
++import sys
++
++import torch
++
++sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
++from _harness import clocks_note, cupti_by_kernel, make_copies, n_copies, report  # noqa: E402
++
++N = 32768
++K = 2560
++
++
++def main(ms):
++    from sglang.srt.layers.quantization.w8a16_gemv import w8a16_gemv
++
++    print(clocks_note())
++    g = torch.Generator(device="cuda").manual_seed(0)
++    wf = torch.randn(N, K, dtype=torch.float32, device="cuda", generator=g)
++    w0 = (wf / wf.abs().amax(dim=1, keepdim=True) * 400).to(torch.float8_e4m3fn)
++    scale = torch.rand(N, 1, device="cuda", generator=g).add_(0.5).float()
++    copies = make_copies(w0, n_copies(w0.numel()))
++    print(f"weight working set: {len(copies)} x {w0.numel() / (1 << 20):.0f} MB")
++
++    for M in ms:
++        x = torch.randn(M, K, dtype=torch.bfloat16, device="cuda", generator=g)
++        buf = torch.empty(M, N, dtype=torch.float32, device="cuda")
++        print(f"\n=== M={M}")
++
++        def old(w):
++            y = w8a16_gemv(x, w, scale)
++            buf.copy_(y)
++
++        def new(w):
++            w8a16_gemv(x, w, scale, out=buf)
++
++        w8a16_gemv(x, copies[0], scale, out=buf)
++        want = w8a16_gemv(x, copies[0], scale).float()
++        print(f"  bit-identical: {bool(torch.equal(want, buf))}")
++
++        res_o, tot_o = cupti_by_kernel(old, copies)
++        report("gemv + buffer.copy_", res_o, tot_o)
++        res_n, tot_n = cupti_by_kernel(new, copies)
++        report("gemv out=buffer", res_n, tot_n)
++        steps = 14  # draft-head calls per W16 decode step in the profile
++        print(
++            f"  delta = {tot_n - tot_o:+.2f} us/call -> "
++            f"{(tot_n - tot_o) * steps:+.0f} us/step over {steps} draft steps"
++        )
++
++
++if __name__ == "__main__":
++    main([int(a) for a in sys.argv[1:]] or [1])
+diff --git a/python/sglang/srt/layers/logits_processor.py b/python/sglang/srt/layers/logits_processor.py
+index 70ca6de115..b724a95531 100644
+--- a/python/sglang/srt/layers/logits_processor.py
++++ b/python/sglang/srt/layers/logits_processor.py
+@@ -15,6 +15,7 @@
+ 
+ import dataclasses
+ import logging
++import os
+ from contextlib import contextmanager
+ from typing import Any, Dict, List, Optional, Tuple, Union
+ 
+@@ -66,6 +67,12 @@ logger = logging.getLogger(__name__)
+ _is_npu = is_npu()
+ _is_cpu = is_cpu()
+ 
++# Let the lm_head GEMV write straight into the shared next-token logits buffer
++# instead of producing a bf16 result that `_copy_logits_to_buffer` then widens
++# with a separate elementwise kernel (14 launches / ~38 us per W16 decode step).
++# Bit-identical: the GEMV still rounds its fp32 accumulator to bf16 first.
++_DRAFT_LOGITS_OUT = os.environ.get("SGLANG_DRAFT_LOGITS_OUT", "0") == "1"
++
+ _UNQUANTIZED_LM_HEAD_METHODS = {
+     "UnquantizedEmbeddingMethod",
+     "UnquantizedLinearMethod",
+@@ -669,7 +676,14 @@ class LogitsProcessor(nn.Module):
+             hidden_states, logits_metadata
+         )
+ 
+-        logits = self._compute_lm_head(hidden_states, lm_head, embedding_bias)
++        logits = self._compute_lm_head(
++            hidden_states,
++            lm_head,
++            embedding_bias,
++            out=self._direct_logits_buffer(
++                logits_metadata, embedding_bias, use_logits_buffer
++            ),
++        )
+ 
+         if self.logit_scale is not None:
+             logits.mul_(self.logit_scale)
+@@ -705,17 +719,58 @@ class LogitsProcessor(nn.Module):
+ 
+         return logits
+ 
++    def _direct_logits_buffer(
++        self,
++        logits_metadata: LogitsMetadata,
++        embedding_bias: Optional[torch.Tensor],
++        use_logits_buffer: bool,
++    ) -> Optional[torch.Tensor]:
++        """The next-token logits buffer, iff the lm_head may write it directly.
++
++        Only valid when every step `_get_logits` performs between the lm_head and
++        `_copy_logits_to_buffer` is a no-op for this batch, because writing the
++        buffer up front skips them all:
++          * `logit_scale` would scale in fp32 instead of bf16,
++          * the TP gather / DP scatter replace the tensor entirely,
++          * `_copy_logits_to_buffer` narrows a too-wide head to `vocab_size`.
++        `final_logit_softcapping` is unaffected: it already ran in place on the
++        buffer.
++        """
++        if not (_DRAFT_LOGITS_OUT and use_logits_buffer):
++            return None
++        buf = logits_metadata.next_token_logits_buffer
++        if buf is None or embedding_bias is not None:
++            return None
++        if (
++            self.logit_scale is not None
++            or self.do_tensor_parallel_all_gather
++            or self.do_tensor_parallel_all_gather_dp_attn
++        ):
++            return None
++        if buf.dim() != 2 or buf.dtype != torch.float32 or buf.stride(1) != 1:
++            return None
++        if buf.shape[1] > self.vocab_size:
++            return None
++        return buf
++
+     def _compute_lm_head(
+         self,
+         hidden_states: torch.Tensor,
+         lm_head: VocabParallelEmbedding,
+         embedding_bias: Optional[torch.Tensor] = None,
++        out: Optional[torch.Tensor] = None,
+     ) -> torch.Tensor:
+         quant_method = getattr(lm_head, "quant_method", None)
+         if hasattr(lm_head, "set_lora") and hasattr(lm_head, "apply_lora"):
+             # This is a LoRA-wrapped module, use its forward method
+             logits = lm_head(hidden_states)
+         elif should_apply_lm_head_quant_method(lm_head, quant_method):
++            if out is not None:
++                apply_into = getattr(quant_method, "apply_into", None)
++                if apply_into is not None:
++                    written = apply_into(lm_head, hidden_states, out, embedding_bias)
++                    if written is not None:
++                        return written
+             logits = quant_method.apply(lm_head, hidden_states, embedding_bias)
+         elif hasattr(lm_head, "weight"):
+             # Normal linear layer
+@@ -879,6 +934,10 @@ class LogitsProcessor(nn.Module):
+         use_buffer: bool = True,
+     ) -> torch.Tensor:
+         logits_buffer = logits_metadata.next_token_logits_buffer if use_buffer else None
++        if logits_buffer is not None and logits is logits_buffer:
++            # The lm_head GEMV wrote the buffer directly (see
++            # `_direct_logits_buffer`); the copy would be a self-copy.
++            return logits
+         if logits.shape[-1] > self.vocab_size:
+             logits = logits[:, : self.vocab_size]
+         logits_width = logits.shape[-1]
+diff --git a/python/sglang/srt/layers/quantization/fp8.py b/python/sglang/srt/layers/quantization/fp8.py
+index 6cf074f66e..babc54d4dc 100644
+--- a/python/sglang/srt/layers/quantization/fp8.py
++++ b/python/sglang/srt/layers/quantization/fp8.py
+@@ -959,6 +959,49 @@ class Fp8LinearMethod(LinearMethodBase):
+             # Activations not quantized for marlin.
+             del layer.input_scale
+ 
++    def _w8a16_gemv_ok(self, layer: torch.nn.Module, x: torch.Tensor) -> bool:
++        """Whether `apply` would route this call through the W8A16 Triton GEMV."""
++        return (
++            _W8A16_GEMV_ENABLED
++            and not self.use_marlin
++            and not self.block_quant
++            and not self.use_mxfp8
++            and x.dim() == 2
++            and x.shape[0] <= _W8A16_GEMV_MAX_M
++            and x.dtype == torch.bfloat16
++            and layer.weight.dtype == torch.float8_e4m3fn
++            and layer.weight_scale.numel() == layer.weight.shape[1]
++        )
++
++    def apply_into(
++        self,
++        layer: torch.nn.Module,
++        x: torch.Tensor,
++        out: torch.Tensor,
++        bias: Optional[torch.Tensor] = None,
++    ) -> Optional[torch.Tensor]:
++        """`apply` writing straight into `out`, or None when that is not possible.
++
++        Only the W8A16 GEMV path can do this; every other backend allocates its
++        own output, so the caller must fall back to `apply` when this returns
++        None. `out` may be fp32 (the shared next-token logits buffer) — the GEMV
++        still rounds its fp32 accumulator to bf16 first, so the values are
++        bit-identical to `apply` followed by `out.copy_(...)`.
++        """
++        if bias is not None or not self._w8a16_gemv_ok(layer, x):
++            return None
++        from sglang.srt.layers.quantization.w8a16_gemv import w8a16_gemv
++
++        w = layer.weight.t()
++        if (
++            tuple(out.shape) != (x.shape[0], w.shape[0])
++            or out.dtype not in (torch.bfloat16, torch.float32)
++            or out.device != x.device
++            or out.stride(1) != 1
++        ):
++            return None
++        return w8a16_gemv(x, w, layer.weight_scale, out=out)
++
+     def apply(
+         self,
+         layer: torch.nn.Module,
+@@ -979,16 +1022,7 @@ class Fp8LinearMethod(LinearMethodBase):
+         # Weight-only FP8 (W8A16) Triton GEMV for skinny decode/verify shapes.
+         # Opt-in via SGLANG_FP8_W8A16_GEMV=1; requires the per-channel cutlass
+         # weight layout (weight stored transposed [K, N], weight_scale [N, 1]).
+-        if (
+-            _W8A16_GEMV_ENABLED
+-            and not self.block_quant
+-            and not self.use_mxfp8
+-            and x.dim() == 2
+-            and x.shape[0] <= _W8A16_GEMV_MAX_M
+-            and x.dtype == torch.bfloat16
+-            and layer.weight.dtype == torch.float8_e4m3fn
+-            and layer.weight_scale.numel() == layer.weight.shape[1]
+-        ):
++        if self._w8a16_gemv_ok(layer, x):
+             from sglang.srt.layers.quantization.w8a16_gemv import w8a16_gemv
+ 
+             y = w8a16_gemv(x, layer.weight.t(), layer.weight_scale)
+diff --git a/python/sglang/srt/layers/quantization/w8a16_gemv.py b/python/sglang/srt/layers/quantization/w8a16_gemv.py
+index a769dba0a6..48b8c17722 100644
+--- a/python/sglang/srt/layers/quantization/w8a16_gemv.py
++++ b/python/sglang/srt/layers/quantization/w8a16_gemv.py
+@@ -27,6 +27,7 @@ that holds for the decode path, which issues every linear on one stream.
+ """
+ 
+ import functools
++from typing import Optional
+ 
+ import torch
+ import triton
+@@ -112,7 +113,14 @@ def _w8a16_gemv_kernel(
+         else:
+             acc = acc * tl.load(s_ptr)
+         y_ptrs = y_ptr + offs_m[:, None] * stride_ym + offs_n[None, :] * stride_yn
+-        tl.store(y_ptrs, acc.to(tl.bfloat16), mask=m_mask[:, None] & n_mask[None, :])
++        # Round to bf16 first even when `y` is fp32: an fp32 destination is only
++        # ever the shared logits buffer, whose old contents were a bf16 result
++        # widened by `.copy_()`. Rounding here keeps that bit-identical.
++        tl.store(
++            y_ptrs,
++            acc.to(tl.bfloat16).to(y_ptr.dtype.element_ty),
++            mask=m_mask[:, None] & n_mask[None, :],
++        )
+         return
+ 
+     # Split-K fixup, in this same launch. `.cg` keeps the partials out of the
+@@ -131,7 +139,11 @@ def _w8a16_gemv_kernel(
+         else:
+             tot = tot * tl.load(s_ptr)
+         y_ptrs = y_ptr + offs_m[:, None] * stride_ym + offs_n[None, :] * stride_yn
+-        tl.store(y_ptrs, tot.to(tl.bfloat16), mask=m_mask[:, None] & n_mask[None, :])
++        tl.store(
++            y_ptrs,
++            tot.to(tl.bfloat16).to(y_ptr.dtype.element_ty),
++            mask=m_mask[:, None] & n_mask[None, :],
++        )
+         # Every increment for this N block has happened, so a plain store is enough to
+         # leave the counter at 0 for the next launch / graph replay.
+         tl.store(cnt_ptr + pid_n, 0)
+@@ -332,12 +344,40 @@ def _launch(x, w, s, y, M, N, K, per_channel, cfg):
+     return y
+ 
+ 
+-def w8a16_gemv(x: torch.Tensor, w: torch.Tensor, scale: torch.Tensor, cfg=None):
++def _out_or_new(out, M: int, N: int, device):
++    """Validate an optional destination, else allocate the usual bf16 one.
++
++    `out` may be fp32 (the shared next-token logits buffer): the kernel still
++    rounds the fp32 accumulator to bf16 before widening it, so writing straight
++    into that buffer is bit-identical to the bf16 result plus `buffer.copy_()`.
++    """
++    if out is None:
++        return torch.empty((M, N), dtype=torch.bfloat16, device=device)
++    if (
++        tuple(out.shape) != (M, N)
++        or out.dtype not in (torch.bfloat16, torch.float32)
++        or out.device != device
++        or out.stride(1) != 1
++    ):
++        raise ValueError(
++            f"w8a16 gemv out= must be a [{M}, {N}] row-contiguous bf16/fp32 CUDA "
++            f"tensor on {device}; got {tuple(out.shape)} {out.dtype} {out.device}"
++        )
++    return out
++
++
++def w8a16_gemv(
++    x: torch.Tensor,
++    w: torch.Tensor,
++    scale: torch.Tensor,
++    cfg=None,
++    out: Optional[torch.Tensor] = None,
++):
+     """x: [M,K] bf16; w: [N,K] fp8_e4m3 (any strides); scale: [N] or [N,1] or scalar fp32."""
+     M, K = x.shape
+     N = w.shape[0]
+     assert w.shape[1] == K and M <= 16
+-    y = torch.empty((M, N), dtype=torch.bfloat16, device=x.device)
++    y = _out_or_new(out, M, N, x.device)
+     s = scale.reshape(-1)
+     if s.dtype != torch.float32 or not s.is_contiguous():
+         s = s.contiguous().float()
+@@ -349,13 +389,15 @@ def w8a16_gemv(x: torch.Tensor, w: torch.Tensor, scale: torch.Tensor, cfg=None):
+ _ONES = {}
+ 
+ 
+-def bf16_gemv(x: torch.Tensor, w: torch.Tensor, cfg=None):
++def bf16_gemv(
++    x: torch.Tensor, w: torch.Tensor, cfg=None, out: Optional[torch.Tensor] = None
++):
+     """Skinny BF16 GEMM y = x @ w^T for tiny-N linears where cuBLAS picks a poor kernel.
+     x: [M,K] bf16 (M<=16); w: [N,K] bf16."""
+     M, K = x.shape
+     N = w.shape[0]
+     assert w.shape[1] == K and M <= 16
+-    y = torch.empty((M, N), dtype=torch.bfloat16, device=x.device)
++    y = _out_or_new(out, M, N, x.device)
+     one = _ONES.get(x.device)
+     if one is None:
+         one = torch.ones(1, dtype=torch.float32, device=x.device)
+diff --git a/test/srt/layers/test_draft_logits_out.py b/test/srt/layers/test_draft_logits_out.py
+new file mode 100644
+index 0000000000..ad07d18d17
+--- /dev/null
++++ b/test/srt/layers/test_draft_logits_out.py
+@@ -0,0 +1,180 @@
++"""The draft lm_head GEMV writing straight into the next-token logits buffer.
++
++Removes the per-draft-step ``next_token_logits_buffer.copy_(logits)`` kernel
++(14 launches / ~38 us per W16 decode step) by handing the fp32 buffer to the
++W8A16 Triton GEMV as ``out=``.  The GEMV still rounds its fp32 accumulator to
++bf16 before widening, so the buffer contents are bit-identical to the old
++"bf16 result, then copy" sequence.
++
++Run:  python test/srt/layers/test_draft_logits_out.py
++"""
++
++from __future__ import annotations
++
++import unittest
++
++import torch
++
++# The served draft head: 32768 hot rows out of a 248320 vocab, hidden 2560.
++N_HOT = 32768
++K = 2560
++
++
++class _MD:
++    """Only field `_direct_logits_buffer` reads."""
++
++    def __init__(self, buf):
++        self.next_token_logits_buffer = buf
++
++
++class TestDirectLogitsBufferGate(unittest.TestCase):
++    """CPU-side: when is it legal to hand the buffer to the lm_head?"""
++
++    def _proc(self):
++        from sglang.srt.layers.logits_processor import LogitsProcessor
++
++        p = LogitsProcessor.__new__(LogitsProcessor)
++        p.logit_scale = None
++        p.do_tensor_parallel_all_gather = False
++        p.do_tensor_parallel_all_gather_dp_attn = False
++        p.vocab_size = 248320
++        return p
++
++    def setUp(self):
++        import sglang.srt.layers.logits_processor as lp
++
++        self.lp = lp
++        self._saved = lp._DRAFT_LOGITS_OUT
++        lp._DRAFT_LOGITS_OUT = True
++        self.buf = torch.zeros(1, N_HOT, dtype=torch.float32)
++
++    def tearDown(self):
++        self.lp._DRAFT_LOGITS_OUT = self._saved
++
++    def test_accepts_the_served_shape(self):
++        p = self._proc()
++        self.assertIs(p._direct_logits_buffer(_MD(self.buf), None, True), self.buf)
++
++    def test_rejects_when_flag_is_off(self):
++        self.lp._DRAFT_LOGITS_OUT = False
++        p = self._proc()
++        self.assertIsNone(p._direct_logits_buffer(_MD(self.buf), None, True))
++
++    def test_rejects_the_cases_that_would_change_numerics(self):
++        p = self._proc()
++        md = _MD(self.buf)
++        self.assertIsNone(p._direct_logits_buffer(md, None, False))  # no buffer use
++        self.assertIsNone(p._direct_logits_buffer(_MD(None), None, True))
++        self.assertIsNone(  # embedding_bias is added by the caller, not the GEMV
++            p._direct_logits_buffer(md, torch.zeros(N_HOT), True)
++        )
++        for attr, val in (
++            ("logit_scale", 2.0),
++            ("do_tensor_parallel_all_gather", True),
++            ("do_tensor_parallel_all_gather_dp_attn", True),
++        ):
++            q = self._proc()
++            setattr(q, attr, val)
++            self.assertIsNone(q._direct_logits_buffer(md, None, True), attr)
++        q = self._proc()  # bf16 buffer: the copy also did a dtype change
++        self.assertIsNone(
++            q._direct_logits_buffer(_MD(self.buf.bfloat16()), None, True)
++        )
++        q = self._proc()  # head wider than the vocab: the copy path narrows it
++        q.vocab_size = 1024
++        self.assertIsNone(q._direct_logits_buffer(md, None, True))
++
++    def test_copy_to_buffer_short_circuits_on_identity(self):
++        p = self._proc()
++        p.final_logit_softcapping = None
++        md = _MD(self.buf)
++        got = p._copy_logits_to_buffer(self.buf, md, use_buffer=True)
++        self.assertIs(got, self.buf)
++
++
++@unittest.skipUnless(torch.cuda.is_available(), "needs CUDA")
++class TestGemvOutArgument(unittest.TestCase):
++    def _fp8_case(self, M):
++        g = torch.Generator(device="cuda").manual_seed(0)
++        x = torch.randn(M, K, dtype=torch.bfloat16, device="cuda", generator=g)
++        wf = torch.randn(N_HOT, K, dtype=torch.float32, device="cuda", generator=g)
++        w = (wf / wf.abs().amax(dim=1, keepdim=True) * 400).to(torch.float8_e4m3fn)
++        scale = torch.rand(N_HOT, 1, device="cuda", generator=g).add_(0.5).float()
++        return x, w, scale
++
++    def test_w8a16_gemv_out_is_bit_identical(self):
++        from sglang.srt.layers.quantization.w8a16_gemv import w8a16_gemv
++
++        for M in (1, 2, 4, 16):
++            x, w, scale = self._fp8_case(M)
++            base = w8a16_gemv(x, w, scale)
++            bf = torch.empty(M, N_HOT, dtype=torch.bfloat16, device="cuda")
++            f32 = torch.empty(M, N_HOT, dtype=torch.float32, device="cuda")
++            self.assertTrue(torch.equal(base, w8a16_gemv(x, w, scale, out=bf)))
++            self.assertTrue(
++                torch.equal(base.float(), w8a16_gemv(x, w, scale, out=f32)),
++                f"M={M}: fp32 out= is not the widened bf16 result",
++            )
++
++    def test_bf16_gemv_out_is_bit_identical(self):
++        from sglang.srt.layers.quantization.w8a16_gemv import bf16_gemv
++
++        g = torch.Generator(device="cuda").manual_seed(1)
++        for M in (1, 4, 16):
++            x = torch.randn(M, K, dtype=torch.bfloat16, device="cuda", generator=g)
++            w = torch.randn(512, K, dtype=torch.bfloat16, device="cuda", generator=g)
++            base = bf16_gemv(x, w)
++            f32 = torch.empty(M, 512, dtype=torch.float32, device="cuda")
++            self.assertTrue(torch.equal(base.float(), bf16_gemv(x, w, out=f32)))
++
++    def test_out_shape_is_validated(self):
++        from sglang.srt.layers.quantization.w8a16_gemv import w8a16_gemv
++
++        x, w, scale = self._fp8_case(1)
++        with self.assertRaises(ValueError):
++            w8a16_gemv(
++                x, w, scale, out=torch.empty(2, N_HOT, dtype=torch.float32, device="cuda")
++            )
++        with self.assertRaises(ValueError):
++            w8a16_gemv(
++                x, w, scale, out=torch.empty(1, N_HOT, dtype=torch.float16, device="cuda")
++            )
++
++    def test_apply_into_matches_apply(self):
++        """Fp8LinearMethod.apply_into vs. apply + copy, through the served layout."""
++        import sglang.srt.layers.quantization.fp8 as fp8
++
++        if not fp8._W8A16_GEMV_ENABLED:
++            self.skipTest("SGLANG_FP8_W8A16_GEMV is not enabled in this process")
++
++        x, w, scale = self._fp8_case(1)
++
++        class Layer:
++            pass
++
++        layer = Layer()
++        layer.weight = w.t()  # served layout: [K, N]
++        layer.weight_scale = scale
++
++        method = fp8.Fp8LinearMethod.__new__(fp8.Fp8LinearMethod)
++        method.use_marlin = False
++        method.block_quant = False
++        method.use_mxfp8 = False
++
++        buf = torch.empty(1, N_HOT, dtype=torch.float32, device="cuda")
++        got = method.apply_into(layer, x, buf)
++        self.assertIsNotNone(got, "apply_into refused the served shape")
++        self.assertIs(got, buf)
++        want = method.apply(layer, x, None)
++        self.assertTrue(torch.equal(want.float(), buf))
++        # bias and a mismatched destination must decline rather than mis-write
++        self.assertIsNone(method.apply_into(layer, x, buf, torch.zeros(N_HOT)))
++        self.assertIsNone(
++            method.apply_into(
++                layer, x, torch.empty(1, 8, dtype=torch.float32, device="cuda")
++            )
++        )
++
++
++if __name__ == "__main__":
++    unittest.main(verbosity=2)
+-- 
+2.43.0
+

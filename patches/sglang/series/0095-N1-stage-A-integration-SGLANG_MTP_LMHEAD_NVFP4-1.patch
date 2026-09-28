@@ -1,0 +1,366 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: aiueo52 <aiueo52@users.noreply.github.com>
+Date: Sun, 6 Sep 2026 17:05:38 +0900
+Subject: [PATCH 095/105] N1 stage A integration: SGLANG_MTP_LMHEAD_NVFP4=1
+
+Packs the draft's hot-vocab lm_head as NVFP4 at load time and serves it through
+w4a16_nvfp4_gemv. Off by default.
+
+The rows are re-read from the checkpoint shard rather than taken from the FP8 head the
+eagle worker has just sliced: by that point the target's weight is already FP8 in place,
+and quantising FP8 -> NVFP4 compounds two lossy steps and costs argmax agreement.
+safetensors slices lazily, so only the 49152 hot rows are materialised (0.93s) and there
+is no 1.27GB transient. Packing is deterministic, so the result is cached next to the
+token map under a key over shard identity + tensor name + exact row set; cold start
+costs 2.2s, warm 0.14s, and the cached file is 70.8MB against the FP8 slice's 125.8MB.
+Verified: the packed weight is bit-identical (0/125829120 values differ) to an
+independently packed reference.
+
+NVFP4DenseLinearMethod implements just what logits_processor._compute_lm_head needs
+(apply / apply_into into the shared fp32 buffer), with a chunked dequant+GEMM fallback
+for the wide-M extend path the M<=16 GEMV cannot serve.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+---
+ .../srt/layers/quantization/nvfp4_dense.py    | 260 ++++++++++++++++++
+ .../sglang/srt/speculative/eagle_worker_v2.py |  50 ++++
+ 2 files changed, 310 insertions(+)
+ create mode 100644 python/sglang/srt/layers/quantization/nvfp4_dense.py
+
+diff --git a/python/sglang/srt/layers/quantization/nvfp4_dense.py b/python/sglang/srt/layers/quantization/nvfp4_dense.py
+new file mode 100644
+index 0000000000..a0c23a6103
+--- /dev/null
++++ b/python/sglang/srt/layers/quantization/nvfp4_dense.py
+@@ -0,0 +1,260 @@
++"""Load-time NVFP4 packing for dense weights, with an on-disk cache.
++
++Used by the N1 stages to move a dense FP8 weight-only path to the NVFP4 format the
++experts already use (see `w4a16_nvfp4_gemv`).
++
++Two things this module exists to get right:
++
++**Quantise from BF16, not from FP8.** By the time the EAGLE worker reaches the draft
++head, `Fp8LinearMethod.process_weights_after_loading` has already replaced the target's
++`lm_head.weight` in place, so the obvious implementation would quantise the *already
++FP8* rows and compound two lossy steps. Measured on the real head, that costs ~2 points
++of argmax agreement against quantising from BF16 (N1_LOG.md 4). So the rows are re-read
++straight from the checkpoint shard instead -- `safetensors` slices lazily, so only the
++rows that are wanted are ever materialised and there is no 1.27 GB transient.
++
++**Cache the packed result.** Packing 49152x2560 costs a few seconds and is entirely
++deterministic, so it is written next to the token map under a key derived from the
++model shard's identity, the tensor name, and the exact row set. Any change to the model
++directory, the tensor, or the token map yields a different key, so a stale cache cannot
++be picked up silently.
++"""
++
++import hashlib
++import json
++import logging
++import os
++from typing import Optional, Sequence
++
++import torch
++
++from sglang.srt.layers.quantization.w4a16_nvfp4_gemv import quantize_nvfp4
++
++logger = logging.getLogger(__name__)
++
++
++def _default_cache_dir() -> str:
++    from sglang.srt.environ import envs
++
++    return os.path.join(os.path.expanduser(envs.SGLANG_CACHE_DIR.get()), "nvfp4")
++
++
++#: Where packed weights are cached: SGLANG_NVFP4_CACHE_DIR, else <SGLANG_CACHE_DIR>/nvfp4
++#: (by default ~/.cache/sglang/nvfp4).
++CACHE_DIR = os.environ.get("SGLANG_NVFP4_CACHE_DIR") or _default_cache_dir()
++
++
++def _index_path(model_dir: str) -> Optional[str]:
++    for name in ("model.safetensors.index.json", "pytorch_model.bin.index.json"):
++        p = os.path.join(model_dir, name)
++        if os.path.exists(p):
++            return p
++    return None
++
++
++def find_shard(model_dir: str, tensor_name: str) -> str:
++    """Absolute path of the safetensors shard holding `tensor_name`.
++
++    Prefers the index json; falls back to opening each shard's header, which is cheap
++    because `safe_open` reads only the metadata block.
++    """
++    idx = _index_path(model_dir)
++    if idx is not None:
++        with open(idx) as f:
++            wm = json.load(f).get("weight_map", {})
++        if tensor_name in wm:
++            return os.path.join(model_dir, wm[tensor_name])
++    from safetensors import safe_open
++
++    shards = sorted(
++        os.path.join(model_dir, f)
++        for f in os.listdir(model_dir)
++        if f.endswith(".safetensors")
++    )
++    for p in shards:
++        with safe_open(p, framework="pt", device="cpu") as fh:
++            if tensor_name in fh.keys():
++                return p
++    raise FileNotFoundError(f"{tensor_name} not found in any shard under {model_dir}")
++
++
++def _shard_sig(path: str) -> str:
++    st = os.stat(path)
++    return f"{os.path.basename(path)}:{st.st_size}:{int(st.st_mtime)}"
++
++
++def _rows_sig(rows: Optional[torch.Tensor]) -> str:
++    if rows is None:
++        return "all"
++    r = rows.detach().to("cpu", torch.int64).contiguous()
++    h = hashlib.sha256(r.numpy().tobytes()).hexdigest()[:16]
++    return f"{r.numel()}-{h}"
++
++
++def cache_key(model_dir: str, tensor_name: str, rows: Optional[torch.Tensor]) -> str:
++    shard = find_shard(model_dir, tensor_name)
++    raw = "|".join(
++        [os.path.realpath(model_dir), tensor_name, _shard_sig(shard), _rows_sig(rows)]
++    )
++    return hashlib.sha256(raw.encode()).hexdigest()[:32]
++
++
++def read_bf16_rows(
++    model_dir: str, tensor_name: str, rows: Optional[torch.Tensor] = None
++) -> torch.Tensor:
++    """`tensor_name`'s rows straight from the checkpoint, in its stored dtype.
++
++    `get_slice` keeps this lazy: for a row subset only those rows are read off disk, so
++    the peak transient is the subset, not the whole [248320, 2560] tensor.
++    """
++    from safetensors import safe_open
++
++    path = find_shard(model_dir, tensor_name)
++    with safe_open(path, framework="pt", device="cpu") as fh:
++        if rows is None:
++            return fh.get_tensor(tensor_name)
++        sl = fh.get_slice(tensor_name)
++        idx = rows.detach().to("cpu", torch.int64)
++        # One contiguous read per row; the hot map is ~49k rows of 5 KB, ~250 MB total.
++        return torch.cat([sl[int(i) : int(i) + 1, :] for i in idx.tolist()], dim=0)
++
++
++def build_or_load(
++    model_dir: str,
++    tensor_name: str,
++    rows: Optional[torch.Tensor] = None,
++    device: str = "cuda",
++    label: str = "",
++):
++    """-> (wq [N, K/2] uint8, bs [N, K/16] uint8 e4m3, gscale [1] fp32), all on `device`.
++
++    Deterministic: same shard + same row set -> byte-identical output, which is what
++    makes the cache safe.
++    """
++    import time
++
++    key = cache_key(model_dir, tensor_name, rows)
++    path = os.path.join(CACHE_DIR, f"{tensor_name.replace('/', '_')}.{key}.pt")
++    tag = label or tensor_name
++    if os.path.exists(path):
++        t0 = time.time()
++        blob = torch.load(path, map_location=device, weights_only=True)
++        logger.info(
++            "NVFP4 %s: loaded packed weight from cache in %.2fs (%s)",
++            tag, time.time() - t0, os.path.basename(path),
++        )
++        return blob["wq"], blob["bs"], blob["gscale"]
++
++    t0 = time.time()
++    w = read_bf16_rows(model_dir, tensor_name, rows)
++    t_read = time.time() - t0
++    t0 = time.time()
++    wq, bs, gscale = quantize_nvfp4(w.to(device))
++    del w
++    t_pack = time.time() - t0
++    os.makedirs(CACHE_DIR, exist_ok=True)
++    tmp = path + f".tmp{os.getpid()}"
++    torch.save(
++        {"wq": wq.cpu(), "bs": bs.cpu(), "gscale": gscale.cpu()}, tmp
++    )
++    os.replace(tmp, path)  # atomic, so two concurrent starts cannot read a partial file
++    logger.info(
++        "NVFP4 %s: packed %s from BF16 in %.2fs (read %.2fs) -> %s",
++        tag, tuple(wq.shape), t_pack, t_read, os.path.basename(path),
++    )
++    return wq, bs, gscale
++
++
++# ---------------------------------------------------------------------------
++# Serving-side linear method
++# ---------------------------------------------------------------------------
++
++#: Rows dequantised at a time in the wide-M fallback, bounding its transient.
++_FALLBACK_ROW_CHUNK = 16384
++
++
++class NVFP4DenseLinearMethod:
++    """Weight-only NVFP4 for an lm_head, matching the dispatch in `logits_processor`.
++
++    `_compute_lm_head` needs exactly three things of a quant method: the layer must have
++    a `.weight` attribute, `apply(layer, x, bias)` must return logits, and the optional
++    `apply_into(layer, x, out, bias)` may write straight into the shared fp32 next-token
++    buffer (returning None to decline). The packed tensors live on the *layer*
++    (`nvfp4_wq` / `nvfp4_bs` / `nvfp4_gscale`), following the convention the FP8 method
++    uses for `weight_scale`, so one method instance can serve several layers.
++
++    `layer.weight` is set to the packed codes. Nothing downstream interprets the draft
++    head's `.weight` shape -- the FP8 path already stores it transposed as [K, H] -- but
++    the attribute has to exist for `should_apply_lm_head_quant_method` to say yes.
++    """
++
++    def __init__(self, name: str = "lm_head"):
++        self.name = name
++
++    @staticmethod
++    def attach(layer, wq, bs, gscale) -> None:
++        layer.nvfp4_wq = wq
++        layer.nvfp4_bs = bs
++        layer.nvfp4_gscale = gscale
++
++    @staticmethod
++    def _ok(layer, x) -> bool:
++        return (
++            getattr(layer, "nvfp4_wq", None) is not None
++            and x.dim() == 2
++            and x.shape[0] <= 16
++            and x.dtype == torch.bfloat16
++            and x.is_cuda
++            and x.stride(1) == 1
++        )
++
++    def apply(self, layer, x: torch.Tensor, bias: Optional[torch.Tensor] = None):
++        from sglang.srt.layers.quantization.w4a16_nvfp4_gemv import w4a16_nvfp4_gemv
++
++        if self._ok(layer, x):
++            y = w4a16_nvfp4_gemv(x, layer.nvfp4_wq, layer.nvfp4_bs, layer.nvfp4_gscale)
++        else:
++            y = self._wide_m(layer, x)
++        if bias is not None:
++            y = y + bias
++        return y
++
++    def apply_into(
++        self, layer, x: torch.Tensor, out: torch.Tensor,
++        bias: Optional[torch.Tensor] = None,
++    ):
++        from sglang.srt.layers.quantization.w4a16_nvfp4_gemv import w4a16_nvfp4_gemv
++
++        if bias is not None or not self._ok(layer, x):
++            return None
++        N = layer.nvfp4_wq.shape[0]
++        if (
++            tuple(out.shape) != (x.shape[0], N)
++            or out.dtype not in (torch.bfloat16, torch.float32)
++            or out.device != x.device
++            or out.stride(1) != 1
++        ):
++            return None
++        return w4a16_nvfp4_gemv(
++            x, layer.nvfp4_wq, layer.nvfp4_bs, layer.nvfp4_gscale, out=out
++        )
++
++    def _wide_m(self, layer, x: torch.Tensor) -> torch.Tensor:
++        """Prefill / extend fallback: dequantise in row chunks and matmul.
++
++        The GEMV is a decode kernel (M <= 16). Wider calls are rare and large, so the
++        right fallback is a real GEMM; dequantising in chunks of output rows keeps the
++        transient at ~80 MB instead of materialising the whole 250 MB BF16 head. Looping
++        the GEMV over 16-row slices instead would re-stream the entire weight per slice.
++        """
++        from sglang.srt.layers.quantization.w4a16_nvfp4_gemv import dequantize_nvfp4
++
++        wq, bs, gs = layer.nvfp4_wq, layer.nvfp4_bs, layer.nvfp4_gscale
++        N = wq.shape[0]
++        y = torch.empty((x.shape[0], N), dtype=torch.bfloat16, device=x.device)
++        for r0 in range(0, N, _FALLBACK_ROW_CHUNK):
++            r1 = min(N, r0 + _FALLBACK_ROW_CHUNK)
++            w = dequantize_nvfp4(wq[r0:r1], bs[r0:r1], gs).to(torch.bfloat16)
++            torch.mm(x, w.t(), out=y[:, r0:r1])
++            del w
++        return y
+diff --git a/python/sglang/srt/speculative/eagle_worker_v2.py b/python/sglang/srt/speculative/eagle_worker_v2.py
+index c4a3b86aaf..cc30285258 100644
+--- a/python/sglang/srt/speculative/eagle_worker_v2.py
++++ b/python/sglang/srt/speculative/eagle_worker_v2.py
+@@ -133,6 +133,12 @@ _is_xpu = is_xpu()
+ 
+ logger = logging.getLogger(__name__)
+ 
++#: N1 stage A -- serve the draft's hot-vocab lm_head as NVFP4 instead of the FP8 row
++#: slice of the target head. Off by default; see _install_nvfp4_draft_head.
++_MTP_LMHEAD_NVFP4 = os.environ.get("SGLANG_MTP_LMHEAD_NVFP4", "0").lower() in (
++    "1", "true", "yes", "on"
++)
++
+ 
+ def _qsa_index_share_requested(hf_config) -> bool:
+     """--json-model-override-args writes top-level hf_config attributes, while
+@@ -366,6 +372,50 @@ class EagleDraftWorker(EagleDraftWorkerBase):
+                 draft_lm_head.weight_scale = self._draft_fp8_head_scale
+                 draft_lm_head.input_scale = None
+                 draft_lm_head.quant_method = self._draft_fp8_head_method
++            if _MTP_LMHEAD_NVFP4 and self.hot_token_id is not None:
++                self._install_nvfp4_draft_head()
++
++    def _install_nvfp4_draft_head(self):
++        """Replace the draft's hot-vocab FP8 head with an NVFP4 one (N1 stage A).
++
++        The rows are re-read from the checkpoint shard rather than taken from the FP8
++        head this method just built: `head` is already FP8 by the time we get here, and
++        quantising FP8 -> NVFP4 compounds two lossy steps and costs argmax
++        agreement (N1_LOG.md 4). The packed result is cached on disk keyed by shard
++        identity + row set, so only the first start pays the ~2 s.
++
++        Measured: 1.487x on the draft-head GEMV (52.6 vs 78.3 us).
++        Off by default; SGLANG_MTP_LMHEAD_NVFP4=1 turns it on.
++        """
++        from sglang.srt.layers.quantization.nvfp4_dense import (
++            NVFP4DenseLinearMethod,
++            build_or_load,
++        )
++
++        model_dir = self.target_worker.model_runner.model_config.model_path
++        draft_lm_head = self.draft_runner.model.lm_head
++        try:
++            wq, bs, gscale = build_or_load(
++                model_dir, "lm_head.weight", self.hot_token_id,
++                device=self.hot_token_id.device, label="draft lm_head",
++            )
++        except Exception:
++            logger.exception(
++                "SGLANG_MTP_LMHEAD_NVFP4=1 but the draft head could not be packed; "
++                "keeping the FP8 head"
++            )
++            return
++        NVFP4DenseLinearMethod.attach(draft_lm_head, wq, bs, gscale)
++        draft_lm_head.weight = wq
++        draft_lm_head.weight_scale = None
++        draft_lm_head.input_scale = None
++        draft_lm_head.quant_method = NVFP4DenseLinearMethod("draft lm_head")
++        logger.info(
++            "Draft lm_head: %d hot rows in NVFP4 (%.1f MB vs %.1f MB FP8)",
++            wq.shape[0],
++            (wq.numel() + bs.numel()) / 1e6,
++            wq.shape[0] * wq.shape[1] * 2 / 1e6,
++        )
+ 
+     def init_attention_backend(self):
+         # Create multi-step attn backends and cuda graph runners
+-- 
+2.43.0
+

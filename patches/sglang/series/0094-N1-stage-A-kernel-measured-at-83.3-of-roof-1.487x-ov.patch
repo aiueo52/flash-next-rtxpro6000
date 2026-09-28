@@ -1,0 +1,45 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: aiueo52 <aiueo52@users.noreply.github.com>
+Date: Sun, 6 Sep 2026 16:46:18 +0900
+Subject: [PATCH 094/105] N1 stage A: kernel measured at 83.3% of roof, 1.487x
+ over FP8 at the draft head
+
+Head-to-head at the five dense decode shapes, CUPTI medians on an idle GPU. The 4-bit
+kernel reaches 78% of the read roof at the draft head and 88.5% at the target head,
+against a 55% break-even; the tile sweep takes the draft
+head to 83.3% (52.64us vs FP8's 78.26us). BLOCK_K 512 wins because one row's per-16
+block scales are then exactly one 32B sector.
+
+The run also confirms the FP8 kernel at 99.6-100.2% of roof at both lm_heads, which is
+what makes the brief's 78-85% premise wrong, and the decode bit-exact (0/5632).
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+---
+ .../srt/layers/quantization/w4a16_nvfp4_gemv.py       | 11 ++++++++++-
+ 1 file changed, 10 insertions(+), 1 deletion(-)
+
+diff --git a/python/sglang/srt/layers/quantization/w4a16_nvfp4_gemv.py b/python/sglang/srt/layers/quantization/w4a16_nvfp4_gemv.py
+index 7724786212..e67e6eebff 100644
+--- a/python/sglang/srt/layers/quantization/w4a16_nvfp4_gemv.py
++++ b/python/sglang/srt/layers/quantization/w4a16_nvfp4_gemv.py
+@@ -270,7 +270,16 @@ def _m_bucket(M: int) -> int:
+ # metric bench/w8a16v2 uses for the FP8 table. Re-run after a kernel change.
+ #
+ # key:   (M bucket, N, K)  value: (BLOCK_N, BLOCK_K, SPLITS, USE_DOT, num_warps, num_stages)
+-_TUNED: dict = {}
++#
++# BLOCK_K 512 is the pattern here and it is not the FP8 table's: at 512 the per-16 block
++# scales for one row are a 32 B tile, exactly one sector, where BLOCK_K 256 fetches 32 B
++# to use 16. The scales are only 1/8 of the weight bytes but at the wrong granularity
++# they cost a second sector each.
++_TUNED: dict = {
++    # draft lm_head, hot2_49152. Planner default (32,256,...) measured 56.19 us;
++    # this is 52.64 us = 1344.6 GB/s = 83.3 % of the 1615 GB/s roof (sweep 2026-09-06).
++    (1, 49152, 2560): (32, 512, 1, False, 4, 2),
++}
+ 
+ 
+ def _plan(M: int, N: int, K: int, sms: int):
+-- 
+2.43.0
+

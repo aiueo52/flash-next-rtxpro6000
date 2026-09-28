@@ -1,0 +1,345 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: aiueo52 <aiueo52@users.noreply.github.com>
+Date: Sat, 5 Sep 2026 14:20:12 +0900
+Subject: [PATCH 048/105] R2: GDN verify writes a/b straight into the
+ RecoverSSM stash
+
+SGLANG_GDN_AB_STASH_DIRECT=1 (default off).
+
+gdn_mtp_cache_mode=none keeps a/b per GDN layer for accepted-state recovery.
+The verify forward allocated fresh a/b, then copied both into the persistent
+per-layer stash -- 2 device-to-device copies x 36 GDN layers = 72 small copies
+per verify step. With the flag on, the layer asks the backend for the stash
+slice before the projection and hands it to the producing kernel as the a/b
+destination, so the values are stashed where they are produced.
+
+- gdn_backend: `_fi_ab_stash` factors the (unchanged) allocate-or-return of the
+  FlashInfer-recovery stash out of `forward_extend`; `gdn_ab_stash_out` returns
+  `stash["a"][:B].view(B*T, H)` / same for b, but only for a FlashInfer-recovery
+  target-verify -- decode, draft, draft_extend and prefill get None and keep
+  allocating their own a/b. `forward_extend` skips each copy when the tensor it
+  was handed already aliases the stash (data_ptr test, no host sync).
+- triton_gdn_fused_proj: `fused_qkvzba_split_reshape_cat_contiguous` takes
+  `out_a=`/`out_b=` so the existing split kernel stores into caller-owned
+  buffers instead of fresh ones. Same stores, same values.
+- qwen3_5 (inherited by qwen4_exp): asks the backend for the destinations and
+  passes them down.
+
+Buffer addresses are unchanged and still allocated once per layer, so the
+recovery graphs captured by `capture_recovery_graphs` keep their pointers. The
+write moves earlier inside the same verify forward; the next target forward
+already joins on `_recovery_event` in `init_forward_metadata`, before any layer
+runs, so the previous step's recovery cannot still be reading the stash.
+
+Bit-exactness (real layer-0 weights, in_proj_qkv/z/a/b of
+Qwen3.8-Flash-Next-NVFP4-mtpft3, M=1/4/16): the stash contents written directly
+by the split kernel are torch.equal to the a/b the unmodified path produces.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+---
+ .../ops/attention/triton_gdn_fused_proj.py    |  29 +++-
+ .../layers/attention/linear/gdn_backend.py    | 149 +++++++++++++-----
+ python/sglang/srt/models/qwen3_5.py           |  31 ++++
+ 3 files changed, 163 insertions(+), 46 deletions(-)
+
+diff --git a/python/sglang/kernels/ops/attention/triton_gdn_fused_proj.py b/python/sglang/kernels/ops/attention/triton_gdn_fused_proj.py
+index e5597b6b12..a9b5e199ca 100644
+--- a/python/sglang/kernels/ops/attention/triton_gdn_fused_proj.py
++++ b/python/sglang/kernels/ops/attention/triton_gdn_fused_proj.py
+@@ -275,6 +275,8 @@ def fused_qkvzba_split_reshape_cat_contiguous(
+     num_heads_v,
+     head_qk,
+     head_v,
++    out_a=None,
++    out_b=None,
+ ):
+     """Fused split/reshape/cat for CONTIGUOUS input format (Qwen3.5).
+ 
+@@ -287,6 +289,10 @@ def fused_qkvzba_split_reshape_cat_contiguous(
+         z: [num_v_heads, head_v]
+         b: [num_v_heads]
+         a: [num_v_heads]
++
++    ``out_a`` / ``out_b`` let the caller own the a/b destination (the RecoverSSM
++    stash slice, SGLANG_GDN_AB_STASH_DIRECT=1) so the kernel writes it in place
++    of a fresh allocation; the stored values are unchanged.
+     """
+     batch, seq_len = mixed_qkvz.shape[0], 1
+     qkv_dim_t = num_heads_qk * head_qk * 2 + num_heads_v * head_v
+@@ -300,12 +306,23 @@ def fused_qkvzba_split_reshape_cat_contiguous(
+         dtype=mixed_qkvz.dtype,
+         device=mixed_qkvz.device,
+     )
+-    b = torch.empty(
+-        [batch * seq_len, num_heads_v],
+-        dtype=mixed_ba.dtype,
+-        device=mixed_ba.device,
+-    )
+-    a = torch.empty_like(b)
++    ba_shape = [batch * seq_len, num_heads_v]
++
++    def _ba_out(out):
++        if out is None:
++            return torch.empty(
++                ba_shape, dtype=mixed_ba.dtype, device=mixed_ba.device
++            )
++        assert (
++            list(out.shape) == ba_shape
++            and out.dtype == mixed_ba.dtype
++            and out.device == mixed_ba.device
++            and out.is_contiguous()
++        ), f"gdn split out= must be a contiguous {ba_shape} {mixed_ba.dtype} tensor"
++        return out
++
++    b = _ba_out(out_b)
++    a = _ba_out(out_a)
+     if _is_hip and batch * seq_len == 0:
+         return mixed_qkv, z, b, a
+     v_per_group = num_heads_v // num_heads_qk
+diff --git a/python/sglang/srt/layers/attention/linear/gdn_backend.py b/python/sglang/srt/layers/attention/linear/gdn_backend.py
+index f057d797b8..2011dd26c8 100644
+--- a/python/sglang/srt/layers/attention/linear/gdn_backend.py
++++ b/python/sglang/srt/layers/attention/linear/gdn_backend.py
+@@ -1,3 +1,5 @@
++import os
++
+ from typing import Dict, Optional, Tuple, Union
+ 
+ import torch
+@@ -61,6 +63,9 @@ elif is_cpu():
+     fused_gdn_gating = torch.ops.sgl_kernel.fused_gdn_gating_cpu
+ 
+ 
++_GDN_AB_STASH_DIRECT = os.environ.get("SGLANG_GDN_AB_STASH_DIRECT", "0") == "1"
++
++
+ def flashinfer_gdn_prefill_default(model_runner: ModelRunner) -> Optional[str]:
+     """FlashInfer for the narrow SM90/SM100 GDN prefill domains we validated, else None."""
+     sm_major = torch.cuda.get_device_capability()[0] if is_cuda() else 0
+@@ -432,6 +437,97 @@ class GDNAttnBackend(MambaAttnBackendBase):
+         # Triton-recovery path (which uses the flat k/v stash instead).
+         self._conv_out_persist: Dict[int, torch.Tensor] = {}
+ 
++    def _fi_ab_stash(self, layer, draft_token_num: int, head_shape, dtype, device):
++        """Allocate-or-return this layer's FlashInfer-recovery a/b stash.
++
++        Shared by the verify forward and (with SGLANG_GDN_AB_STASH_DIRECT=1) the
++        GDN projection, which writes a/b straight into ``[:batch_size]`` instead
++        of copying them in afterwards. The buffers are allocated once per layer
++        and never resized, so the addresses the recovery graphs capture stay
++        valid.
++        """
++        stash_entry = self._no_cache_stash.get(layer.layer_id)
++        if stash_entry is None or "conv_dims" not in stash_entry:
++            pool_size = self.req_to_token_pool.size
++            # Allocate outside inference_mode so buffers can be updated
++            # across forward invocations.
++            with torch.inference_mode(False):
++                stash_entry = {
++                    "a": torch.empty(
++                        (pool_size, draft_token_num, *head_shape),
++                        dtype=dtype,
++                        device=device,
++                    ),
++                    "b": torch.empty(
++                        (pool_size, draft_token_num, *head_shape),
++                        dtype=dtype,
++                        device=device,
++                    ),
++                    "A_log": layer.A_log,
++                    "dt_bias": layer.dt_bias,
++                    # A_log is always float32 (all GDN models define it
++                    # with dtype=torch.float32). No detach or cast needed.
++                    "A_log_f32": layer.A_log,
++                }
++            self._no_cache_stash[layer.layer_id] = stash_entry
++        stash_entry["conv_dims"] = (
++            layer.q_dim,
++            layer.k_dim,
++            layer.v_dim,
++            layer.num_k_heads,
++            layer.head_k_dim,
++            layer.num_v_heads,
++            layer.head_v_dim,
++        )
++        return stash_entry
++
++    def gdn_ab_stash_out(
++        self,
++        layer,
++        forward_batch: ForwardBatch,
++        num_tokens: int,
++        dtype: torch.dtype,
++        device: torch.device,
++    ):
++        """Destinations for a/b so the projection writes the stash directly.
++
++        Returns ``(a_out, b_out)`` as flat ``[num_tokens, num_v_heads]`` views of
++        this layer's persistent RecoverSSM stash, or None when this call is not a
++        FlashInfer-recovery target-verify (every other mode keeps allocating its
++        own a/b). ``forward_extend`` detects the aliasing by data_ptr and skips
++        the copy.
++        """
++        if not (_GDN_AB_STASH_DIRECT and self._recover_ssm):
++            return None
++        if not forward_batch.forward_mode.is_target_verify():
++            return None
++        spec_info = forward_batch.spec_info
++        draft_token_num = getattr(spec_info, "draft_token_num", None)
++        if not draft_token_num or num_tokens % draft_token_num:
++            return None
++        batch_size = num_tokens // draft_token_num
++        if batch_size > self.req_to_token_pool.size:
++            return None
++        from sglang.srt.layers.attention.linear.kernels.gdn_flashinfer import (
++            fi_recovery_kernel,
++        )
++
++        if fi_recovery_kernel(self) is None:
++            return None
++        stash_entry = self._fi_ab_stash(
++            layer, draft_token_num, (layer.num_v_heads,), dtype, device
++        )
++        if (
++            stash_entry["a"].shape[1] != draft_token_num
++            or stash_entry["a"].shape[2] != layer.num_v_heads
++            or stash_entry["a"].dtype != dtype
++        ):
++            return None
++        return (
++            stash_entry["a"][:batch_size].view(num_tokens, layer.num_v_heads),
++            stash_entry["b"][:batch_size].view(num_tokens, layer.num_v_heads),
++        )
++
+     def init_forward_metadata(self, forward_batch: ForwardBatch):
+         super().init_forward_metadata(forward_batch)
+         if self.forward_metadata.has_mamba_track_mask:
+@@ -751,49 +847,22 @@ class GDNAttnBackend(MambaAttnBackendBase):
+                     # a/b are pre-shaped [pool_size, T, ...] — a [:B] slice already
+                     # has the right shape. The presence of "conv_dims" also tells
+                     # recovery to take the FI / conv-out-view path.
+-                    needs_realloc = (
+-                        stash_entry is None or "conv_dims" not in stash_entry
+-                    )
+-                    if needs_realloc:
+-                        # Allocate outside inference_mode so buffers can be updated
+-                        # across forward invocations.
+-                        with torch.inference_mode(False):
+-                            stash_entry = {
+-                                "a": torch.empty(
+-                                    (pool_size, draft_token_num, *a.shape[1:]),
+-                                    dtype=a.dtype,
+-                                    device=a.device,
+-                                ),
+-                                "b": torch.empty(
+-                                    (pool_size, draft_token_num, *b.shape[1:]),
+-                                    dtype=b.dtype,
+-                                    device=b.device,
+-                                ),
+-                                "A_log": layer.A_log,
+-                                "dt_bias": layer.dt_bias,
+-                                # A_log is always float32 (all GDN models define it
+-                                # with dtype=torch.float32). No detach or cast needed.
+-                                "A_log_f32": layer.A_log,
+-                            }
+-                        self._no_cache_stash[layer.layer_id] = stash_entry
+-                    stash_entry["conv_dims"] = (
+-                        layer.q_dim,
+-                        layer.k_dim,
+-                        layer.v_dim,
+-                        layer.num_k_heads,
+-                        layer.head_k_dim,
+-                        layer.num_v_heads,
+-                        layer.head_v_dim,
++                    stash_entry = self._fi_ab_stash(
++                        layer, draft_token_num, a.shape[1:], a.dtype, a.device
+                     )
+                     # a/b arrive flat [B*T, ...]; view into [B, T, ...] before the
+                     # in-place copy. k/v are NOT copied — recovery reads them from
+-                    # _conv_out_persist views.
+-                    stash_entry["a"][:batch_size].copy_(
+-                        a.view(batch_size, draft_token_num, *a.shape[1:])
+-                    )
+-                    stash_entry["b"][:batch_size].copy_(
+-                        b.view(batch_size, draft_token_num, *b.shape[1:])
+-                    )
++                    # _conv_out_persist views. With SGLANG_GDN_AB_STASH_DIRECT=1
++                    # the projection already wrote into these very buffers
++                    # (gdn_ab_stash_out); the alias test skips the redundant copy.
++                    if a.data_ptr() != stash_entry["a"].data_ptr():
++                        stash_entry["a"][:batch_size].copy_(
++                            a.view(batch_size, draft_token_num, *a.shape[1:])
++                        )
++                    if b.data_ptr() != stash_entry["b"].data_ptr():
++                        stash_entry["b"][:batch_size].copy_(
++                            b.view(batch_size, draft_token_num, *b.shape[1:])
++                        )
+                 else:
+                     # Triton recovery: flat stash holds the post-conv k/v + a/b
+                     # (the Triton recover kernel reads flat [rows, tokens, ...]
+diff --git a/python/sglang/srt/models/qwen3_5.py b/python/sglang/srt/models/qwen3_5.py
+index 270f6cec94..a150f1951f 100644
+--- a/python/sglang/srt/models/qwen3_5.py
++++ b/python/sglang/srt/models/qwen3_5.py
+@@ -23,6 +23,10 @@ import torch
+ import os as _os
+ 
+ _GDN_BA_TRITON_GEMV = _os.environ.get("SGLANG_GDN_BA_TRITON_GEMV", "0") == "1"
++# R2: a/b are written straight into the RecoverSSM stash, so the two per-layer
++# stash copies of the verify step disappear. Destination change only -- the
++# stored values are the same bytes.
++_GDN_AB_STASH_DIRECT = _os.environ.get("SGLANG_GDN_AB_STASH_DIRECT", "0") == "1"
+ import torch.nn as nn
+ import triton
+ 
+@@ -748,6 +752,27 @@ class Qwen3_5GatedDeltaNet(nn.Module):
+             projected_states_ba = self._in_proj_ba_skinny(hs_bf16)
+         return projected_states_qkvz, projected_states_ba
+ 
++    def _gdn_ab_stash_out(self, forward_batch: ForwardBatch, num_tokens: int):
++        """(a, b) destinations inside the RecoverSSM stash, or None.
++
++        Only a FlashInfer-recovery target-verify has one; every other mode (and
++        every other backend) gets None and keeps its own a/b allocation.
++        """
++        from sglang.srt.model_executor.forward_context import get_attn_backend
++
++        backend = get_attn_backend()
++        backend = getattr(backend, "linear_attn_backend", backend)
++        fn = getattr(backend, "gdn_ab_stash_out", None)
++        if fn is None:
++            return None
++        return fn(
++            self.attn,
++            forward_batch,
++            num_tokens,
++            self.in_proj_ba.weight.dtype,
++            self.in_proj_ba.weight.device,
++        )
++
+     def _forward_xpu(
+         self,
+         backend: object,
+@@ -793,6 +818,10 @@ class Qwen3_5GatedDeltaNet(nn.Module):
+         2. Core attention (custom op)
+         3. Output projection
+         """
++        ab_out = None
++        if _GDN_AB_STASH_DIRECT and _is_cuda and hidden_states.dim() == 2:
++            ab_out = self._gdn_ab_stash_out(forward_batch, hidden_states.shape[0])
++
+         projected_states_qkvz, projected_states_ba = self._forward_input_proj(
+             hidden_states
+         )
+@@ -824,6 +853,8 @@ class Qwen3_5GatedDeltaNet(nn.Module):
+                 num_v_heads_tp,
+                 self.head_k_dim,
+                 self.head_v_dim,
++                out_a=None if ab_out is None else ab_out[0],
++                out_b=None if ab_out is None else ab_out[1],
+             )
+         else:
+             query, key, value, z, b, a = self.fix_query_key_value_ordering(
+-- 
+2.43.0
+

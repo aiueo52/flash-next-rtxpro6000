@@ -1,0 +1,132 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: aiueo52 <aiueo52@users.noreply.github.com>
+Date: Wed, 2 Sep 2026 11:01:48 +0900
+Subject: [PATCH 006/105] perf: FP8 hot-vocab draft head via W8A16, Triton
+ in_proj_ba for Qwen3_5GatedDeltaNet
+
+- eagle_worker_v2.init_lm_head: when the target lm_head is FP8, slice the hot rows
+  in FP8 (transposed [K, H] layout + per-channel scale) and reuse the target's
+  Fp8LinearMethod so the draft head goes through the W8A16 GEMV instead of a
+  dequantized BF16 copy (cuBLAS picked a 300-450us kernel for that copy)
+- qwen3_5.Qwen3_5GatedDeltaNet: route in_proj_ba through the Triton skinny GEMV
+  (SGLANG_GDN_BA_TRITON_GEMV=1); this is the GDN class qwen4_exp actually uses
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+---
+ python/sglang/srt/models/qwen3_5.py           | 29 ++++++++++++++++---
+ .../sglang/srt/speculative/eagle_worker_v2.py | 23 ++++++++++-----
+ 2 files changed, 40 insertions(+), 12 deletions(-)
+
+diff --git a/python/sglang/srt/models/qwen3_5.py b/python/sglang/srt/models/qwen3_5.py
+index 2a672ee50b..ec0624511e 100644
+--- a/python/sglang/srt/models/qwen3_5.py
++++ b/python/sglang/srt/models/qwen3_5.py
+@@ -20,6 +20,9 @@ from functools import lru_cache
+ from typing import Iterable, Optional, Set, Tuple, Union
+ 
+ import torch
++import os as _os
++
++_GDN_BA_TRITON_GEMV = _os.environ.get("SGLANG_GDN_BA_TRITON_GEMV", "0") == "1"
+ import torch.nn as nn
+ import triton
+ 
+@@ -675,7 +678,7 @@ class Qwen3_5GatedDeltaNet(nn.Module):
+             self.alt_stream.wait_stream(current_stream)
+             projected_states_qkvz, _ = self.in_proj_qkvz(hidden_states)
+             with torch.cuda.stream(self.alt_stream):
+-                projected_states_ba, _ = self.in_proj_ba(hidden_states)
++                projected_states_ba = self._in_proj_ba_skinny(hidden_states)
+             current_stream.wait_stream(self.alt_stream)
+         elif self._fused_input_proj_cpu_enabled.value:
+             projected_states_qkvz, projected_states_ba = (
+@@ -688,9 +691,27 @@ class Qwen3_5GatedDeltaNet(nn.Module):
+             )
+         else:
+             projected_states_qkvz, _ = self.in_proj_qkvz(hidden_states)
+-            projected_states_ba, _ = self.in_proj_ba(hidden_states)
++            projected_states_ba = self._in_proj_ba_skinny(hidden_states)
+         return projected_states_qkvz, projected_states_ba
+ 
++    def _in_proj_ba_skinny(self, hidden_states: torch.Tensor) -> torch.Tensor:
++        # in_proj_ba is a [2*num_v_heads, hidden] (tiny-N) BF16 GEMM; cuBLAS picks a
++        # ~40us kernel for it at decode/verify widths. Route it through the Triton
++        # skinny GEMV when SGLANG_GDN_BA_TRITON_GEMV=1 (same BF16 math).
++        if (
++            _GDN_BA_TRITON_GEMV
++            and hidden_states.dim() == 2
++            and hidden_states.shape[0] <= 16
++            and hidden_states.dtype == torch.bfloat16
++            and self.in_proj_ba.weight.dtype == torch.bfloat16
++            and getattr(self.in_proj_ba, "bias", None) is None
++        ):
++            from sglang.srt.layers.quantization.w8a16_gemv import bf16_gemv
++
++            return bf16_gemv(hidden_states, self.in_proj_ba.weight)
++        projected_states_ba, _ = self.in_proj_ba(hidden_states)
++        return projected_states_ba
++
+     def _forward_input_proj_fused_quant_amd(self, hidden_states):
+         """AMD-only variant for the fused AR+RMSNorm+per-group-quant path.
+ 
+@@ -717,11 +738,11 @@ class Qwen3_5GatedDeltaNet(nn.Module):
+             self.alt_stream.wait_stream(current_stream)
+             projected_states_qkvz, _ = self.in_proj_qkvz(hs_qkvz)
+             with torch.cuda.stream(self.alt_stream):
+-                projected_states_ba, _ = self.in_proj_ba(hs_bf16)
++                projected_states_ba = self._in_proj_ba_skinny(hs_bf16)
+             current_stream.wait_stream(self.alt_stream)
+         else:
+             projected_states_qkvz, _ = self.in_proj_qkvz(hs_qkvz)
+-            projected_states_ba, _ = self.in_proj_ba(hs_bf16)
++            projected_states_ba = self._in_proj_ba_skinny(hs_bf16)
+         return projected_states_qkvz, projected_states_ba
+ 
+     def _forward_xpu(
+diff --git a/python/sglang/srt/speculative/eagle_worker_v2.py b/python/sglang/srt/speculative/eagle_worker_v2.py
+index f3699f56a1..b804b209df 100644
+--- a/python/sglang/srt/speculative/eagle_worker_v2.py
++++ b/python/sglang/srt/speculative/eagle_worker_v2.py
+@@ -333,17 +333,19 @@ class EagleDraftWorker(EagleDraftWorkerBase):
+             if self.hot_token_id is not None:
+                 self.hot_token_id = self.hot_token_id.to(head.device)
+                 if head.dtype == torch.float8_e4m3fn:
+-                    # Target lm_head is FP8 (per-channel, stored transposed [K, V]):
+-                    # gather the hot rows and dequantize them into a BF16 draft head.
++                    # Target lm_head is FP8 (per-channel, stored transposed [K, V]).
++                    # Gather the hot rows and keep them FP8 in the same layout so the
++                    # draft head runs through the target's Fp8LinearMethod (W8A16 GEMV).
+                     weight_scale = target_lm_head.weight_scale.reshape(-1).float()
+-                    hot_rows = head.t()[self.hot_token_id]
+-                    hot_scale = weight_scale[self.hot_token_id].unsqueeze(1)
+-                    head = torch.nn.Parameter(
+-                        (hot_rows.float() * hot_scale).to(torch.bfloat16),
+-                        requires_grad=False,
++                    hot_rows = head.t()[self.hot_token_id].contiguous()  # [H, K] fp8
++                    hot_scale = weight_scale[self.hot_token_id].unsqueeze(1).contiguous()
++                    head = torch.nn.Parameter(hot_rows.t(), requires_grad=False)  # [K, H]
++                    self._draft_fp8_head_scale = torch.nn.Parameter(
++                        hot_scale, requires_grad=False
+                     )
++                    self._draft_fp8_head_method = target_lm_head.quant_method
+                     logger.info(
+-                        "Draft lm_head: dequantized %d hot rows from FP8 target head",
++                        "Draft lm_head: %d hot FP8 rows sliced from the FP8 target head",
+                         self.hot_token_id.numel(),
+                     )
+                 else:
+@@ -353,6 +355,11 @@ class EagleDraftWorker(EagleDraftWorkerBase):
+             # Share the embedding and lm_head
+             self.draft_runner.model.set_embed_and_head(embed, head)
+             maybe_share_target_lm_head()
++            if getattr(self, "_draft_fp8_head_method", None) is not None:
++                draft_lm_head = self.draft_runner.model.lm_head
++                draft_lm_head.weight_scale = self._draft_fp8_head_scale
++                draft_lm_head.input_scale = None
++                draft_lm_head.quant_method = self._draft_fp8_head_method
+ 
+     def init_attention_backend(self):
+         # Create multi-step attn backends and cuda graph runners
+-- 
+2.43.0
+

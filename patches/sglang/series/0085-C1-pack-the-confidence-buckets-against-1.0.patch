@@ -1,0 +1,61 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: aiueo52 <aiueo52@users.noreply.github.com>
+Date: Sun, 6 Sep 2026 13:13:04 +0900
+Subject: [PATCH 085/105] C1: pack the confidence buckets against 1.0
+
+First real trace (code-edit at W4, 748 verified steps, 2026-09-06) shows the
+draft's position-0 probability is extremely skewed: 10th percentile 0.966,
+median 1.000, 80% of steps above 0.995. Uniform bucket edges put nearly
+everything in one bucket and discriminate nothing. Edges are now
+(0.8, 0.95, 0.99, 0.999) and overridable from the config.
+
+The signal itself is real on that trace: corr(p0, accepted) = 0.63, and mean
+accepted rises 0.78 -> 1.42 -> 2.59 -> 2.91 -> 2.96 across the buckets, with
+frac(accepted==0) falling 0.67 -> 0.45 -> 0.07 -> 0.00 -> 0.00.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+---
+ .../sglang/srt/speculative/adaptive_confidence.py   | 13 +++++++++----
+ 1 file changed, 9 insertions(+), 4 deletions(-)
+
+diff --git a/python/sglang/srt/speculative/adaptive_confidence.py b/python/sglang/srt/speculative/adaptive_confidence.py
+index 76d80a5589..b7ffbd46db 100644
+--- a/python/sglang/srt/speculative/adaptive_confidence.py
++++ b/python/sglang/srt/speculative/adaptive_confidence.py
+@@ -311,8 +311,12 @@ class ConfidenceStepSlot:
+ 
+     # Position-0 confidence bucket edges.  Coarse on purpose: each bucket has
+     # to accumulate its own rate estimate, and a decode server sees a few
+-    # thousand steps per workload.
+-    BUCKETS = (0.5, 0.8, 0.95, 0.995)
++    # thousand steps per workload.  The default edges are packed against 1.0
++    # because that is where the mass is: on the 2026-09-06 code-edit trace the
++    # position-0 probability has a 10th percentile of 0.966 and a median of
++    # 1.000, so uniform edges would put 80% of steps in one bucket and
++    # discriminate nothing.  Overridable from the config ("buckets").
++    BUCKETS = (0.8, 0.95, 0.99, 0.999)
+ 
+     def __init__(self, initial_steps: int, cfg: dict):
+         candidates = sorted(set(cfg["candidate_steps"]))
+@@ -341,7 +345,8 @@ class ConfidenceStepSlot:
+         self.min_bucket_samples = int(cfg.get("min_bucket_samples", 12))
+         self.weight_alpha = float(cfg.get("weight_alpha", 0.02))
+ 
+-        nb = len(self.BUCKETS) + 1
++        self.buckets = tuple(cfg.get("buckets", self.BUCKETS))
++        nb = len(self.buckets) + 1
+         self._nb = nb
+         self._rate = [0.0] * nb
+         self._rate_n = [0] * nb
+@@ -361,7 +366,7 @@ class ConfidenceStepSlot:
+     # -- inputs ------------------------------------------------------------
+     def _bucket(self, conf: float) -> int:
+         i = 0
+-        for edge in self.BUCKETS:
++        for edge in self.buckets:
+             if conf < edge:
+                 return i
+             i += 1
+-- 
+2.43.0
+

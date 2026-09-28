@@ -1,0 +1,73 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: aiueo52 <aiueo52@users.noreply.github.com>
+Date: Sat, 5 Sep 2026 20:34:53 +0900
+Subject: [PATCH 064/105] adaptive: measure it -- building a second runtime
+ state costs the base profile
+
+Control (2026-09-05 20:09-20:20, one measurement window, fnbench greedy
+repeats=2, Qwen3.8-Flash-Next NEXTN topk=1, mem fraction 0.93):
+
+  pin15  = --speculative-adaptive with candidate_steps [3,15] and thresholds
+           that never fire, so the steps=3 state is BUILT and never activated
+           (0 switches)
+  ctlw16 = the same server without --speculative-adaptive
+
+  workload    pin15            ctlw16           delta
+  code-edit   acc 6.19 / 304   acc 9.28 / 488   -33% acc, -38% t/s
+  agent-loop  acc 3.84 / 202   acc 4.86 / 266   -21% acc, -24% t/s
+  prose-en    acc 2.83 / 151   acc 3.04 / 170   -7%  acc, -11% t/s
+  prose-ja    acc 2.51 / 137   acc 2.60 / 150   -3%  acc, -9%  t/s
+
+So the loss is in *state construction*, not in the switching policy: merely
+capturing a second (steps=3) runtime state degrades the base steps=15 draft.
+It scales with chain length -- the steps=3 state itself is untouched (pinned
+at steps=3 it matches fixed W4: acc 3.90/2.52/2.41/3.33 vs 3.77/2.50/2.46/
+3.22) -- which points at per-step draft state beyond index 3 rather than at
+anything the short chain also uses.
+
+Consequence: no controller tuning can make adaptive beat the fixed profiles
+on this model, and the tuned config is recorded as a starting point rather
+than a recommendation. flash-next-bench/adaptive/README.txt carries the
+numbers and the launcher line.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+---
+ dbg/FINDINGS.txt | 26 ++++++++++++++++++++++++++
+ 1 file changed, 26 insertions(+)
+ create mode 100644 dbg/FINDINGS.txt
+
+diff --git a/dbg/FINDINGS.txt b/dbg/FINDINGS.txt
+new file mode 100644
+index 0000000000..38a204f345
+--- /dev/null
++++ b/dbg/FINDINGS.txt
+@@ -0,0 +1,26 @@
++w16_3_15.json -- two-state adaptive speculative config for Qwen3.8-Flash-Next
++(NEXTN, topk=1), tuned 2026-09-05 against the measured per-workload acceptance.
++
++  cd ~/tools/sglang-rtxpro6000 && PYTHONPATH=~/tools/sglang-adaptive/python \
++    ./serve-fast.sh w16 --speculative-adaptive \
++      --speculative-adaptive-config ~/tools/flash-next-bench/adaptive/w16_3_15.json
++
++Thresholds (accepted drafts per verify, i.e. fnbench acc - 1):
++  at steps=15  drop to 3 when EMA <= 6.0   (measured: code 10.85, agent 4.59,
++                                            prose-en 1.99, prose-ja 1.64)
++  at steps=3   rise to 15 when EMA >  2.5  (measured: code 2.77, agent 2.22,
++                                            prose-en 1.50, prose-ja 1.46)
++
++NOT RECOMMENDED FOR PRODUCTION as of 2026-09-05. Building the second runtime
++state costs the base (steps=15) profile 10-38% throughput even when the
++controller never switches -- see the pin15 vs ctlw16 control below, same
++measurement window, identical flags except that pin15's thresholds make it
++stay at steps=15 forever:
++
++  workload    pin15 (2 states)   plain W16 (1 state)
++  code-edit   acc 6.19 / 304     acc 9.28 / 488
++  agent-loop  acc 3.84 / 202     acc 4.86 / 266
++  prose-en    acc 2.83 / 151     acc 3.04 / 170
++  prose-ja    acc 2.51 / 137     acc 2.60 / 150
++
++Keep the fixed w4 / w16 profiles until that regression is found.
+-- 
+2.43.0
+

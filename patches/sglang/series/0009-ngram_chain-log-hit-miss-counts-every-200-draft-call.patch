@@ -1,0 +1,74 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: aiueo52 <aiueo52@users.noreply.github.com>
+Date: Wed, 2 Sep 2026 11:30:53 +0900
+Subject: [PATCH 009/105] ngram_chain: log hit/miss counts every 200 draft
+ calls
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+---
+ .../srt/speculative/ngram_chain_worker.py     | 20 +++++++++++++++++++
+ 1 file changed, 20 insertions(+)
+
+diff --git a/python/sglang/srt/speculative/ngram_chain_worker.py b/python/sglang/srt/speculative/ngram_chain_worker.py
+index d8482c2df1..ce7e7c55bd 100644
+--- a/python/sglang/srt/speculative/ngram_chain_worker.py
++++ b/python/sglang/srt/speculative/ngram_chain_worker.py
+@@ -3,6 +3,8 @@ from __future__ import annotations
+ from collections import defaultdict, deque
+ from collections.abc import Iterable, Sequence
+ 
++import logging
++
+ import msgspec
+ import torch
+ from sglang.srt.arg_groups.overrides import declare_resolution, resolving_view
+@@ -17,6 +19,8 @@ from sglang.srt.speculative.spec_info import SpeculativeAlgorithm
+ from sglang.srt.speculative.spec_registry import CustomSpecAlgo
+ from sglang.srt.speculative.spec_utils import get_plan_stream
+ 
++logger = logging.getLogger(__name__)
++
+ 
+ class NgramChainMatch(msgspec.Struct, frozen=True):
+     tokens: tuple[int, ...]
+@@ -142,6 +146,8 @@ class NgramChainDraftWorker(EagleDraftWorker):
+         self.ngram_chain_window_size = spec.speculative_ngram_chain_window_size
+         self._request_indexes: dict[object, RequestNgramChainIndex] = {}
+         self._pending_commits: deque[_PendingCommits] = deque()
++        self._stat_hits = 0
++        self._stat_misses = 0
+ 
+     def clear_request_indexes(self) -> None:
+         self._request_indexes.clear()
+@@ -245,6 +251,16 @@ class NgramChainDraftWorker(EagleDraftWorker):
+     def _draft_mtp_chain(self, batch):
+         return super().draft(batch)
+ 
++    def _maybe_log_stats(self) -> None:
++        total = self._stat_hits + self._stat_misses
++        if total % 200 == 0:
++            logger.info(
++                "NGRAM_CHAIN draft stats: hits=%d misses=%d hit_rate=%.3f",
++                self._stat_hits,
++                self._stat_misses,
++                self._stat_hits / max(1, total),
++            )
++
+     def draft(self, batch):
+         if batch.forward_mode.is_idle():
+             return self._draft_mtp_chain(batch)
+@@ -256,7 +272,11 @@ class NgramChainDraftWorker(EagleDraftWorker):
+         if matches is None:
+             # v0 keeps one tree shape per batch: any miss (including a partial
+             # continuation) sends the whole mixed batch through unchanged MTP.
++            self._stat_misses += 1
++            self._maybe_log_stats()
+             return self._draft_mtp_chain(batch)
++        self._stat_hits += 1
++        self._maybe_log_stats()
+ 
+         draft_input = batch.spec_info
+         # Preserve the normal draft-cache location bookkeeping. No draft model
+-- 
+2.43.0
+

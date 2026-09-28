@@ -1,0 +1,81 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: aiueo52 <aiueo52@users.noreply.github.com>
+Date: Thu, 3 Sep 2026 20:11:23 +0900
+Subject: [PATCH 3/9] mtp dump: record the attn/MLP boundary HC state for the
+ parity gate
+
+The served draft's MoE experts are quantized to NVFP4 online in every supported
+configuration, so an end-to-end comparison conflates a reimplementation bug
+with quantization error.  Everything before the MoE runs in BF16, so recording
+residual[0] at the attention/MLP boundary gives an exact test of the input
+fusion, both norms, the hyper-connection mix/combine, and QSA attention with
+its output gate and partial RoPE.  No-op unless SGLANG_MTP_DRAFT_DUMP_DIR is set.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+---
+ python/sglang/srt/models/mtp_dump.py | 30 ++++++++++++++++++++++++++++
+ 1 file changed, 30 insertions(+)
+
+diff --git a/python/sglang/srt/models/mtp_dump.py b/python/sglang/srt/models/mtp_dump.py
+index 376b09267a..a674c7e088 100644
+--- a/python/sglang/srt/models/mtp_dump.py
++++ b/python/sglang/srt/models/mtp_dump.py
+@@ -360,6 +360,7 @@ class MTPDraftDumper:
+         if offsets[-1] != n:
+             offsets = [0, n]
+ 
++        post_attn = take_post_attn_hc()
+         tensors = {
+             "input_ids": input_ids.to(torch.int32).cpu(),
+             "positions": positions.reshape(-1)[:n].to(torch.int32).cpu(),
+@@ -371,6 +372,8 @@ class MTPDraftDumper:
+             "topk_logits": topk_vals.cpu(),
+             "seq_offsets": torch.tensor(offsets, dtype=torch.int32),
+         }
++        if post_attn is not None and post_attn.shape[0] == n:
++            tensors["post_attn_hc"] = post_attn.to(torch.bfloat16).cpu()
+         self.counter += 1
+         self.rows_written += n
+         name = f"{self.tag}-{os.getpid()}-{self.counter:08d}.safetensors"
+@@ -388,6 +391,31 @@ class MTPDraftDumper:
+             logger.error("MTP draft dump queue full; dropping a batch")
+ 
+ 
++# The draft's MoE experts are quantized to NVFP4 online in every supported
++# configuration (--speculative-draft-model-quantization unquant still resolves
++# to the target's modelopt_fp4 config).  To separate a structural bug in the
++# reimplementation from that quantization error, also record the HC state at
++# the attention/MLP boundary: everything up to there -- input fusion, both
++# norms, the hyper-connection mix/combine, QSA attention with its output gate
++# and partial RoPE -- runs in BF16 and must match exactly.
++_POST_ATTN_HC = None
++_POST_ATTN_ENABLED = None
++
++
++def stash_post_attn_hc(hidden_states) -> None:
++    global _POST_ATTN_HC, _POST_ATTN_ENABLED
++    if _POST_ATTN_ENABLED is None:
++        _POST_ATTN_ENABLED = bool(os.environ.get("SGLANG_MTP_DRAFT_DUMP_DIR", "").strip())
++    if _POST_ATTN_ENABLED:
++        _POST_ATTN_HC = hidden_states
++
++
++def take_post_attn_hc():
++    global _POST_ATTN_HC
++    value, _POST_ATTN_HC = _POST_ATTN_HC, None
++    return value
++
++
+ def maybe_dump_draft(
+     model, input_ids, positions, forward_batch, input_hc, mixed, own_hc
+ ) -> None:
+@@ -407,4 +435,6 @@ __all__ = [
+     "maybe_stage",
+     "maybe_flush",
+     "maybe_dump_draft",
++    "stash_post_attn_hc",
++    "take_post_attn_hc",
+ ]
+-- 
+2.43.0
+

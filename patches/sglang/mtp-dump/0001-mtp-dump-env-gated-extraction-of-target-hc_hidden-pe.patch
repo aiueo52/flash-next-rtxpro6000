@@ -1,0 +1,315 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: aiueo52 <aiueo52@users.noreply.github.com>
+Date: Thu, 3 Sep 2026 19:35:00 +0900
+Subject: [PATCH 1/9] mtp dump: env-gated extraction of target hc_hidden +
+ per-token argmax
+
+New module sglang/srt/models/mtp_dump.py plus two call sites in qwen4_exp.py
+(16 added lines).  Active only when SGLANG_MTP_DUMP_DIR is set; on every target
+extend forward it saves input_ids / positions / hc_hidden [T,10240] (the
+pre-hyper_connection_mixer residual the draft head consumes) / target_argmax
+recomputed chunk-wise through the target lm_head, one safetensors file per
+forward, written from a background thread with a bounded queue.
+
+Decode, target-verify and CUDA-graph capture paths bail out immediately, so the
+graph replay path is untouched.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+---
+ python/sglang/srt/models/mtp_dump.py  | 245 ++++++++++++++++++++++++++
+ python/sglang/srt/models/qwen4_exp.py |  13 ++
+ 2 files changed, 258 insertions(+)
+ create mode 100644 python/sglang/srt/models/mtp_dump.py
+
+diff --git a/python/sglang/srt/models/mtp_dump.py b/python/sglang/srt/models/mtp_dump.py
+new file mode 100644
+index 0000000000..b35537411b
+--- /dev/null
++++ b/python/sglang/srt/models/mtp_dump.py
+@@ -0,0 +1,245 @@
++"""Env-gated extraction of MTP training data from the Qwen4Exp target model.
++
++Enabled only when ``SGLANG_MTP_DUMP_DIR`` is set.  When it is, every *extend*
++(prefill) forward of the TARGET model writes one safetensors file containing,
++per token:
++
++    input_ids      int32 [T]        the tokens of this forward
++    positions      int32 [T]        absolute target positions
++    hc_hidden      bf16  [T, 4*H]   residual after the last layer and BEFORE
++                                    ``hyper_connection_mixer`` -- exactly the
++                                    tensor the draft head consumes
++    target_argmax  int32 [T]        argmax of the target logits at every
++                                    position (the server only computes
++                                    last-token logits, so this is recomputed
++                                    here chunk-wise from the mixed 2560-wide
++                                    hidden through the target lm_head)
++    seq_offsets    int32 [S+1]      per-request slice boundaries
++    prefix_lens    int32 [S]        radix-cache prefix length per request
++    top4_ids       int32 [T, K]     optional (SGLANG_MTP_DUMP_TOPK=K)
++    top4_logits    fp16  [T, K]     optional
++
++Design constraints:
++  * Decode / target-verify / draft forwards are never touched, so the CUDA
++    graph replay path is untouched (prefill runs eager).
++  * Nothing is imported or allocated when the env var is unset.
++  * Writing happens on a background thread with a bounded queue so a slow disk
++    back-pressures the server instead of buffering unboundedly.
++
++Environment:
++    SGLANG_MTP_DUMP_DIR     output directory (enables everything)
++    SGLANG_MTP_DUMP_TOPK    also store top-K ids/logits per row (default 0)
++    SGLANG_MTP_DUMP_CHUNK   rows per lm_head matmul chunk (default 1024)
++    SGLANG_MTP_DUMP_MAX_GB  stop dumping after this many GB (default 400)
++    SGLANG_MTP_DUMP_TAG     filename prefix (default "dump")
++"""
++
++from __future__ import annotations
++
++import json
++import logging
++import os
++import queue
++import threading
++import time
++from typing import Optional
++
++import torch
++
++logger = logging.getLogger(__name__)
++
++_DUMPER: Optional["MTPDumper"] = None
++_INIT_DONE = False
++
++
++def dump_enabled() -> bool:
++    return get_dumper() is not None
++
++
++def get_dumper() -> Optional["MTPDumper"]:
++    global _DUMPER, _INIT_DONE
++    if not _INIT_DONE:
++        _INIT_DONE = True
++        directory = os.environ.get("SGLANG_MTP_DUMP_DIR", "").strip()
++        if directory:
++            _DUMPER = MTPDumper(directory)
++            logger.warning("MTP dump ENABLED -> %s", directory)
++    return _DUMPER
++
++
++class MTPDumper:
++    def __init__(self, directory: str):
++        self.dir = directory
++        os.makedirs(self.dir, exist_ok=True)
++        self.topk = int(os.environ.get("SGLANG_MTP_DUMP_TOPK", "0"))
++        self.chunk = int(os.environ.get("SGLANG_MTP_DUMP_CHUNK", "1024"))
++        self.max_bytes = float(os.environ.get("SGLANG_MTP_DUMP_MAX_GB", "400")) * 2**30
++        self.tag = os.environ.get("SGLANG_MTP_DUMP_TAG", "dump")
++        self.counter = 0
++        self.bytes_written = 0
++        self.rows_written = 0
++        self.stopped = False
++        self._staged = None
++        self._queue: "queue.Queue" = queue.Queue(maxsize=4)
++        self._thread = threading.Thread(target=self._writer, daemon=True)
++        self._thread.start()
++
++    # ------------------------------------------------------------- writer
++    def _writer(self) -> None:
++        from safetensors.torch import save_file
++
++        while True:
++            item = self._queue.get()
++            if item is None:
++                self._queue.task_done()
++                return
++            path, tensors, meta = item
++            try:
++                tmp = path + ".tmp"
++                save_file(tensors, tmp, metadata=meta)
++                os.replace(tmp, path)
++                self.bytes_written += os.path.getsize(path)
++            except Exception:  # noqa: BLE001
++                logger.exception("MTP dump write failed for %s", path)
++            finally:
++                self._queue.task_done()
++
++    def close(self) -> None:
++        self._queue.put(None)
++        self._thread.join(timeout=60)
++
++    # -------------------------------------------------------------- stage
++    def stage(self, input_ids, positions, forward_batch, mixed_hidden, hc_hidden) -> None:
++        """Called from the language model with everything except lm_head."""
++        self._staged = None
++        if self.stopped or hc_hidden is None or mixed_hidden is None:
++            return
++        if isinstance(mixed_hidden, tuple):  # fused all-reduce payload
++            mixed_hidden = mixed_hidden[0]
++        mode = forward_batch.forward_mode
++        if not mode.is_extend_or_draft_extend_or_mixed():
++            return
++        if mode.is_target_verify() or mode.is_idle():
++            return
++        try:
++            from sglang.srt.model_executor.runner import get_is_capture_mode
++
++            if get_is_capture_mode():
++                return
++        except Exception:  # noqa: BLE001
++            pass
++        if input_ids is None:
++            input_ids = forward_batch.input_ids
++        n = int(input_ids.shape[0])
++        if n < 4 or hc_hidden.shape[0] != n or mixed_hidden.shape[0] != n:
++            return
++        self._staged = (input_ids, positions, forward_batch, mixed_hidden, hc_hidden)
++
++    # -------------------------------------------------------------- flush
++    @torch.no_grad()
++    def flush(self, lm_head) -> None:
++        staged, self._staged = self._staged, None
++        if staged is None or self.stopped:
++            return
++        if self.bytes_written >= self.max_bytes:
++            if not self.stopped:
++                logger.warning(
++                    "MTP dump budget reached (%.1f GB); stopping",
++                    self.bytes_written / 2**30,
++                )
++                self.stopped = True
++            return
++        input_ids, positions, forward_batch, mixed, hc_hidden = staged
++        weight = getattr(lm_head, "weight", None)
++        if weight is None or weight.dim() != 2:
++            logger.error("MTP dump: unusable lm_head %r; disabling", type(lm_head))
++            self.stopped = True
++            return
++
++        n = int(input_ids.shape[0])
++        argmax = torch.empty(n, dtype=torch.int32, device=mixed.device)
++        topk_ids = topk_vals = None
++        if self.topk > 0:
++            topk_ids = torch.empty(n, self.topk, dtype=torch.int32, device=mixed.device)
++            topk_vals = torch.empty(
++                n, self.topk, dtype=torch.float16, device=mixed.device
++            )
++        for start in range(0, n, self.chunk):
++            end = min(n, start + self.chunk)
++            logits = torch.nn.functional.linear(
++                mixed[start:end].to(weight.dtype), weight
++            )
++            argmax[start:end] = logits.argmax(dim=-1).to(torch.int32)
++            if self.topk > 0:
++                vals, ids = torch.topk(logits.float(), self.topk, dim=-1)
++                topk_ids[start:end] = ids.to(torch.int32)
++                topk_vals[start:end] = vals.to(torch.float16)
++            del logits
++
++        seq_lens = forward_batch.extend_seq_lens_cpu
++        if seq_lens is None and forward_batch.extend_seq_lens is not None:
++            seq_lens = forward_batch.extend_seq_lens.tolist()
++        if not seq_lens:
++            seq_lens = [n]
++        offsets = [0]
++        for length in seq_lens:
++            offsets.append(offsets[-1] + int(length))
++        if offsets[-1] != n:  # chunked prefill bookkeeping mismatch: treat as one
++            offsets = [0, n]
++            seq_lens = [n]
++        prefix = forward_batch.extend_prefix_lens_cpu
++        if prefix is None and forward_batch.extend_prefix_lens is not None:
++            prefix = forward_batch.extend_prefix_lens.tolist()
++        if not prefix or len(prefix) != len(seq_lens):
++            prefix = [0] * len(seq_lens)
++
++        tensors = {
++            "input_ids": input_ids.to(torch.int32).cpu(),
++            "positions": positions.reshape(-1)[:n].to(torch.int32).cpu()
++            if positions is not None
++            else torch.arange(n, dtype=torch.int32),
++            "hc_hidden": hc_hidden.to(torch.bfloat16).cpu(),
++            "target_argmax": argmax.cpu(),
++            "seq_offsets": torch.tensor(offsets, dtype=torch.int32),
++            "prefix_lens": torch.tensor(prefix, dtype=torch.int32),
++        }
++        if self.topk > 0:
++            tensors["topk_ids"] = topk_ids.cpu()
++            tensors["topk_logits"] = topk_vals.cpu()
++
++        self.counter += 1
++        self.rows_written += n
++        name = f"{self.tag}-{os.getpid()}-{self.counter:08d}.safetensors"
++        meta = {
++            "forward_mode": str(forward_batch.forward_mode),
++            "tokens": str(n),
++            "sequences": str(len(seq_lens)),
++            "written_at": f"{time.time():.3f}",
++        }
++        try:
++            self._queue.put((os.path.join(self.dir, name), tensors, meta), timeout=300)
++        except queue.Full:  # pragma: no cover
++            logger.error("MTP dump queue full for 300 s; dropping a batch")
++
++    def stats(self) -> dict:
++        return {
++            "files": self.counter,
++            "rows": self.rows_written,
++            "gb": round(self.bytes_written / 2**30, 3),
++            "stopped": self.stopped,
++        }
++
++
++def maybe_stage(model, input_ids, positions, forward_batch, mixed, hc_hidden) -> None:
++    dumper = get_dumper()
++    if dumper is not None:
++        dumper.stage(input_ids, positions, forward_batch, mixed, hc_hidden)
++
++
++def maybe_flush(lm_head) -> None:
++    dumper = get_dumper()
++    if dumper is not None:
++        dumper.flush(lm_head)
++
++
++__all__ = ["MTPDumper", "dump_enabled", "get_dumper", "maybe_stage", "maybe_flush"]
+diff --git a/python/sglang/srt/models/qwen4_exp.py b/python/sglang/srt/models/qwen4_exp.py
+index 31b5cebd94..9824664a9a 100644
+--- a/python/sglang/srt/models/qwen4_exp.py
++++ b/python/sglang/srt/models/qwen4_exp.py
+@@ -57,6 +57,7 @@ from sglang.srt.model_executor.forward_context import (
+ )
+ from sglang.srt.model_executor.runner import get_is_capture_mode
+ from sglang.srt.model_loader.weight_utils import default_weight_loader
++from sglang.srt.models.mtp_dump import maybe_flush, maybe_stage
+ from sglang.srt.models.qwen3_5 import (
+     Qwen3_5AttentionDecoderLayer,
+     Qwen3_5ForCausalLM,
+@@ -1851,6 +1852,15 @@ class Qwen4ExpVLModel(Qwen4ExpModel):
+         )
+         if isinstance(model_output, tuple):
+             hidden_states, self.last_hc_hidden_states = model_output
++            # MTP training-data extraction (no-op unless SGLANG_MTP_DUMP_DIR is set).
++            maybe_stage(
++                self,
++                input_ids,
++                positions,
++                forward_batch,
++                hidden_states,
++                self.last_hc_hidden_states,
++            )
+             return hidden_states
+         return model_output
+ 
+@@ -1883,6 +1893,9 @@ class Qwen4ExpForConditionalGeneration(Qwen3VLForConditionalGeneration):
+         hc_hidden_states = self.model.last_hc_hidden_states
+         if hc_hidden_states is not None and isinstance(output, LogitsProcessorOutput):
+             output.hidden_states = hc_hidden_states
++        # MTP training-data extraction: the staged tensors need the target
++        # lm_head, which only exists on this wrapper.  No-op when unset.
++        maybe_flush(self.lm_head)
+         return output
+ 
+     def _load_qwen4_exp_ple_buffer(
+-- 
+2.43.0
+

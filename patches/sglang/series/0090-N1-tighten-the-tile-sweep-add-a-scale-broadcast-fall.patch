@@ -1,0 +1,105 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: aiueo52 <aiueo52@users.noreply.github.com>
+Date: Sun, 6 Sep 2026 12:32:16 +0900
+Subject: [PATCH 090/105] N1: tighten the tile sweep, add a scale-broadcast
+ fallback
+
+The full sweep cross product is hours of Triton compiles for a decision a few dozen
+points already make; restrict it, and offer split-K only where the n grid does not
+already fill the machine. SGLANG_NVFP4_GEMV_SCALE_GATHER re-reads each block scale 16
+times instead of reshaping a broadcast value, in case a Triton build refuses the latter.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+---
+ bench/n1/bench_nvfp4_gemv.py                  |  9 +++++++-
+ .../layers/quantization/w4a16_nvfp4_gemv.py   | 23 ++++++++++++++++---
+ 2 files changed, 28 insertions(+), 4 deletions(-)
+
+diff --git a/bench/n1/bench_nvfp4_gemv.py b/bench/n1/bench_nvfp4_gemv.py
+index 7e1831a082..598a484146 100644
+--- a/bench/n1/bench_nvfp4_gemv.py
++++ b/bench/n1/bench_nvfp4_gemv.py
+@@ -117,9 +117,16 @@ def run_sweep(M, N, K):
+     """Tile sweep for the NVFP4 kernel. BLOCK_K must divide K and be a multiple of 16."""
+     b4 = fp4_bytes(N, K)
+     c4 = copies_for(b4)
++    # Kept deliberately small: every distinct config is a fresh Triton compile
++    # (~5-20 s), so the full cross product is hours of wall clock for a decision that a
++    # few dozen points already make. Split-K is only offered where the n grid does NOT
++    # already fill the machine -- at N=49152, BLOCK_N=32 is 1536 CTAs on 188 SMs, so
++    # splitting can only add reduction traffic.
++    n_full = triton.cdiv(N, 32) >= 2 * 188
++    splits = (1,) if n_full else (1, 2, 5, 10)
+     cands = []
+     for bn, bk, sp, warps, stages in itertools.product(
+-        (16, 32, 64, 128), (64, 128, 256, 512), (1, 2, 5, 10), (2, 4, 8), (2, 3, 4)
++        (32, 64, 128), (128, 256, 512), splits, (4, 8), (2, 3)
+     ):
+         if K % bk or (bk // 16) * bn > 8192:
+             continue
+diff --git a/python/sglang/srt/layers/quantization/w4a16_nvfp4_gemv.py b/python/sglang/srt/layers/quantization/w4a16_nvfp4_gemv.py
+index 22fd868746..75d61991ca 100644
+--- a/python/sglang/srt/layers/quantization/w4a16_nvfp4_gemv.py
++++ b/python/sglang/srt/layers/quantization/w4a16_nvfp4_gemv.py
+@@ -80,9 +80,21 @@ def _unpack_dequant(b, BLOCK_N: tl.constexpr, BLOCK_KB: tl.constexpr):
+ @triton.jit
+ def _load_block_scales(
+     s_ptr, offs_n, kb0, n_mask, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
+-    stride_sn, NB: tl.constexpr, E4M3_NATIVE: tl.constexpr,
++    stride_sn, NB: tl.constexpr, E4M3_NATIVE: tl.constexpr, GATHER: tl.constexpr,
+ ):
+-    """[BLOCK_N, BLOCK_K//16] e4m3 scales, broadcast to [BLOCK_N, BLOCK_K] bf16."""
++    """[BLOCK_N, BLOCK_K//16] e4m3 scales, broadcast to [BLOCK_N, BLOCK_K] bf16.
++
++    GATHER False loads NB scales per row and expands them in registers; GATHER True
++    re-reads each scale 16 times (an L1 hit) with no reshape. The first is fewer
++    instructions, the second is the fallback if a Triton version refuses to reshape a
++    broadcast value. They are numerically identical.
++    """
++    if GATHER:
++        offs_k = tl.arange(0, BLOCK_K)
++        p = s_ptr + offs_n[:, None] * stride_sn + (kb0 + offs_k // FP4_SCALE_BLOCK)[None, :]
++        if E4M3_NATIVE:
++            return tl.load(p, mask=n_mask[:, None], other=0.0).to(tl.bfloat16)
++        return tl.load(p, mask=n_mask[:, None], other=0).to(tl.bfloat16)
+     offs_b = kb0 + tl.arange(0, NB)
+     p = s_ptr + offs_n[:, None] * stride_sn + offs_b[None, :]
+     if E4M3_NATIVE:
+@@ -122,6 +134,7 @@ def _w4a16_nvfp4_gemv_kernel(
+     SPLITS: tl.constexpr,
+     USE_DOT: tl.constexpr,
+     E4M3_NATIVE: tl.constexpr,
++    SCALE_GATHER: tl.constexpr = False,
+     USE_PDL: tl.constexpr = False,
+ ):
+     pid_n = tl.program_id(0)
+@@ -148,7 +161,7 @@ def _w4a16_nvfp4_gemv_kernel(
+         w = _unpack_dequant(qb, BLOCK_N, BLOCK_KB)
+         s = _load_block_scales(
+             s_ptr, offs_n, k0 // FP4_SCALE_BLOCK, n_mask,
+-            BLOCK_N, BLOCK_K, stride_sn, NB, E4M3_NATIVE,
++            BLOCK_N, BLOCK_K, stride_sn, NB, E4M3_NATIVE, SCALE_GATHER,
+         )
+         w = w * s
+         if USE_DOT:
+@@ -232,6 +245,9 @@ from sglang.srt.layers.quantization.w8a16_gemv import (  # noqa: E402
+ )
+ 
+ E4M3_NATIVE = True
++#: Fallback scale broadcast (see _load_block_scales); set if the reshape path fails
++#: to compile on a given Triton build.
++SCALE_GATHER = _env_flag("SGLANG_NVFP4_GEMV_SCALE_GATHER")
+ 
+ 
+ def _m_bucket(M: int) -> int:
+@@ -357,6 +373,7 @@ def w4a16_nvfp4_gemv(
+         SPLITS=splits,
+         USE_DOT=use_dot,
+         E4M3_NATIVE=E4M3_NATIVE,
++        SCALE_GATHER=SCALE_GATHER,
+         USE_PDL=PDL,
+         launch_pdl=PDL,
+         num_warps=num_warps,
+-- 
+2.43.0
+

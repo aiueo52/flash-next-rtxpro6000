@@ -1,0 +1,30 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: aiueo52 <aiueo52@users.noreply.github.com>
+Date: Sat, 5 Sep 2026 14:47:09 +0900
+Subject: [PATCH 051/105] R5/R2: guard the flag entry against the non-Tensor
+ (aiter tuple) input
+
+`_forward_input_proj` accepts a (bf16, fp8, scale) tuple on the AMD/aiter path;
+the flag gate called `.dim()` on it unconditionally. Unreachable on CUDA, but
+the guard costs nothing.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+---
+ python/sglang/srt/models/qwen3_5.py | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/python/sglang/srt/models/qwen3_5.py b/python/sglang/srt/models/qwen3_5.py
+index 1d84b4e038..a6764ab89c 100644
+--- a/python/sglang/srt/models/qwen3_5.py
++++ b/python/sglang/srt/models/qwen3_5.py
+@@ -948,6 +948,7 @@ class Qwen3_5GatedDeltaNet(nn.Module):
+         if (
+             (_GDN_AB_STASH_DIRECT or _GDN_PROJ_DIRECT_LAYOUT)
+             and _is_cuda
++            and isinstance(hidden_states, torch.Tensor)
+             and hidden_states.dim() == 2
+         ):
+             if _GDN_AB_STASH_DIRECT:
+-- 
+2.43.0
+

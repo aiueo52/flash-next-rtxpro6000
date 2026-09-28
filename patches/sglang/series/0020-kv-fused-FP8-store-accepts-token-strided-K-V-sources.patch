@@ -1,0 +1,113 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: aiueo52 <aiueo52@users.noreply.github.com>
+Date: Thu, 3 Sep 2026 06:06:14 +0900
+Subject: [PATCH 020/105] kv: fused FP8 store accepts token-strided K/V sources
+
+Verify passes K/V as token-strided views of the fused qkv buffer, which the
+contiguity guard sent back to the 5-kernel path; the kernel now takes the
+token stride (rows stay contiguous [H, D]). Strided case added to the test.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+---
+ python/sglang/srt/mem_cache/fp8_kv_store.py | 18 +++++++++++++-----
+ python/sglang/srt/mem_cache/memory_pool.py  |  6 ++++--
+ test/srt/layers/test_glue_d.py              | 13 ++++++++++---
+ 3 files changed, 27 insertions(+), 10 deletions(-)
+
+diff --git a/python/sglang/srt/mem_cache/fp8_kv_store.py b/python/sglang/srt/mem_cache/fp8_kv_store.py
+index 8c54079cad..93f2018b18 100644
+--- a/python/sglang/srt/mem_cache/fp8_kv_store.py
++++ b/python/sglang/srt/mem_cache/fp8_kv_store.py
+@@ -16,6 +16,8 @@ def _fp8_kv_store_kernel(
+     loc_ptr,
+     k_scale,
+     v_scale,
++    k_stride_tok,
++    v_stride_tok,
+     row_size: tl.constexpr,
+     HAS_K_SCALE: tl.constexpr,
+     HAS_V_SCALE: tl.constexpr,
+@@ -26,10 +28,9 @@ def _fp8_kv_store_kernel(
+     token = tl.program_id(0)
+     offset = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
+     mask = offset < row_size
+-    src = token * row_size + offset
+     dst = tl.load(loc_ptr + token).to(tl.int64) * row_size + offset
+-    k = tl.load(k_ptr + src, mask=mask).to(tl.float32)
+-    v = tl.load(v_ptr + src, mask=mask).to(tl.float32)
++    k = tl.load(k_ptr + token * k_stride_tok + offset, mask=mask).to(tl.float32)
++    v = tl.load(v_ptr + token * v_stride_tok + offset, mask=mask).to(tl.float32)
+     # Match ``cache.div_(scale)`` exactly: a true fp32 division (not a
+     # multiply by the reciprocal), rounded to BF16, then cast to FP8.
+     # A 0-d scale *tensor* is first cast to the BF16 common dtype by torch's
+@@ -81,8 +82,13 @@ def fp8_kv_store(
+         raise ValueError("K/V destination buffers must have the same 3-D shape")
+     if k_buffer.shape[1:] != (heads, head_dim):
+         raise ValueError("source and destination KV row shapes must match")
+-    if any(not tensor.is_contiguous() for tensor in tensors):
+-        raise ValueError("all fused FP8 KV store tensors must be contiguous")
++    if any(not tensor.is_contiguous() for tensor in (k_buffer, v_buffer, loc)):
++        raise ValueError("fused FP8 KV store destinations and loc must be contiguous")
++    for name, src in (("cache_k", cache_k), ("cache_v", cache_v)):
++        # Sources may be strided along the token axis (views of a fused
++        # qkv buffer); each [H, D] row itself must be contiguous.
++        if src.stride(2) != 1 or src.stride(1) != head_dim:
++            raise ValueError(f"{name} rows must be contiguous [H, D]")
+ 
+     def _check_scale(scale, name: str) -> None:
+         if isinstance(scale, torch.Tensor):
+@@ -110,6 +116,8 @@ def fp8_kv_store(
+         loc,
+         k_arg,
+         v_arg,
++        cache_k.stride(0),
++        cache_v.stride(0),
+         row_size=row_size,
+         HAS_K_SCALE=k_scale is not None,
+         HAS_V_SCALE=v_scale is not None,
+diff --git a/python/sglang/srt/mem_cache/memory_pool.py b/python/sglang/srt/mem_cache/memory_pool.py
+index b013f7138e..1c8754009a 100644
+--- a/python/sglang/srt/mem_cache/memory_pool.py
++++ b/python/sglang/srt/mem_cache/memory_pool.py
+@@ -2548,8 +2548,10 @@ class MHATokenToKVPool(KVCache):
+             and 1 <= cache_k.shape[0] <= 64
+             and cache_k.dtype == torch.bfloat16
+             and cache_v.dtype == torch.bfloat16
+-            and cache_k.is_contiguous()
+-            and cache_v.is_contiguous()
++            and cache_k.stride(2) == 1
++            and cache_k.stride(1) == cache_k.shape[2]
++            and cache_v.stride(2) == 1
++            and cache_v.stride(1) == cache_v.shape[2]
+             and loc.dim() == 1
+             and loc.shape[0] == cache_k.shape[0]
+             and loc.dtype in (torch.int32, torch.int64)
+diff --git a/test/srt/layers/test_glue_d.py b/test/srt/layers/test_glue_d.py
+index 9773ec9e48..67f31d511a 100644
+--- a/test/srt/layers/test_glue_d.py
++++ b/test/srt/layers/test_glue_d.py
+@@ -50,11 +50,18 @@ def test_router_gemv_optional_bias_and_zero_bias_cache():
+ 
+ @pytest.mark.parametrize("tokens", [1, 16])
+ @pytest.mark.parametrize("scale_kind", ["none", "float", "tensor"])
+-def test_fp8_kv_store_matches_reference(tokens: int, scale_kind: str):
++@pytest.mark.parametrize("strided", [False, True])
++def test_fp8_kv_store_matches_reference(tokens: int, scale_kind: str, strided: bool):
+     torch.manual_seed(2000 + tokens)
+     shape = (tokens, 4, 128)
+-    cache_k = torch.randn(shape, device="cuda", dtype=torch.bfloat16)
+-    cache_v = torch.randn(shape, device="cuda", dtype=torch.bfloat16)
++    if strided:
++        # k/v as token-strided views of one fused [N, 3*H*D] buffer
++        fused = torch.randn((tokens, 3 * 4 * 128), device="cuda", dtype=torch.bfloat16)
++        cache_k = fused[:, : 4 * 128].view(tokens, 4, 128)
++        cache_v = fused[:, 4 * 128 : 2 * 4 * 128].view(tokens, 4, 128)
++    else:
++        cache_k = torch.randn(shape, device="cuda", dtype=torch.bfloat16)
++        cache_v = torch.randn(shape, device="cuda", dtype=torch.bfloat16)
+     loc = torch.randperm(64, device="cuda", dtype=torch.int64)[:tokens].contiguous()
+     k_buffer = torch.zeros(
+         (64, 4, 128), device="cuda", dtype=torch.float8_e4m3fn
+-- 
+2.43.0
+

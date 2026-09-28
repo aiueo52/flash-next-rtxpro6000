@@ -1,0 +1,105 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: aiueo52 <aiueo52@users.noreply.github.com>
+Date: Thu, 3 Sep 2026 20:47:57 +0900
+Subject: [PATCH 034/105] hc: fused-combine support check covers every tensor
+ the kernel reads compactly
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+---
+ bench/glue_e/bench_hc_combine.py              |  2 +-
+ .../srt/layers/hc_combine_fused_triton.py     | 25 +++++++++++++++----
+ python/sglang/srt/layers/hyperconnection.py   |  7 +++++-
+ test/srt/layers/test_hc_combine_fused.py      |  2 +-
+ 4 files changed, 28 insertions(+), 8 deletions(-)
+
+diff --git a/bench/glue_e/bench_hc_combine.py b/bench/glue_e/bench_hc_combine.py
+index 4707d6e433..3a40fc7ab4 100644
+--- a/bench/glue_e/bench_hc_combine.py
++++ b/bench/glue_e/bench_hc_combine.py
+@@ -57,7 +57,7 @@ def main(rows_list):
+     for rows in rows_list:
+         w, args = build(rows)
+         print(f"\n=== rows={rows}  hc={HC} hidden={HS}  working set x{len(args)}")
+-        if not hc_combine_fused_supported(args[0][0], args[0][1], HC, HS):
++        if not hc_combine_fused_supported(args[0][0], args[0][1], args[0][2], w, HC, HS):
+             print("  fused path unsupported at this row count")
+             continue
+ 
+diff --git a/python/sglang/srt/layers/hc_combine_fused_triton.py b/python/sglang/srt/layers/hc_combine_fused_triton.py
+index 9823c88aa1..0638ca0a55 100644
+--- a/python/sglang/srt/layers/hc_combine_fused_triton.py
++++ b/python/sglang/srt/layers/hc_combine_fused_triton.py
+@@ -173,19 +173,34 @@ def _plan(rows: int, row_size: int, sms: int):
+ def hc_combine_fused_supported(
+     block_output: torch.Tensor,
+     residual: torch.Tensor,
++    normed_residual: torch.Tensor,
++    inject_weight: torch.Tensor,
+     hc_count: int,
+     hidden_size: int,
+ ) -> bool:
+-    if not (block_output.is_cuda and residual.is_cuda):
++    """Whether `hc_combine_fused` can serve this call (else use the two-kernel path).
++
++    The kernel addresses every tensor with compact strides and needs its whole grid
++    resident at the barrier, so anything non-contiguous or too wide falls back.
++    """
++    row_size = hc_count * hidden_size
++    tensors = (block_output, residual, normed_residual, inject_weight)
++    if not all(t.is_cuda and t.is_contiguous() for t in tensors):
+         return False
+     if residual.dtype not in (torch.bfloat16, torch.float16):
+         return False
+-    rows = residual.numel() // (hc_count * hidden_size)
+-    if rows < 1 or rows > _MAX_ROWS:
++    if not all(t.dtype == residual.dtype for t in tensors):
++        return False
++    if tuple(inject_weight.shape) != (hc_count, row_size):
++        return False
++    rows = residual.numel() // row_size
++    if rows < 1 or rows > _MAX_ROWS or rows * row_size != residual.numel():
++        return False
++    if block_output.numel() != rows * hidden_size:
+         return False
+-    if not (block_output.is_contiguous() and residual.is_contiguous()):
++    if normed_residual.numel() != residual.numel():
+         return False
+-    return _plan(rows, hc_count * hidden_size, _num_sms(residual.device)) is not None
++    return _plan(rows, row_size, _num_sms(residual.device)) is not None
+ 
+ 
+ def hc_combine_fused(
+diff --git a/python/sglang/srt/layers/hyperconnection.py b/python/sglang/srt/layers/hyperconnection.py
+index c7964a332d..5367ded575 100644
+--- a/python/sglang/srt/layers/hyperconnection.py
++++ b/python/sglang/srt/layers/hyperconnection.py
+@@ -482,7 +482,12 @@ class GatedResidual(HyperConnectionBase):
+                 )
+ 
+                 if hc_combine_fused_supported(
+-                    block_output, hyper_input, self.hc_count, self.hidden_size
++                    block_output,
++                    hyper_input,
++                    hyper_input_normed,
++                    self.block_inject_weight.weight.data,
++                    self.hc_count,
++                    self.hidden_size,
+                 ):
+                     return hc_combine_fused(
+                         block_output,
+diff --git a/test/srt/layers/test_hc_combine_fused.py b/test/srt/layers/test_hc_combine_fused.py
+index bdc7a6e88b..426cc7b06b 100644
+--- a/test/srt/layers/test_hc_combine_fused.py
++++ b/test/srt/layers/test_hc_combine_fused.py
+@@ -92,7 +92,7 @@ class TestHcCombineFused(unittest.TestCase):
+         )
+ 
+         y, r, n, w = make(rows, seed)
+-        self.assertTrue(hc_combine_fused_supported(y, r, HC, HS))
++        self.assertTrue(hc_combine_fused_supported(y, r, n, w, HC, HS))
+         single = hc_combine(y, r, n, w, HC, HS)
+         split = hc_combine_split(y, r, n, w, HC, HS)
+         fused = hc_combine_fused(y, r, n, w, HC, HS)
+-- 
+2.43.0
+

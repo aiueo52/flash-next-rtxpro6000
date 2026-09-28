@@ -1,0 +1,415 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: aiueo52 <aiueo52@users.noreply.github.com>
+Date: Sun, 6 Sep 2026 00:43:15 +0900
+Subject: [PATCH 074/105] pdl: measurement harness and results
+
+toy_pdl.py / toy_check.py (API, PTX order, graph capture, per-launch timing),
+unit_check.py (57-tensor bit-exactness), cmp_traces.py (per-kernel A/B),
+greedy_dump.py (full-step greedy equality), plus RESULTS.md with the
+numbers.
+
+(Published copy: the greedy-*.json result files keep only the token count
+and output hash per workload; the generated text itself was stripped. The
+GPU session driver scripts are not included.)
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+---
+ prof-pdl/RESULTS.md        | 34 ++++++++++++++
+ prof-pdl/cmp_traces.py     | 27 ++++++++++++
+ prof-pdl/greedy-0.json     |  1 +
+ prof-pdl/greedy-1.json     |  1 +
+ prof-pdl/greedy-ctla.json  |  1 +
+ prof-pdl/greedy-ctla2.json |  1 +
+ prof-pdl/greedy-ctlb.json  |  1 +
+ prof-pdl/greedy_dump.py    | 24 ++++++++++
+ prof-pdl/toy_check.py      | 60 +++++++++++++++++++++++++
+ prof-pdl/toy_pdl.py        | 90 ++++++++++++++++++++++++++++++++++++++
+ prof-pdl/unit_check.py     | 61 ++++++++++++++++++++++++++
+ 11 files changed, 301 insertions(+)
+ create mode 100644 prof-pdl/RESULTS.md
+ create mode 100644 prof-pdl/cmp_traces.py
+ create mode 100644 prof-pdl/greedy-0.json
+ create mode 100644 prof-pdl/greedy-1.json
+ create mode 100644 prof-pdl/greedy-ctla.json
+ create mode 100644 prof-pdl/greedy-ctla2.json
+ create mode 100644 prof-pdl/greedy-ctlb.json
+ create mode 100644 prof-pdl/greedy_dump.py
+ create mode 100644 prof-pdl/toy_check.py
+ create mode 100644 prof-pdl/toy_pdl.py
+ create mode 100644 prof-pdl/unit_check.py
+
+diff --git a/prof-pdl/RESULTS.md b/prof-pdl/RESULTS.md
+new file mode 100644
+index 0000000000..bb02d7a2bc
+--- /dev/null
++++ b/prof-pdl/RESULTS.md
+@@ -0,0 +1,34 @@
++# K1 PDL sweep — measured results (2026-09-05/06)
++
++Branch opus/pdl-sweep, worktree /home/user/tools/sglang-pdl, base codex/perf-v1 ccf9d2faba.
++Flag: SGLANG_TRITON_PDL=1 (default off). All A/B pairs are the same build in the same lock session.
++
++## Toy (chain of 100 dependent Triton kernels under CUDA graph replay, us/kernel)
++  grid    base   +attr    +attr+wait   +attr+wait+trigger
++     4   1.137   0.726*      0.727 (+0.41)   0.677 (+0.46)
++    16   1.953   1.617*      2.254 (-0.30)   2.118 (-0.17)
++   128   3.113   2.773*      3.698 (-0.59)   3.901 (-0.79)
++  * attribute-only is INCORRECT (no gdc_wait -> not a dependency chain); upper bound only.
++
++## W4 prof A/B (pdl0 control -> pdl1)
++  code-edit  wall 11.26 -> 10.63 ms (-0.63)  busy 11.00 -> 10.39  verify 9.99 -> 9.38  idle 0.14 -> 0.09
++  prose-en   wall 10.86 -> 10.30 ms (-0.56)  busy 10.39 -> 10.07  verify 9.38 -> 9.06  idle 0.14 -> 0.09
++
++## W16 prof A/B (pdl0 -> pdl1) — neutral
++  code-edit  wall 17.67 -> 17.18 (-0.49)  busy 17.40 -> 17.16  verify 12.87 -> 12.64
++  prose-en   wall 17.17 -> 17.55 (+0.38)  busy 16.94 -> 17.18  verify 12.52 -> 12.73
++
++## Key per-kernel medians (W4 code-edit)
++  _w8a16_gemv_silu_kernel  8.90 -> 6.27 us (-2.62, -181 us/step)   real win, same grid [20,5,1]
++  _w8a16_gemv_kernel       5.82 -> 5.76 us (-182 us/step)
++  _fused_sigmoid_mul_kernel 1.02 -> 16.78 us  <- ARTIFACT: starts 15.5us before its
++      predecessor ends (300/300 launches), so the spin-wait is inside its measured duration.
++      busy_ms (interval union) is the correct metric; per-kernel medians are not comparable
++      across the flag for kernels that overlap their predecessor.
++
++## Determinism control (why full-step greedy equality cannot be shown)
++  OFF vs OFF, same server process:  identical on 1/4 workloads
++  OFF vs OFF, server restart:       identical on 1/4
++  OFF vs ON:                        identical on 1/4   <- same as baseline, no PDL signal
++  Source: _hc_down_kernel accumulates t_raw with device-scope atomics ("summation order not
++  reproducible across launches", hc_mix2_triton docstring).
+diff --git a/prof-pdl/cmp_traces.py b/prof-pdl/cmp_traces.py
+new file mode 100644
+index 0000000000..cd4eb762ce
+--- /dev/null
++++ b/prof-pdl/cmp_traces.py
+@@ -0,0 +1,27 @@
++#!/usr/bin/env python3
++"""Per-kernel median/step comparison between two profiler traces (A=control, B=PDL).
++Usage: cmp_traces.py <A.json.gz> <B.json.gz> [steps=20]"""
++import gzip, json, sys, collections, statistics
++
++def load(p, steps):
++    ev = json.load(gzip.open(p, "rt"))["traceEvents"]
++    g = collections.defaultdict(list)
++    for e in ev:
++        if e.get("ph") == "X" and e.get("cat") in ("kernel", "gpu_memset", "gpu_memcpy"):
++            g[e["name"][:60]].append(e["dur"])
++    return {k: (len(v) / steps, statistics.median(v), sum(v) / steps) for k, v in g.items()}
++
++steps = int(sys.argv[3]) if len(sys.argv) > 3 else 20
++A, B = load(sys.argv[1], steps), load(sys.argv[2], steps)
++keys = sorted(set(A) | set(B), key=lambda k: -(B.get(k, (0, 0, 0))[2]))
++print(f"{'kernel':60s} {'n/step':>7} {'medA':>8} {'medB':>8} {'dmed':>8} "
++      f"{'sumA/st':>9} {'sumB/st':>9} {'dsum':>9}")
++tA = tB = 0.0
++for k in keys:
++    a = A.get(k, (0.0, 0.0, 0.0)); b = B.get(k, (0.0, 0.0, 0.0))
++    tA += a[2]; tB += b[2]
++    if max(a[2], b[2]) < 5:  # us/step
++        continue
++    print(f"{k:60s} {b[0]:7.1f} {a[1]:8.2f} {b[1]:8.2f} {b[1]-a[1]:+8.2f} "
++          f"{a[2]:9.1f} {b[2]:9.1f} {b[2]-a[2]:+9.1f}")
++print(f"{'TOTAL':60s} {'':7s} {'':8s} {'':8s} {'':8s} {tA:9.1f} {tB:9.1f} {tB-tA:+9.1f}")
+diff --git a/prof-pdl/greedy-0.json b/prof-pdl/greedy-0.json
+new file mode 100644
+index 0000000000..921a91e21a
+--- /dev/null
++++ b/prof-pdl/greedy-0.json
+@@ -0,0 +1 @@
++{"code-edit": {"n": 400, "sha": "0108caf48e47400c"}, "prose-en": {"n": 400, "sha": "9db86b8ecbfd0e25"}, "agent-loop": {"n": 400, "sha": "41794eb81f275e58"}, "prose-ja": {"n": 400, "sha": "28e345ff4be0e464"}}
+\ No newline at end of file
+diff --git a/prof-pdl/greedy-1.json b/prof-pdl/greedy-1.json
+new file mode 100644
+index 0000000000..b08be3690b
+--- /dev/null
++++ b/prof-pdl/greedy-1.json
+@@ -0,0 +1 @@
++{"code-edit": {"n": 400, "sha": "0108caf48e47400c"}, "prose-en": {"n": 400, "sha": "77f5102d51470f92"}, "agent-loop": {"n": 400, "sha": "7eda544eef6396ca"}, "prose-ja": {"n": 400, "sha": "34c5faf4061d99d0"}}
+\ No newline at end of file
+diff --git a/prof-pdl/greedy-ctla.json b/prof-pdl/greedy-ctla.json
+new file mode 100644
+index 0000000000..33480e9a7f
+--- /dev/null
++++ b/prof-pdl/greedy-ctla.json
+@@ -0,0 +1 @@
++{"code-edit": {"n": 400, "sha": "0108caf48e47400c"}, "prose-en": {"n": 400, "sha": "15c8e73fb56ba1ab"}, "agent-loop": {"n": 400, "sha": "41794eb81f275e58"}, "prose-ja": {"n": 400, "sha": "7d253fbf67d5965f"}}
+\ No newline at end of file
+diff --git a/prof-pdl/greedy-ctla2.json b/prof-pdl/greedy-ctla2.json
+new file mode 100644
+index 0000000000..c1052eb836
+--- /dev/null
++++ b/prof-pdl/greedy-ctla2.json
+@@ -0,0 +1 @@
++{"code-edit": {"n": 400, "sha": "0108caf48e47400c"}, "prose-en": {"n": 400, "sha": "5d7693302e3042ea"}, "agent-loop": {"n": 400, "sha": "b225df461e9b49b6"}, "prose-ja": {"n": 400, "sha": "4058a9935e1ff080"}}
+\ No newline at end of file
+diff --git a/prof-pdl/greedy-ctlb.json b/prof-pdl/greedy-ctlb.json
+new file mode 100644
+index 0000000000..4f3ccc689a
+--- /dev/null
++++ b/prof-pdl/greedy-ctlb.json
+@@ -0,0 +1 @@
++{"code-edit": {"n": 400, "sha": "0108caf48e47400c"}, "prose-en": {"n": 400, "sha": "34d8833bc77cda57"}, "agent-loop": {"n": 400, "sha": "c4440c1cddc80861"}, "prose-ja": {"n": 400, "sha": "97ac7afea0ec433e"}}
+\ No newline at end of file
+diff --git a/prof-pdl/greedy_dump.py b/prof-pdl/greedy_dump.py
+new file mode 100644
+index 0000000000..99869d57a6
+--- /dev/null
++++ b/prof-pdl/greedy_dump.py
+@@ -0,0 +1,24 @@
++#!/usr/bin/env python3
++"""Greedy (temperature=0) generation on the fnbench workload prompts; dump full text.
++Usage: greedy_dump.py <out.json> [max_tokens=400]"""
++import json, sys, urllib.request, hashlib
++EP = "http://127.0.0.1:8001/v1/chat/completions"
++WL = "/home/user/tools/flash-next-bench/workloads"
++out_path = sys.argv[1]
++mt = int(sys.argv[2]) if len(sys.argv) > 2 else 400
++res = {}
++for name in ("code-edit", "prose-en", "agent-loop", "prose-ja"):
++    prompt = open(f"{WL}/{name}.txt").read()
++    body = {"model": "flash-next", "messages": [{"role": "user", "content": prompt}],
++            "max_tokens": mt, "temperature": 0, "top_p": 1, "seed": 0,
++            "chat_template_kwargs": {"enable_thinking": False}}
++    req = urllib.request.Request(EP, data=json.dumps(body).encode(),
++                                 headers={"Content-Type": "application/json"})
++    r = json.load(urllib.request.urlopen(req, timeout=900))
++    msg = r["choices"][0]["message"]
++    txt = (msg.get("reasoning_content") or "") + (msg.get("content") or "")
++    res[name] = {"text": txt, "n": r["usage"]["completion_tokens"],
++                 "sha": hashlib.sha256(txt.encode()).hexdigest()[:16]}
++    print(f"{name:11s} n={res[name]['n']:4d} sha={res[name]['sha']} {txt[:60]!r}")
++json.dump(res, open(out_path, "w"))
++print("wrote", out_path)
+diff --git a/prof-pdl/toy_check.py b/prof-pdl/toy_check.py
+new file mode 100644
+index 0000000000..09dd3fe0d7
+--- /dev/null
++++ b/prof-pdl/toy_check.py
+@@ -0,0 +1,60 @@
++"""API + graph-capture + correctness check for Triton PDL (no timing)."""
++import torch, triton, triton.language as tl
++from triton.language.extra.cuda import gdc_wait, gdc_launch_dependents
++
++@triton.jit
++def chain_kernel(X, Y, W, n, PDL: tl.constexpr, TRIG: tl.constexpr, BLOCK: tl.constexpr):
++    pid = tl.program_id(0)
++    offs = pid * BLOCK + tl.arange(0, BLOCK)
++    m = offs < n
++    w = tl.load(W + offs, mask=m, other=0.0)     # independent prologue
++    if PDL:
++        gdc_wait()
++    x = tl.load(X + offs, mask=m, other=0.0)     # dependent load
++    tl.store(Y + offs, x * 1.0009765625 + w * 0.0, mask=m)
++    if TRIG:
++        gdc_launch_dependents()
++
++n, BLOCK = 1 << 20, 1024
++grid = (triton.cdiv(n, BLOCK),)
++dev = 'cuda'
++torch.manual_seed(0)
++x0 = torch.randn(n, device=dev)
++W = torch.randn(n, device=dev)
++
++def chain(bufs, mode, k=64):
++    for i in range(k):
++        chain_kernel[grid](bufs[i % 2], bufs[(i + 1) % 2], W, n,
++                           PDL=(mode >= 2), TRIG=(mode >= 3), BLOCK=BLOCK,
++                           launch_pdl=(mode >= 1), num_warps=4)
++
++# PTX inspection
++k = chain_kernel[grid](x0, torch.empty_like(x0), W, n, PDL=True, TRIG=True,
++                       BLOCK=BLOCK, launch_pdl=True, num_warps=4)
++ptx = k.asm['ptx'].splitlines()
++seq = [(i, l.strip()) for i, l in enumerate(ptx)
++       if 'griddepcontrol' in l or 'ld.global' in l or 'st.global' in l]
++print("PTX order (loads / stores / griddepcontrol):")
++for i, l in seq[:16]:
++    print(f"  {i:5d}  {l[:80]}")
++print()
++
++# correctness under graph capture
++for mode in (0, 1, 2, 3):
++    bufs = [x0.clone(), torch.empty_like(x0)]
++    s = torch.cuda.Stream(); s.wait_stream(torch.cuda.current_stream())
++    with torch.cuda.stream(s):
++        chain(bufs, mode)
++    torch.cuda.current_stream().wait_stream(s); torch.cuda.synchronize()
++    for b in bufs: b.copy_(x0)
++    g = torch.cuda.CUDAGraph()
++    with torch.cuda.graph(g):
++        chain(bufs, mode)
++    bufs[0].copy_(x0); bufs[1].zero_()
++    torch.cuda.synchronize()
++    g.replay(); torch.cuda.synchronize()
++    out = bufs[0]  # 64 kernels, even -> result back in bufs[0]
++    ref = x0 * (1.0009765625 ** 64)
++    err = (out.float() - ref.float()).abs().max().item()
++    print(f"mode={mode} graph capture OK, max_abs_err={err:.3e}")
++print("\ncapability:", torch.cuda.get_device_capability(), torch.version.cuda)
+diff --git a/prof-pdl/toy_pdl.py b/prof-pdl/toy_pdl.py
+new file mode 100644
+index 0000000000..f7fa539efa
+--- /dev/null
++++ b/prof-pdl/toy_pdl.py
+@@ -0,0 +1,90 @@
++"""Toy PDL validation: chain of small dependent Triton kernels under CUDA graph."""
++import os, sys, time
++import torch, triton, triton.language as tl
++
++N_CHAIN = int(os.environ.get("CHAIN", "100"))
++
++@triton.jit
++def chain_kernel(X, Y, W, n, PDL: tl.constexpr, TRIG: tl.constexpr, BLOCK: tl.constexpr):
++    pid = tl.program_id(0)
++    offs = pid * BLOCK + tl.arange(0, BLOCK)
++    m = offs < n
++    # independent prologue (weights): does not depend on the previous kernel
++    w = tl.load(W + offs, mask=m, other=0.0)
++    if PDL:
++        tl.extra.cuda.gdc_wait()
++    x = tl.load(X + offs, mask=m, other=0.0)   # dependent load
++    y = x * 1.0009765625 + w * 0.0
++    tl.store(Y + offs, y, mask=m)
++    if TRIG:
++        tl.extra.cuda.gdc_launch_dependents()
++
++def run_chain(bufs, W, grid, BLOCK, n, mode):
++    pdl = mode >= 2
++    trig = mode >= 3
++    for i in range(N_CHAIN):
++        a = bufs[i % 2]; b = bufs[(i + 1) % 2]
++        chain_kernel[grid](a, b, W, n, PDL=pdl, TRIG=trig, BLOCK=BLOCK,
++                           launch_pdl=(mode >= 1), num_warps=4)
++
++def bench(n, nblocks, mode):
++    dev = 'cuda'
++    bufs = [torch.randn(n, device=dev, dtype=torch.float32) for _ in range(2)]
++    W = torch.randn(n, device=dev, dtype=torch.float32)
++    BLOCK = triton.next_power_of_2(max(1, n // nblocks))
++    grid = (triton.cdiv(n, BLOCK),)
++    s = torch.cuda.Stream(); s.wait_stream(torch.cuda.current_stream())
++    with torch.cuda.stream(s):
++        for _ in range(3):
++            run_chain(bufs, W, grid, BLOCK, n, mode)
++    torch.cuda.current_stream().wait_stream(s); torch.cuda.synchronize()
++    g = torch.cuda.CUDAGraph()
++    with torch.cuda.graph(g):
++        run_chain(bufs, W, grid, BLOCK, n, mode)
++    torch.cuda.synchronize()
++    for _ in range(5): g.replay()
++    torch.cuda.synchronize()
++    ts = []
++    for _ in range(30):
++        t0 = time.perf_counter()
++        for _ in range(10): g.replay()
++        torch.cuda.synchronize()
++        ts.append((time.perf_counter() - t0) / 10)
++    ts.sort(); med = ts[len(ts)//2]
++    # eager (no graph) for reference
++    del g
++    return med / N_CHAIN * 1e6, grid[0]
++
++def dump_ptx():
++    n = 4096
++    dev = 'cuda'
++    a = torch.randn(n, device=dev); b = torch.empty_like(a); w = torch.randn(n, device=dev)
++    k = chain_kernel[(4,)](a, b, w, n, PDL=True, TRIG=True, BLOCK=1024, launch_pdl=True, num_warps=4)
++    ptx = k.asm['ptx']
++    lines = ptx.splitlines()
++    for i, l in enumerate(lines):
++        if 'griddepcontrol' in l:
++            print(f"   ptx[{i}]: {l.strip()}")
++    # show ordering of the two global loads relative to the wait
++    idx = [(i, l.strip()) for i, l in enumerate(lines)
++           if 'griddepcontrol' in l or ('ld.global' in l)]
++    print("   load/gdc order:")
++    for i, l in idx[:12]:
++        print(f"     {i}: {l[:90]}")
++
++if __name__ == '__main__':
++    torch.cuda.init()
++    print(f"chain={N_CHAIN}  gpu={torch.cuda.get_device_name(0)}")
++    print("PTX check (PDL+TRIG):"); dump_ptx()
++    shapes = [(4096, 4), (65536, 16), (1048576, 128)]
++    res = {}
++    for mode in (0, 1, 2, 3):
++        for n, nb in shapes:
++            us, gr = bench(n, nb, mode)
++            res[(mode, n)] = us
++            print(f"mode={mode} n={n:>8} grid={gr:>4}: {us:6.3f} us/kernel")
++    print()
++    for n, nb in shapes:
++        base = res[(0, n)]
++        print(f"n={n:>8}: base {base:6.3f}  |  " + "  ".join(
++            f"m{m}: {res[(m,n)]:6.3f} ({base-res[(m,n)]:+.3f})" for m in (1,2,3)))
+diff --git a/prof-pdl/unit_check.py b/prof-pdl/unit_check.py
+new file mode 100644
+index 0000000000..47f2aa4953
+--- /dev/null
++++ b/prof-pdl/unit_check.py
+@@ -0,0 +1,61 @@
++"""Per-kernel unit check: run the patched kernels on fixed inputs and dump outputs.
++Run once with SGLANG_TRITON_PDL=0 and once with =1, then compare the two dumps."""
++import os, sys, torch
++sys.path.insert(0, '/home/user/tools/sglang-pdl/python')
++from sglang.kernels.triton_pdl import PDL
++print("PDL =", PDL, "(SGLANG_TRITON_PDL=%s)" % os.environ.get("SGLANG_TRITON_PDL"))
++
++from sglang.srt.layers.quantization.w8a16_gemv import w8a16_gemv, bf16_gemv, w8a16_gemv_silu_mul
++from sglang.srt.layers.hc_mix2_triton import hc_norm_mix2, quantize_hc_mix2_weights_fp8
++from sglang.kernels.ops.attention.triton_gdn_fused_proj import (
++    fused_qkvzba_split_reshape_cat_contiguous,
++)
++
++out = {}
++dev = 'cuda'
++torch.manual_seed(1234)
++
++# --- w8a16_gemv over the decode shapes (M in {1,4,16}) ---------------------
++for M in (1, 4, 16):
++    for (N, K) in ((4096, 2560), (1280, 2560), (2560, 2560), (512, 2560), (2560, 1280)):
++        x = torch.randn(M, K, device=dev, dtype=torch.bfloat16)
++        w = (torch.randn(N, K, device=dev) / 8).to(torch.float8_e4m3fn)
++        s = torch.rand(N, device=dev, dtype=torch.float32) + 0.5
++        out[f"gemv/{M}x{N}x{K}"] = w8a16_gemv(x, w, s).float().cpu()
++        wb = torch.randn(N, K, device=dev, dtype=torch.bfloat16) / 8
++        out[f"bf16gemv/{M}x{N}x{K}"] = bf16_gemv(x, wb).float().cpu()
++
++# --- fused gate_up silu ---------------------------------------------------
++for M in (1, 4, 16):
++    K, H = 2560, 1280
++    x = torch.randn(M, K, device=dev, dtype=torch.bfloat16)
++    w = (torch.randn(2 * H, K, device=dev) / 8).to(torch.float8_e4m3fn)
++    s = torch.rand(2 * H, device=dev, dtype=torch.float32) + 0.5
++    out[f"silu/{M}"] = w8a16_gemv_silu_mul(x, w, s).float().cpu()
++
++# --- hc_mix2 (bf16 and fp8 weights) ---------------------------------------
++hc, hs, lowrank = 4, 2560, 320
++for M in (1, 4, 16):
++    xin = torch.randn(M, hc * hs, device=dev, dtype=torch.bfloat16)
++    nw = torch.randn(hc * hs, device=dev, dtype=torch.bfloat16) / 8
++    wd = torch.randn(lowrank, hc * hs, device=dev, dtype=torch.bfloat16) / 32
++    wu = torch.randn(hc * hs, lowrank, device=dev, dtype=torch.bfloat16) / 32
++    mixed, normed = hc_norm_mix2(xin, nw, 1e-6, wd, wu, hc, hs)
++    out[f"mix2bf16/{M}/mixed"] = mixed.float().cpu()
++    out[f"mix2bf16/{M}/normed"] = normed.float().cpu()
++    qd, sd, qu, su = quantize_hc_mix2_weights_fp8(wd, wu)
++    mixed8, normed8 = hc_norm_mix2(xin, nw, 1e-6, qd, qu, hc, hs, s_down=sd, s_up=su)
++    out[f"mix2fp8/{M}/mixed"] = mixed8.float().cpu()
++    out[f"mix2fp8/{M}/normed"] = normed8.float().cpu()
++
++# --- fused qkvzba split ---------------------------------------------------
++nq, nv, hq, hv = 16, 32, 128, 128
++for T in (1, 4, 16):
++    qkvz = torch.randn(T, nq * hq * 2 + nv * hv * 2, device=dev, dtype=torch.bfloat16)
++    ba = torch.randn(T, nv * 2, device=dev, dtype=torch.bfloat16)
++    mq, z, b, a = fused_qkvzba_split_reshape_cat_contiguous(qkvz, ba, nq, nv, hq, hv)
++    for n, t in (("mq", mq), ("z", z), ("b", b), ("a", a)):
++        out[f"qkvzba/{T}/{n}"] = t.float().cpu()
++
++torch.save(out, sys.argv[1])
++print("wrote", sys.argv[1], len(out), "tensors")
+-- 
+2.43.0
+

@@ -1,0 +1,39 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: aiueo52 <aiueo52@users.noreply.github.com>
+Date: Sat, 5 Sep 2026 14:46:35 +0900
+Subject: [PATCH 050/105] R5: match the dual-stream gate of _forward_input_proj
+ exactly
+
+The direct-layout path hardcoded the 1024-token dual-stream threshold; the
+TC-piecewise prefill graph forces it to 0 (no alt-stream branch inside that
+capture). Use the same condition.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+---
+ python/sglang/srt/models/qwen3_5.py | 7 ++++++-
+ 1 file changed, 6 insertions(+), 1 deletion(-)
+
+diff --git a/python/sglang/srt/models/qwen3_5.py b/python/sglang/srt/models/qwen3_5.py
+index 438aa39dbb..1d84b4e038 100644
+--- a/python/sglang/srt/models/qwen3_5.py
++++ b/python/sglang/srt/models/qwen3_5.py
+@@ -859,10 +859,15 @@ class Qwen3_5GatedDeltaNet(nn.Module):
+                 split_n=self.num_v_heads,
+             )
+ 
++        # Same dual-stream gate as `_forward_input_proj`, including the
++        # TC-piecewise prefill graph which forces the threshold to 0.
++        dual_stream_threshold = (
++            0 if check_cuda_graph_backend(Phase.PREFILL, Backend.TC_PIECEWISE) else 1024
++        )
+         use_alt = (
+             self.alt_stream is not None
+             and get_is_capture_mode()
+-            and num_tokens < 1024
++            and num_tokens < dual_stream_threshold
+             and _gdn_use_alt_stream
+         )
+         if use_alt:
+-- 
+2.43.0
+
