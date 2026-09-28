@@ -1,0 +1,84 @@
+{
+ "arm": "prod2",
+ "started": "2026-09-07 02:10:35",
+ "conc": 8,
+ "bench": {
+  "gsm8k": {
+   "n": 1319,
+   "correct": 1178,
+   "acc": 0.8931008339651251,
+   "wall_s": 1082.5,
+   "mean_gen_tokens": 343.5,
+   "errors": 0,
+   "truncated": 147
+  },
+  "mmlu": {
+   "n": 1400,
+   "correct": 1188,
+   "acc": 0.8485714285714285,
+   "wall_s": 119.2,
+   "mean_gen_tokens": 2.2,
+   "errors": 0,
+   "truncated": 16
+  },
+  "humaneval": {
+   "n": 164,
+   "correct": 157,
+   "acc": 0.9573170731707317,
+   "wall_s": 74.7,
+   "mean_gen_tokens": 234.5,
+   "errors": 0,
+   "truncated": 3
+  },
+  "jcqa": {
+   "n": 1119,
+   "correct": 1087,
+   "acc": 0.9714030384271671,
+   "wall_s": 66.0,
+   "mean_gen_tokens": 2.0,
+   "errors": 0,
+   "truncated": 0
+  },
+  "sanity": {
+   "wall_s": 21.6,
+   "items": {
+    "prose-en": {
+     "gen_tokens": 1500,
+     "finish": "length",
+     "maxrun": 2,
+     "uniq_words": 0.486,
+     "rep_4gram": 0.032
+    },
+    "prose-ja": {
+     "gen_tokens": 959,
+     "finish": "stop",
+     "maxrun": 2,
+     "uniq_words": 1.0,
+     "rep_4gram": 0.026
+    },
+    "code-edit": {
+     "gen_tokens": 1500,
+     "finish": "length",
+     "maxrun": 4,
+     "uniq_words": 0.211,
+     "rep_4gram": 0.763
+    },
+    "agent-loop": {
+     "gen_tokens": 468,
+     "finish": "stop",
+     "maxrun": 31,
+     "uniq_words": 0.537,
+     "rep_4gram": 0.45
+    },
+    "essay": {
+     "gen_tokens": 1500,
+     "finish": "length",
+     "maxrun": 2,
+     "uniq_words": 0.511,
+     "rep_4gram": 0.006
+    }
+   }
+  }
+ },
+ "finished": "2026-09-07 02:33:19"
+}
