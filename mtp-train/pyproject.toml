@@ -1,0 +1,15 @@
+[project]
+name = "mtp-train"
+version = "0.1.0"
+description = "Fine-tune the Qwen3.8-Flash-Next MTP (NEXTN) draft head on the serving target's own hidden states"
+requires-python = ">=3.10"
+license = "Apache-2.0"
+dependencies = ["torch>=2.8", "safetensors>=0.5"]
+
+[project.optional-dependencies]
+extract = ["transformers>=5", "requests>=2.31,<3", "tokenizers>=0.20,<1"]
+test = ["pytest>=8"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"

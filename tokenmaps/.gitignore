@@ -1,0 +1,7 @@
+# Token maps, self-generated text and coverage output built from your own (possibly private) corpora.
+# build_hot_vocab.py --out-dir and collect_selfgen.py --out are required; prefer a directory outside
+# the repository. Anything written here anyway stays out of git.
+*.pt
+*.json
+*.jsonl
+*.txt

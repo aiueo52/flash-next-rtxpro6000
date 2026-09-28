@@ -1,0 +1,28 @@
+# Pipeline outputs are derived from your own (private) data and never belong
+# in the repository.  Every tool takes its output location as an argument and
+# none writes into this tree by default; these patterns only catch outputs
+# pointed here by mistake.
+*.safetensors
+*.safetensors.tmp
+*.pt
+*.pt.tmp
+runs/
+run[0-9]*/
+dumps/
+dump-*/
+work/
+out/
+# files the tools write next to a dump / run
+index.json
+index.json.tmp
+index.files.json
+index.files.json.tmp
+eval_fixed.json
+manifest.jsonl
+manifest.jsonl.*
+best.json
+history.json
+# earlier runs / eval sets moved aside by train.py --overwrite / --reset-best and
+# build_eval_set.py --overwrite
+.previous-*/
+.reset-best-*/

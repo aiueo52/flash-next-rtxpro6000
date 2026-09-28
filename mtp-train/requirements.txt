@@ -1,0 +1,11 @@
+# The SGLang virtualenv built by docs/reproduce.md already has all of these;
+# a separate CPU-only env for the tests needs torch, safetensors and pytest.
+torch>=2.8
+safetensors>=0.5
+transformers>=5          # tokenizer + chat template (extract/client.py)
+requests>=2.31,<3        # talking to the server (extract/client.py)
+tokenizers>=0.20,<1      # ../sim/ngramsim parsers
+pytest>=8
+# optional
+# pyarrow               # --arrow corpora (Hugging Face datasets cache files)
+# bitsandbytes          # --optimizer adamw8bit

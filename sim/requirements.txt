@@ -1,0 +1,2 @@
+tokenizers>=0.20,<1
+pytest>=8

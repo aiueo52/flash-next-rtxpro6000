@@ -1,0 +1,8 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+# simulator output (derived from private conversations): the old default `--out results/`, and any stray
+# raw_stats.json. `run --out` is now required and refuses paths inside the repository by default.
+/results/
+raw_stats.json
