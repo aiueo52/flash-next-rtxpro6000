@@ -1,0 +1,347 @@
+{
+ "note": {
+  "device": "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition",
+  "sms": 188,
+  "smi": "2347 MHz, 3090 MHz, 107.51 W, 74, 4541 MiB",
+  "torch": "2.13.0+cu130",
+  "time": "2026-09-05 20:57:34"
+ },
+ "results": {
+  "M4": {
+   "wall_us": {
+    "prod(combine+mix fp8, 5 launches)": {
+     "rounds": [
+      12.373,
+      12.683,
+      12.725,
+      12.711,
+      12.732
+     ],
+     "median": 12.711
+    },
+    "bf16_split(combine+mix, 5 launches)": {
+     "rounds": [
+      16.397,
+      16.508,
+      16.413,
+      16.436,
+      15.877
+     ],
+     "median": 16.413
+    },
+    "bf16_fused(combine+mix, 1 launch)": {
+     "rounds": [
+      19.759,
+      19.68,
+      19.703,
+      18.89,
+      18.984
+     ],
+     "median": 19.68
+    },
+    "mix_split_fp8(3 launches)": {
+     "rounds": [
+      10.045,
+      9.851,
+      9.72,
+      9.82,
+      10.014
+     ],
+     "median": 9.851
+    },
+    "mix_split_bf16(3 launches)": {
+     "rounds": [
+      13.482,
+      13.499,
+      13.848,
+      13.86,
+      13.962
+     ],
+     "median": 13.848
+    },
+    "mix_fused_bf16(1 launch)": {
+     "rounds": [
+      16.757,
+      17.399,
+      17.461,
+      17.527,
+      17.397
+     ],
+     "median": 17.399
+    }
+   },
+   "cupti": {
+    "prod(combine+mix fp8, 5 launches)": {
+     "device_us": 12.139,
+     "kernels": {
+      "void sglang::hc_combine_gate_kernel<4l, 2560l, true, __nv_bfloat16>(sglang::HcCombineSplitParams)": [
+       1.408,
+       1.0
+      ],
+      "void sglang::hc_combine_apply_kernel<4l, 2560l, true, __nv_bfloat16>(sglang::HcCombineSplitParams)": [
+       1.184,
+       1.0
+      ],
+      "_hc_branch_stats_kernel": [
+       1.312,
+       1.0
+      ],
+      "_hc_down_kernel": [
+       3.712,
+       1.0
+      ],
+      "_hc_up_kernel": [
+       4.384,
+       1.0
+      ]
+     }
+    },
+    "bf16_split(combine+mix, 5 launches)": {
+     "device_us": 16.565,
+     "kernels": {
+      "void sglang::hc_combine_gate_kernel<4l, 2560l, true, __nv_bfloat16>(sglang::HcCombineSplitParams)": [
+       1.408,
+       1.0
+      ],
+      "void sglang::hc_combine_apply_kernel<4l, 2560l, true, __nv_bfloat16>(sglang::HcCombineSplitParams)": [
+       1.184,
+       1.0
+      ],
+      "_hc_branch_stats_kernel": [
+       1.312,
+       1.0
+      ],
+      "_hc_down_kernel": [
+       6.112,
+       1.0
+      ],
+      "_hc_up_kernel": [
+       6.032,
+       1.0
+      ]
+     }
+    },
+    "bf16_fused(combine+mix, 1 launch)": {
+     "device_us": 19.549,
+     "kernels": {
+      "_hc_fused_persistent_kernel": [
+       18.848,
+       1.0
+      ]
+     }
+    },
+    "mix_split_fp8(3 launches)": {
+     "device_us": 9.997,
+     "kernels": {
+      "_hc_branch_stats_kernel": [
+       1.536,
+       1.0
+      ],
+      "_hc_down_kernel": [
+       3.712,
+       1.0
+      ],
+      "_hc_up_kernel": [
+       4.384,
+       1.0
+      ]
+     }
+    },
+    "mix_split_bf16(3 launches)": {
+     "device_us": 13.673,
+     "kernels": {
+      "_hc_branch_stats_kernel": [
+       1.536,
+       1.0
+      ],
+      "_hc_down_kernel": [
+       6.081,
+       1.0
+      ],
+      "_hc_up_kernel": [
+       5.952,
+       1.0
+      ]
+     }
+    },
+    "mix_fused_bf16(1 launch)": {
+     "device_us": 16.691,
+     "kernels": {
+      "_hc_fused_persistent_kernel": [
+       16.704,
+       1.0
+      ]
+     }
+    }
+   }
+  },
+  "M16": {
+   "wall_us": {
+    "prod(combine+mix fp8, 5 launches)": {
+     "rounds": [
+      13.597,
+      13.551,
+      13.542,
+      13.432,
+      13.101
+     ],
+     "median": 13.542
+    },
+    "bf16_split(combine+mix, 5 launches)": {
+     "rounds": [
+      17.285,
+      16.974,
+      16.645,
+      16.734,
+      16.689
+     ],
+     "median": 16.734
+    },
+    "bf16_fused(combine+mix, 1 launch)": {
+     "rounds": [
+      19.56,
+      19.75,
+      19.817,
+      20.352,
+      20.39
+     ],
+     "median": 19.817
+    },
+    "mix_split_fp8(3 launches)": {
+     "rounds": [
+      9.999,
+      10.32,
+      10.303,
+      10.335,
+      10.356
+     ],
+     "median": 10.32
+    },
+    "mix_split_bf16(3 launches)": {
+     "rounds": [
+      14.192,
+      14.278,
+      14.276,
+      14.235,
+      14.252
+     ],
+     "median": 14.252
+    },
+    "mix_fused_bf16(1 launch)": {
+     "rounds": [
+      18.037,
+      18.014,
+      18.022,
+      18.063,
+      17.949
+     ],
+     "median": 18.022
+    }
+   },
+   "cupti": {
+    "prod(combine+mix fp8, 5 launches)": {
+     "device_us": 12.692,
+     "kernels": {
+      "void sglang::hc_combine_gate_kernel<4l, 2560l, true, __nv_bfloat16>(sglang::HcCombineSplitParams)": [
+       1.696,
+       1.0
+      ],
+      "void sglang::hc_combine_apply_kernel<4l, 2560l, true, __nv_bfloat16>(sglang::HcCombineSplitParams)": [
+       1.344,
+       1.0
+      ],
+      "_hc_branch_stats_kernel": [
+       1.312,
+       1.0
+      ],
+      "_hc_down_kernel": [
+       3.808,
+       1.0
+      ],
+      "_hc_up_kernel": [
+       4.352,
+       1.0
+      ]
+     }
+    },
+    "bf16_split(combine+mix, 5 launches)": {
+     "device_us": 17.127,
+     "kernels": {
+      "void sglang::hc_combine_gate_kernel<4l, 2560l, true, __nv_bfloat16>(sglang::HcCombineSplitParams)": [
+       1.697,
+       1.0
+      ],
+      "void sglang::hc_combine_apply_kernel<4l, 2560l, true, __nv_bfloat16>(sglang::HcCombineSplitParams)": [
+       1.344,
+       1.0
+      ],
+      "_hc_branch_stats_kernel": [
+       1.312,
+       1.0
+      ],
+      "_hc_down_kernel": [
+       6.176,
+       1.0
+      ],
+      "_hc_up_kernel": [
+       6.048,
+       1.0
+      ]
+     }
+    },
+    "bf16_fused(combine+mix, 1 launch)": {
+     "device_us": 20.17,
+     "kernels": {
+      "_hc_fused_persistent_kernel": [
+       19.456,
+       1.0
+      ]
+     }
+    },
+    "mix_split_fp8(3 launches)": {
+     "device_us": 10.286,
+     "kernels": {
+      "_hc_branch_stats_kernel": [
+       1.664,
+       1.0
+      ],
+      "_hc_down_kernel": [
+       3.808,
+       1.0
+      ],
+      "_hc_up_kernel": [
+       4.352,
+       1.0
+      ]
+     }
+    },
+    "mix_split_bf16(3 launches)": {
+     "device_us": 13.958,
+     "kernels": {
+      "_hc_branch_stats_kernel": [
+       1.664,
+       1.0
+      ],
+      "_hc_down_kernel": [
+       6.144,
+       1.0
+      ],
+      "_hc_up_kernel": [
+       6.016,
+       1.0
+      ]
+     }
+    },
+    "mix_fused_bf16(1 launch)": {
+     "device_us": 17.931,
+     "kernels": {
+      "_hc_fused_persistent_kernel": [
+       17.216,
+       1.0
+      ]
+     }
+    }
+   }
+  }
+ }
+}

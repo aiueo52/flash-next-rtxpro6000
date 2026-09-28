@@ -1,0 +1,307 @@
+
+=== device limits: {"l2_bytes": 134217728, "max_persisting_bytes": 83886080, "max_window_bytes": 134217728, "sms": 188, "prio_least": 0, "prio_greatest": -5, "persisting_limit_now": 25165824, "l2_bytes_driver": 134217728}  (21:38:27)
+persisting limit requested 80 MB -> actual 80 MB
+
+=== qkvz N=16384 K=2560 M=4 weight 40.0 MB  (21:38:32)
+  cold             Y=   0 lim=  0 hr=1.00  gemv    28.56 us =   1469 GB/s   touches [('touch_kernel<0>', 205.68)] clk (2287, 2287)
+  touched          Y=   0 lim=  0 hr=1.00  gemv    19.23 us =   2181 GB/s   touches [('touch_kernel<0>', 205.33), ('touch_kernel<0>', 27.14)] clk (2287, 2287)
+  touched+stream   Y=  77 lim=  0 hr=1.00  gemv    19.26 us =   2177 GB/s   touches [('touch_kernel<0>', 205.52), ('touch_kernel<0>', 27.14), ('touch_kernel<0>', 50.66)] clk (2325, 2325)
+  elast+stream     Y=  77 lim=  0 hr=1.00  gemv    19.26 us =   2177 GB/s   touches [('touch_kernel<0>', 205.49), ('touch_kernel<2>', 27.15), ('touch_kernel<0>', 50.59)] clk (2325, 2325)
+  elast+cs         Y=  77 lim=  0 hr=1.00  gemv    19.26 us =   2177 GB/s   touches [('touch_kernel<0>', 205.55), ('touch_kernel<2>', 27.2), ('touch_kernel<1>', 50.64)] clk (2332, 2332)
+  touched+stream   Y= 190 lim=  0 hr=1.00  gemv    28.48 us =   1473 GB/s   touches [('touch_kernel<0>', 205.39), ('touch_kernel<0>', 27.15), ('touch_kernel<0>', 122.64)] clk (2332, 2332)
+  elast+stream     Y= 190 lim=  0 hr=1.00  gemv    26.08 us =   1608 GB/s   touches [('touch_kernel<0>', 205.44), ('touch_kernel<2>', 27.2), ('touch_kernel<0>', 122.62)] clk (2332, 2332)
+  elast+cs         Y= 190 lim=  0 hr=1.00  gemv    19.26 us =   2177 GB/s   touches [('touch_kernel<0>', 205.49), ('touch_kernel<2>', 27.23), ('touch_kernel<1>', 122.45)] clk (2332, 2332)
+  touched          Y=   0 lim= 80 hr=1.00  gemv    19.20 us =   2185 GB/s   touches [('touch_kernel<0>', 205.33), ('touch_kernel<0>', 27.14)] clk (2332, 2332)
+  touched+stream   Y=  77 lim= 80 hr=1.00  gemv    19.26 us =   2177 GB/s   touches [('touch_kernel<0>', 205.36), ('touch_kernel<0>', 27.12), ('touch_kernel<0>', 50.69)] clk (2332, 2332)
+  persist+stream   Y=  77 lim= 80 hr=1.00  gemv    19.30 us =   2174 GB/s   touches [('touch_kernel<0>', 205.58), ('touch_kernel<0>', 7.26), ('touch_kernel<0>', 50.59)] clk (2332, 2332)
+  persist+cs       Y=  77 lim= 80 hr=1.00  gemv    19.30 us =   2174 GB/s   touches [('touch_kernel<0>', 205.47), ('touch_kernel<0>', 7.26), ('touch_kernel<1>', 50.59)] clk (2332, 2332)
+  persist+swin     Y=  77 lim= 80 hr=1.00  gemv    19.25 us =   2179 GB/s   touches [('touch_kernel<0>', 205.23), ('touch_kernel<0>', 7.26), ('touch_kernel<0>', 50.53)] clk (2332, 2332)
+  swin-consumer    Y=  77 lim= 80 hr=1.00  gemv    19.25 us =   2179 GB/s   touches [('touch_kernel<0>', 205.28), ('touch_kernel<0>', 7.26), ('touch_kernel<0>', 50.61)] clk (2340, 2340)
+     nodes: [('touch_kernelILi0EEvPKhyP', 40, 2, 1), ('touch_kernelILi0EEvPKhyP', 40, 2, 1), ('touch_kernelILi0EEvPKhyP', 40, 2, 1), ('_w8a16_gemv_kernel', 40, 2, 1)]
+  touched+stream   Y= 190 lim= 80 hr=1.00  gemv    28.50 us =   1472 GB/s   touches [('touch_kernel<0>', 205.34), ('touch_kernel<0>', 27.17), ('touch_kernel<0>', 122.58)] clk (2332, 2340)
+  persist+stream   Y= 190 lim= 80 hr=1.00  gemv    19.46 us =   2156 GB/s   touches [('touch_kernel<0>', 205.3), ('touch_kernel<0>', 7.26), ('touch_kernel<0>', 122.59)] clk (2332, 2332)
+  persist+cs       Y= 190 lim= 80 hr=1.00  gemv    19.26 us =   2177 GB/s   touches [('touch_kernel<0>', 205.41), ('touch_kernel<0>', 7.3), ('touch_kernel<1>', 122.46)] clk (2332, 2332)
+  persist+swin     Y= 190 lim= 80 hr=1.00  gemv    19.46 us =   2156 GB/s   touches [('touch_kernel<0>', 205.28), ('touch_kernel<0>', 7.25), ('touch_kernel<0>', 122.58)] clk (2332, 2340)
+  swin-consumer    Y= 190 lim= 80 hr=1.00  gemv    19.49 us =   2152 GB/s   touches [('touch_kernel<0>', 205.38), ('touch_kernel<0>', 7.26), ('touch_kernel<0>', 122.56)] clk (2340, 2340)
+     nodes: [('touch_kernelILi0EEvPKhyP', 40, 2, 1), ('touch_kernelILi0EEvPKhyP', 40, 2, 1), ('touch_kernelILi0EEvPKhyP', 40, 2, 1), ('_w8a16_gemv_kernel', 40, 2, 1)]
+
+=== qkvz N=16384 K=2560 M=16 weight 40.0 MB  (21:38:36)
+  cold             Y=   0 lim=  0 hr=1.00  gemv    29.26 us =   1433 GB/s   touches [('touch_kernel<0>', 205.57)] clk (2340, 2340)
+  touched          Y=   0 lim=  0 hr=1.00  gemv    19.30 us =   2174 GB/s   touches [('touch_kernel<0>', 205.53), ('touch_kernel<0>', 27.14)] clk (2340, 2340)
+  touched+stream   Y=  77 lim=  0 hr=1.00  gemv    19.31 us =   2172 GB/s   touches [('touch_kernel<0>', 205.68), ('touch_kernel<0>', 27.17), ('touch_kernel<0>', 50.61)] clk (2332, 2340)
+  elast+stream     Y=  77 lim=  0 hr=1.00  gemv    19.33 us =   2170 GB/s   touches [('touch_kernel<0>', 205.57), ('touch_kernel<2>', 27.15), ('touch_kernel<0>', 50.69)] clk (2332, 2332)
+  elast+cs         Y=  77 lim=  0 hr=1.00  gemv    19.30 us =   2174 GB/s   touches [('touch_kernel<0>', 205.66), ('touch_kernel<2>', 27.14), ('touch_kernel<1>', 50.66)] clk (2332, 2332)
+  touched+stream   Y= 190 lim=  0 hr=1.00  gemv    29.28 us =   1433 GB/s   touches [('touch_kernel<0>', 205.55), ('touch_kernel<0>', 27.17), ('touch_kernel<0>', 122.69)] clk (2332, 2332)
+  elast+stream     Y= 190 lim=  0 hr=1.00  gemv    26.93 us =   1558 GB/s   touches [('touch_kernel<0>', 205.6), ('touch_kernel<2>', 27.18), ('touch_kernel<0>', 122.66)] clk (2332, 2332)
+  elast+cs         Y= 190 lim=  0 hr=1.00  gemv    19.31 us =   2172 GB/s   touches [('touch_kernel<0>', 205.78), ('touch_kernel<2>', 27.23), ('touch_kernel<1>', 122.45)] clk (2325, 2325)
+  touched          Y=   0 lim= 80 hr=1.00  gemv    19.28 us =   2175 GB/s   touches [('touch_kernel<0>', 205.78), ('touch_kernel<0>', 27.14)] clk (2325, 2325)
+  touched+stream   Y=  77 lim= 80 hr=1.00  gemv    19.31 us =   2172 GB/s   touches [('touch_kernel<0>', 205.68), ('touch_kernel<0>', 27.1), ('touch_kernel<0>', 50.69)] clk (2325, 2332)
+  persist+stream   Y=  77 lim= 80 hr=1.00  gemv    19.30 us =   2174 GB/s   touches [('touch_kernel<0>', 205.6), ('touch_kernel<0>', 7.3), ('touch_kernel<0>', 50.59)] clk (2332, 2332)
+  persist+cs       Y=  77 lim= 80 hr=1.00  gemv    19.30 us =   2174 GB/s   touches [('touch_kernel<0>', 205.68), ('touch_kernel<0>', 7.25), ('touch_kernel<1>', 50.66)] clk (2332, 2332)
+  persist+swin     Y=  77 lim= 80 hr=1.00  gemv    19.33 us =   2170 GB/s   touches [('touch_kernel<0>', 205.81), ('touch_kernel<0>', 7.26), ('touch_kernel<0>', 50.62)] clk (2332, 2332)
+  swin-consumer    Y=  77 lim= 80 hr=1.00  gemv    19.30 us =   2174 GB/s   touches [('touch_kernel<0>', 205.5), ('touch_kernel<0>', 7.26), ('touch_kernel<0>', 50.62)] clk (2332, 2332)
+     nodes: [('touch_kernelILi0EEvPKhyP', 40, 2, 1), ('touch_kernelILi0EEvPKhyP', 40, 2, 1), ('touch_kernelILi0EEvPKhyP', 40, 2, 1), ('_w8a16_gemv_kernel', 40, 2, 1)]
+  touched+stream   Y= 190 lim= 80 hr=1.00  gemv    29.30 us =   1432 GB/s   touches [('touch_kernel<0>', 205.63), ('touch_kernel<0>', 27.17), ('touch_kernel<0>', 122.62)] clk (2332, 2332)
+  persist+stream   Y= 190 lim= 80 hr=1.00  gemv    19.54 us =   2147 GB/s   touches [('touch_kernel<0>', 205.6), ('touch_kernel<0>', 7.26), ('touch_kernel<0>', 122.56)] clk (2325, 2332)
+  persist+cs       Y= 190 lim= 80 hr=1.00  gemv    19.34 us =   2168 GB/s   touches [('touch_kernel<0>', 205.63), ('touch_kernel<0>', 7.28), ('touch_kernel<1>', 122.42)] clk (2325, 2325)
+  persist+swin     Y= 190 lim= 80 hr=1.00  gemv    19.54 us =   2147 GB/s   touches [('touch_kernel<0>', 205.71), ('touch_kernel<0>', 7.26), ('touch_kernel<0>', 122.58)] clk (2325, 2340)
+  swin-consumer    Y= 190 lim= 80 hr=1.00  gemv    19.52 us =   2149 GB/s   touches [('touch_kernel<0>', 205.57), ('touch_kernel<0>', 7.26), ('touch_kernel<0>', 122.64)] clk (2340, 2340)
+     nodes: [('touch_kernelILi0EEvPKhyP', 40, 2, 1), ('touch_kernelILi0EEvPKhyP', 40, 2, 1), ('touch_kernelILi0EEvPKhyP', 40, 2, 1), ('_w8a16_gemv_kernel', 40, 2, 1)]
+
+=== out_proj N=2560 K=6144 M=4 weight 15.0 MB  (21:38:41)
+  cold             Y=   0 lim=  0 hr=1.00  gemv    50.08 us =    314 GB/s   touches [('touch_kernel<0>', 205.07)] clk (2340, 2340)
+  touched          Y=   0 lim=  0 hr=1.00  gemv    43.55 us =    361 GB/s   touches [('touch_kernel<0>', 205.33), ('touch_kernel<0>', 11.17)] clk (2340, 2340)
+  touched+stream   Y=  77 lim=  0 hr=1.00  gemv    43.58 us =    361 GB/s   touches [('touch_kernel<0>', 205.38), ('touch_kernel<0>', 11.23), ('touch_kernel<0>', 50.72)] clk (2340, 2340)
+  elast+stream     Y=  77 lim=  0 hr=1.00  gemv    43.55 us =    361 GB/s   touches [('touch_kernel<0>', 205.3), ('touch_kernel<2>', 6.13), ('touch_kernel<0>', 50.66)] clk (2340, 2340)
+  elast+cs         Y=  77 lim=  0 hr=1.00  gemv    43.58 us =    361 GB/s   touches [('touch_kernel<0>', 205.18), ('touch_kernel<2>', 6.14), ('touch_kernel<1>', 50.54)] clk (2340, 2340)
+  touched+stream   Y= 190 lim=  0 hr=1.00  gemv    50.02 us =    314 GB/s   touches [('touch_kernel<0>', 205.38), ('touch_kernel<0>', 11.2), ('touch_kernel<0>', 122.78)] clk (2340, 2340)
+  elast+stream     Y= 190 lim=  0 hr=1.00  gemv    47.66 us =    330 GB/s   touches [('touch_kernel<0>', 205.22), ('touch_kernel<2>', 6.14), ('touch_kernel<0>', 122.64)] clk (2340, 2340)
+  elast+cs         Y= 190 lim=  0 hr=1.00  gemv    43.58 us =    361 GB/s   touches [('touch_kernel<0>', 205.39), ('touch_kernel<2>', 6.19), ('touch_kernel<1>', 122.46)] clk (2340, 2340)
+  touched          Y=   0 lim= 80 hr=1.00  gemv    43.57 us =    361 GB/s   touches [('touch_kernel<0>', 205.28), ('touch_kernel<0>', 11.17)] clk (2340, 2340)
+  touched+stream   Y=  77 lim= 80 hr=1.00  gemv    43.58 us =    361 GB/s   touches [('touch_kernel<0>', 205.15), ('touch_kernel<0>', 11.17), ('touch_kernel<0>', 50.53)] clk (2340, 2340)
+  persist+stream   Y=  77 lim= 80 hr=1.00  gemv    43.58 us =    361 GB/s   touches [('touch_kernel<0>', 205.26), ('touch_kernel<0>', 3.42), ('touch_kernel<0>', 50.64)] clk (2340, 2340)
+  persist+cs       Y=  77 lim= 80 hr=1.00  gemv    43.62 us =    361 GB/s   touches [('touch_kernel<0>', 205.12), ('touch_kernel<0>', 3.44), ('touch_kernel<1>', 50.64)] clk (2340, 2340)
+  persist+swin     Y=  77 lim= 80 hr=1.00  gemv    43.62 us =    361 GB/s   touches [('touch_kernel<0>', 205.14), ('touch_kernel<0>', 3.39), ('touch_kernel<0>', 50.59)] clk (2340, 2340)
+  swin-consumer    Y=  77 lim= 80 hr=1.00  gemv    43.52 us =    361 GB/s   touches [('touch_kernel<0>', 205.25), ('touch_kernel<0>', 3.42), ('touch_kernel<0>', 50.62)] clk (2340, 2340)
+     nodes: [('touch_kernelILi0EEvPKhyP', 15, 2, 1), ('touch_kernelILi0EEvPKhyP', 15, 2, 1), ('touch_kernelILi0EEvPKhyP', 15, 2, 1), ('_w8a16_gemv_kernel', 15, 2, 1)]
+  touched+stream   Y= 190 lim= 80 hr=1.00  gemv    50.02 us =    314 GB/s   touches [('touch_kernel<0>', 205.28), ('touch_kernel<0>', 11.14), ('touch_kernel<0>', 122.53)] clk (2340, 2340)
+  persist+stream   Y= 190 lim= 80 hr=1.00  gemv    43.74 us =    360 GB/s   touches [('touch_kernel<0>', 205.15), ('touch_kernel<0>', 3.39), ('touch_kernel<0>', 122.58)] clk (2340, 2340)
+  persist+cs       Y= 190 lim= 80 hr=1.00  gemv    43.57 us =    361 GB/s   touches [('touch_kernel<0>', 205.3), ('touch_kernel<0>', 3.46), ('touch_kernel<1>', 122.43)] clk (2340, 2340)
+  persist+swin     Y= 190 lim= 80 hr=1.00  gemv    43.78 us =    359 GB/s   touches [('touch_kernel<0>', 205.12), ('touch_kernel<0>', 3.42), ('touch_kernel<0>', 122.59)] clk (2340, 2340)
+  swin-consumer    Y= 190 lim= 80 hr=1.00  gemv    43.78 us =    359 GB/s   touches [('touch_kernel<0>', 205.18), ('touch_kernel<0>', 3.39), ('touch_kernel<0>', 122.58)] clk (2340, 2340)
+     nodes: [('touch_kernelILi0EEvPKhyP', 15, 2, 1), ('touch_kernelILi0EEvPKhyP', 15, 2, 1), ('touch_kernelILi0EEvPKhyP', 15, 2, 1), ('_w8a16_gemv_kernel', 15, 2, 1)]
+
+=== out_proj N=2560 K=6144 M=16 weight 15.0 MB  (21:38:45)
+  cold             Y=   0 lim=  0 hr=1.00  gemv    50.21 us =    313 GB/s   touches [('touch_kernel<0>', 205.3)] clk (2340, 2340)
+  touched          Y=   0 lim=  0 hr=1.00  gemv    43.68 us =    360 GB/s   touches [('touch_kernel<0>', 205.23), ('touch_kernel<0>', 11.17)] clk (2340, 2340)
+  touched+stream   Y=  77 lim=  0 hr=1.00  gemv    43.70 us =    360 GB/s   touches [('touch_kernel<0>', 205.3), ('touch_kernel<0>', 11.17), ('touch_kernel<0>', 50.59)] clk (2340, 2340)
+  elast+stream     Y=  77 lim=  0 hr=1.00  gemv    43.68 us =    360 GB/s   touches [('touch_kernel<0>', 205.23), ('touch_kernel<2>', 6.13), ('touch_kernel<0>', 50.53)] clk (2340, 2340)
+  elast+cs         Y=  77 lim=  0 hr=1.00  gemv    43.68 us =    360 GB/s   touches [('touch_kernel<0>', 205.33), ('touch_kernel<2>', 6.11), ('touch_kernel<1>', 50.56)] clk (2340, 2340)
+  touched+stream   Y= 190 lim=  0 hr=1.00  gemv    50.24 us =    313 GB/s   touches [('touch_kernel<0>', 205.28), ('touch_kernel<0>', 11.14), ('touch_kernel<0>', 122.62)] clk (2340, 2340)
+  elast+stream     Y= 190 lim=  0 hr=1.00  gemv    47.71 us =    330 GB/s   touches [('touch_kernel<0>', 205.33), ('touch_kernel<2>', 6.22), ('touch_kernel<0>', 122.62)] clk (2340, 2340)
+  elast+cs         Y= 190 lim=  0 hr=1.00  gemv    43.73 us =    360 GB/s   touches [('touch_kernel<0>', 205.47), ('touch_kernel<2>', 6.19), ('touch_kernel<1>', 122.43)] clk (2340, 2340)
+  touched          Y=   0 lim= 80 hr=1.00  gemv    43.68 us =    360 GB/s   touches [('touch_kernel<0>', 205.41), ('touch_kernel<0>', 11.23)] clk (2340, 2340)
+  touched+stream   Y=  77 lim= 80 hr=1.00  gemv    43.74 us =    360 GB/s   touches [('touch_kernel<0>', 205.38), ('touch_kernel<0>', 11.17), ('touch_kernel<0>', 50.62)] clk (2340, 2340)
+  persist+stream   Y=  77 lim= 80 hr=1.00  gemv    43.66 us =    360 GB/s   touches [('touch_kernel<0>', 205.31), ('touch_kernel<0>', 3.39), ('touch_kernel<0>', 50.59)] clk (2340, 2340)
+  persist+cs       Y=  77 lim= 80 hr=1.00  gemv    43.66 us =    360 GB/s   touches [('touch_kernel<0>', 205.18), ('touch_kernel<0>', 3.39), ('touch_kernel<1>', 50.5)] clk (2340, 2340)
+  persist+swin     Y=  77 lim= 80 hr=1.00  gemv    43.70 us =    360 GB/s   touches [('touch_kernel<0>', 205.28), ('touch_kernel<0>', 3.39), ('touch_kernel<0>', 50.59)] clk (2340, 2340)
+  swin-consumer    Y=  77 lim= 80 hr=1.00  gemv    43.66 us =    360 GB/s   touches [('touch_kernel<0>', 205.28), ('touch_kernel<0>', 3.42), ('touch_kernel<0>', 50.64)] clk (2340, 2340)
+     nodes: [('touch_kernelILi0EEvPKhyP', 15, 2, 1), ('touch_kernelILi0EEvPKhyP', 15, 2, 1), ('touch_kernelILi0EEvPKhyP', 15, 2, 1), ('_w8a16_gemv_kernel', 15, 2, 1)]
+  touched+stream   Y= 190 lim= 80 hr=1.00  gemv    50.21 us =    313 GB/s   touches [('touch_kernel<0>', 205.36), ('touch_kernel<0>', 11.2), ('touch_kernel<0>', 122.58)] clk (2340, 2340)
+  persist+stream   Y= 190 lim= 80 hr=1.00  gemv    43.94 us =    358 GB/s   touches [('touch_kernel<0>', 205.39), ('touch_kernel<0>', 3.39), ('touch_kernel<0>', 122.62)] clk (2340, 2340)
+  persist+cs       Y= 190 lim= 80 hr=1.00  gemv    43.71 us =    360 GB/s   touches [('touch_kernel<0>', 205.44), ('touch_kernel<0>', 3.42), ('touch_kernel<1>', 122.43)] clk (2340, 2340)
+  persist+swin     Y= 190 lim= 80 hr=1.00  gemv    43.97 us =    358 GB/s   touches [('touch_kernel<0>', 205.39), ('touch_kernel<0>', 3.39), ('touch_kernel<0>', 122.64)] clk (2340, 2340)
+  swin-consumer    Y= 190 lim= 80 hr=1.00  gemv    43.95 us =    358 GB/s   touches [('touch_kernel<0>', 205.44), ('touch_kernel<0>', 3.42), ('touch_kernel<0>', 122.66)] clk (2340, 2340)
+     nodes: [('touch_kernelILi0EEvPKhyP', 15, 2, 1), ('touch_kernelILi0EEvPKhyP', 15, 2, 1), ('touch_kernelILi0EEvPKhyP', 15, 2, 1), ('_w8a16_gemv_kernel', 15, 2, 1)]
+
+=== attn_qkv N=13312 K=2560 M=4 weight 32.5 MB  (21:38:50)
+  cold             Y=   0 lim=  0 hr=1.00  gemv    23.94 us =   1424 GB/s   touches [('touch_kernel<0>', 205.3)] clk (2340, 2340)
+  touched          Y=   0 lim=  0 hr=1.00  gemv    19.04 us =   1790 GB/s   touches [('touch_kernel<0>', 205.34), ('touch_kernel<0>', 22.18)] clk (2332, 2340)
+  touched+stream   Y=  77 lim=  0 hr=1.00  gemv    19.01 us =   1793 GB/s   touches [('touch_kernel<0>', 205.23), ('touch_kernel<0>', 22.24), ('touch_kernel<0>', 50.62)] clk (2332, 2332)
+  elast+stream     Y=  77 lim=  0 hr=1.00  gemv    19.01 us =   1793 GB/s   touches [('touch_kernel<0>', 205.38), ('touch_kernel<2>', 22.21), ('touch_kernel<0>', 50.66)] clk (2332, 2332)
+  elast+cs         Y=  77 lim=  0 hr=1.00  gemv    19.01 us =   1793 GB/s   touches [('touch_kernel<0>', 205.36), ('touch_kernel<2>', 22.24), ('touch_kernel<1>', 50.61)] clk (2332, 2332)
+  touched+stream   Y= 190 lim=  0 hr=1.00  gemv    23.98 us =   1421 GB/s   touches [('touch_kernel<0>', 205.36), ('touch_kernel<0>', 22.18), ('touch_kernel<0>', 122.69)] clk (2332, 2332)
+  elast+stream     Y= 190 lim=  0 hr=1.00  gemv    22.69 us =   1502 GB/s   touches [('touch_kernel<0>', 205.36), ('touch_kernel<2>', 22.21), ('touch_kernel<0>', 122.58)] clk (2332, 2340)
+  elast+cs         Y= 190 lim=  0 hr=1.00  gemv    19.04 us =   1790 GB/s   touches [('touch_kernel<0>', 205.28), ('touch_kernel<2>', 22.22), ('touch_kernel<1>', 122.53)] clk (2340, 2340)
+  touched          Y=   0 lim= 80 hr=1.00  gemv    19.01 us =   1793 GB/s   touches [('touch_kernel<0>', 205.15), ('touch_kernel<0>', 22.24)] clk (2340, 2340)
+  touched+stream   Y=  77 lim= 80 hr=1.00  gemv    19.04 us =   1790 GB/s   touches [('touch_kernel<0>', 205.23), ('touch_kernel<0>', 22.24), ('touch_kernel<0>', 50.53)] clk (2340, 2340)
+  persist+stream   Y=  77 lim= 80 hr=1.00  gemv    19.01 us =   1793 GB/s   touches [('touch_kernel<0>', 205.34), ('touch_kernel<0>', 6.11), ('touch_kernel<0>', 50.61)] clk (2332, 2340)
+  persist+cs       Y=  77 lim= 80 hr=1.00  gemv    19.02 us =   1791 GB/s   touches [('touch_kernel<0>', 205.5), ('touch_kernel<0>', 6.11), ('touch_kernel<1>', 50.59)] clk (2332, 2332)
+  persist+swin     Y=  77 lim= 80 hr=1.00  gemv    19.01 us =   1793 GB/s   touches [('touch_kernel<0>', 205.33), ('touch_kernel<0>', 6.11), ('touch_kernel<0>', 50.58)] clk (2332, 2332)
+  swin-consumer    Y=  77 lim= 80 hr=1.00  gemv    19.04 us =   1790 GB/s   touches [('touch_kernel<0>', 205.15), ('touch_kernel<0>', 6.11), ('touch_kernel<0>', 50.53)] clk (2332, 2332)
+     nodes: [('touch_kernelILi0EEvPKhyP', 32, 2, 1), ('touch_kernelILi0EEvPKhyP', 32, 2, 1), ('touch_kernelILi0EEvPKhyP', 32, 2, 1), ('_w8a16_gemv_kernel', 32, 2, 1)]
+  touched+stream   Y= 190 lim= 80 hr=1.00  gemv    23.97 us =   1422 GB/s   touches [('touch_kernel<0>', 205.38), ('touch_kernel<0>', 22.21), ('touch_kernel<0>', 122.7)] clk (2332, 2340)
+  persist+stream   Y= 190 lim= 80 hr=1.00  gemv    19.20 us =   1775 GB/s   touches [('touch_kernel<0>', 205.33), ('touch_kernel<0>', 6.11), ('touch_kernel<0>', 122.62)] clk (2340, 2340)
+  persist+cs       Y= 190 lim= 80 hr=1.00  gemv    19.02 us =   1791 GB/s   touches [('touch_kernel<0>', 205.28), ('touch_kernel<0>', 6.14), ('touch_kernel<1>', 122.37)] clk (2340, 2340)
+  persist+swin     Y= 190 lim= 80 hr=1.00  gemv    19.23 us =   1772 GB/s   touches [('touch_kernel<0>', 205.46), ('touch_kernel<0>', 6.11), ('touch_kernel<0>', 122.58)] clk (2332, 2332)
+  swin-consumer    Y= 190 lim= 80 hr=1.00  gemv    19.23 us =   1772 GB/s   touches [('touch_kernel<0>', 205.34), ('touch_kernel<0>', 6.08), ('touch_kernel<0>', 122.59)] clk (2332, 2332)
+     nodes: [('touch_kernelILi0EEvPKhyP', 32, 2, 1), ('touch_kernelILi0EEvPKhyP', 32, 2, 1), ('touch_kernelILi0EEvPKhyP', 32, 2, 1), ('_w8a16_gemv_kernel', 32, 2, 1)]
+
+=== attn_qkv N=13312 K=2560 M=16 weight 32.5 MB  (21:38:54)
+  cold             Y=   0 lim=  0 hr=1.00  gemv    24.21 us =   1408 GB/s   touches [('touch_kernel<0>', 205.6)] clk (2332, 2332)
+  touched          Y=   0 lim=  0 hr=1.00  gemv    19.20 us =   1775 GB/s   touches [('touch_kernel<0>', 205.42), ('touch_kernel<0>', 22.19)] clk (2332, 2332)
+  touched+stream   Y=  77 lim=  0 hr=1.00  gemv    19.23 us =   1772 GB/s   touches [('touch_kernel<0>', 205.38), ('touch_kernel<0>', 22.18), ('touch_kernel<0>', 50.66)] clk (2332, 2332)
+  elast+stream     Y=  77 lim=  0 hr=1.00  gemv    19.28 us =   1768 GB/s   touches [('touch_kernel<0>', 205.54), ('touch_kernel<2>', 22.21), ('touch_kernel<0>', 50.58)] clk (2332, 2332)
+  elast+cs         Y=  77 lim=  0 hr=1.00  gemv    19.20 us =   1775 GB/s   touches [('touch_kernel<0>', 205.7), ('touch_kernel<2>', 22.22), ('touch_kernel<1>', 50.62)] clk (2332, 2332)
+  touched+stream   Y= 190 lim=  0 hr=1.00  gemv    24.09 us =   1414 GB/s   touches [('touch_kernel<0>', 205.54), ('touch_kernel<0>', 22.24), ('touch_kernel<0>', 122.67)] clk (2332, 2332)
+  elast+stream     Y= 190 lim=  0 hr=1.00  gemv    22.98 us =   1483 GB/s   touches [('touch_kernel<0>', 205.58), ('touch_kernel<2>', 22.22), ('touch_kernel<0>', 122.61)] clk (2332, 2332)
+  elast+cs         Y= 190 lim=  0 hr=1.00  gemv    19.22 us =   1773 GB/s   touches [('touch_kernel<0>', 205.66), ('touch_kernel<2>', 22.26), ('touch_kernel<1>', 122.42)] clk (2332, 2332)
+  touched          Y=   0 lim= 80 hr=1.00  gemv    19.23 us =   1772 GB/s   touches [('touch_kernel<0>', 205.6), ('touch_kernel<0>', 22.21)] clk (2332, 2340)
+  touched+stream   Y=  77 lim= 80 hr=1.00  gemv    19.23 us =   1772 GB/s   touches [('touch_kernel<0>', 205.5), ('touch_kernel<0>', 22.19), ('touch_kernel<0>', 50.56)] clk (2340, 2340)
+  persist+stream   Y=  77 lim= 80 hr=1.00  gemv    19.23 us =   1772 GB/s   touches [('touch_kernel<0>', 205.53), ('touch_kernel<0>', 6.11), ('touch_kernel<0>', 50.64)] clk (2340, 2340)
+  persist+cs       Y=  77 lim= 80 hr=1.00  gemv    19.23 us =   1772 GB/s   touches [('touch_kernel<0>', 205.55), ('touch_kernel<0>', 6.11), ('touch_kernel<1>', 50.5)] clk (2332, 2332)
+  persist+swin     Y=  77 lim= 80 hr=1.00  gemv    19.20 us =   1775 GB/s   touches [('touch_kernel<0>', 205.5), ('touch_kernel<0>', 6.08), ('touch_kernel<0>', 50.59)] clk (2332, 2332)
+  swin-consumer    Y=  77 lim= 80 hr=1.00  gemv    19.20 us =   1775 GB/s   touches [('touch_kernel<0>', 205.63), ('touch_kernel<0>', 6.08), ('touch_kernel<0>', 50.53)] clk (2332, 2332)
+     nodes: [('touch_kernelILi0EEvPKhyP', 32, 2, 1), ('touch_kernelILi0EEvPKhyP', 32, 2, 1), ('touch_kernelILi0EEvPKhyP', 32, 2, 1), ('_w8a16_gemv_kernel', 32, 2, 1)]
+  touched+stream   Y= 190 lim= 80 hr=1.00  gemv    24.14 us =   1411 GB/s   touches [('touch_kernel<0>', 205.47), ('touch_kernel<0>', 22.21), ('touch_kernel<0>', 122.66)] clk (2332, 2332)
+  persist+stream   Y= 190 lim= 80 hr=1.00  gemv    19.42 us =   1754 GB/s   touches [('touch_kernel<0>', 205.54), ('touch_kernel<0>', 6.08), ('touch_kernel<0>', 122.54)] clk (2332, 2332)
+  persist+cs       Y= 190 lim= 80 hr=1.00  gemv    19.20 us =   1775 GB/s   touches [('touch_kernel<0>', 205.49), ('touch_kernel<0>', 6.14), ('touch_kernel<1>', 122.48)] clk (2332, 2332)
+  persist+swin     Y= 190 lim= 80 hr=1.00  gemv    19.39 us =   1757 GB/s   touches [('touch_kernel<0>', 205.47), ('touch_kernel<0>', 6.08), ('touch_kernel<0>', 122.61)] clk (2332, 2340)
+  swin-consumer    Y= 190 lim= 80 hr=1.00  gemv    19.42 us =   1754 GB/s   touches [('touch_kernel<0>', 205.47), ('touch_kernel<0>', 6.14), ('touch_kernel<0>', 122.64)] clk (2340, 2340)
+     nodes: [('touch_kernelILi0EEvPKhyP', 32, 2, 1), ('touch_kernelILi0EEvPKhyP', 32, 2, 1), ('touch_kernelILi0EEvPKhyP', 32, 2, 1), ('_w8a16_gemv_kernel', 32, 2, 1)]
+
+=== draft_head N=49152 K=2560 M=1 weight 120.0 MB  (21:38:59)
+  cold             Y=   0 lim=  0 hr=1.00  gemv    95.10 us =   1323 GB/s   touches [('touch_kernel<0>', 205.18)] clk (2332, 2332)
+  touched          Y=   0 lim=  0 hr=1.00  gemv    51.15 us =   2460 GB/s   touches [('touch_kernel<0>', 205.44), ('touch_kernel<0>', 78.14)] clk (2332, 2332)
+  touched+stream   Y=  77 lim=  0 hr=1.00  gemv    95.12 us =   1323 GB/s   touches [('touch_kernel<0>', 205.36), ('touch_kernel<0>', 78.16), ('touch_kernel<0>', 50.85)] clk (2302, 2332)
+  elast+stream     Y=  77 lim=  0 hr=1.00  gemv    91.36 us =   1377 GB/s   touches [('touch_kernel<0>', 205.33), ('touch_kernel<2>', 78.18), ('touch_kernel<0>', 50.78)] clk (2302, 2302)
+  elast+cs         Y=  77 lim=  0 hr=1.00  gemv    54.46 us =   2310 GB/s   touches [('touch_kernel<0>', 205.38), ('touch_kernel<2>', 78.14), ('touch_kernel<1>', 50.82)] clk (2302, 2310)
+  touched+stream   Y= 190 lim=  0 hr=1.00  gemv    95.04 us =   1324 GB/s   touches [('touch_kernel<0>', 205.49), ('touch_kernel<0>', 78.19), ('touch_kernel<0>', 122.62)] clk (2310, 2310)
+  elast+stream     Y= 190 lim=  0 hr=1.00  gemv    91.41 us =   1377 GB/s   touches [('touch_kernel<0>', 205.26), ('touch_kernel<2>', 78.13), ('touch_kernel<0>', 122.62)] clk (2310, 2317)
+  elast+cs         Y= 190 lim=  0 hr=1.00  gemv    55.23 us =   2278 GB/s   touches [('touch_kernel<0>', 205.26), ('touch_kernel<2>', 78.14), ('touch_kernel<1>', 122.61)] clk (2317, 2317)
+  touched          Y=   0 lim= 80 hr=1.00  gemv    51.25 us =   2455 GB/s   touches [('touch_kernel<0>', 205.33), ('touch_kernel<0>', 78.14)] clk (2317, 2317)
+  touched+stream   Y=  77 lim= 80 hr=1.00  gemv    95.22 us =   1322 GB/s   touches [('touch_kernel<0>', 205.44), ('touch_kernel<0>', 78.11), ('touch_kernel<0>', 50.88)] clk (2317, 2317)
+  persist+stream   Y=  77 lim= 80 hr=0.67  gemv    57.90 us =   2173 GB/s   touches [('touch_kernel<0>', 205.25), ('touch_kernel<0>', 40.06), ('touch_kernel<0>', 50.78)] clk (2310, 2317)
+  persist+cs       Y=  77 lim= 80 hr=0.67  gemv    54.62 us =   2304 GB/s   touches [('touch_kernel<0>', 205.26), ('touch_kernel<0>', 40.06), ('touch_kernel<1>', 50.53)] clk (2310, 2310)
+  persist+swin     Y=  77 lim= 80 hr=0.67  gemv    54.42 us =   2312 GB/s   touches [('touch_kernel<0>', 205.41), ('touch_kernel<0>', 40.13), ('touch_kernel<0>', 50.56)] clk (2295, 2310)
+  swin-consumer    Y=  77 lim= 80 hr=0.67  gemv    61.79 us =   2036 GB/s   touches [('touch_kernel<0>', 205.26), ('touch_kernel<0>', 40.0), ('touch_kernel<0>', 50.88)] clk (2295, 2295)
+     nodes: [('touch_kernelILi0EEvPKhyP', 120, 2, 1), ('touch_kernelILi0EEvPKhyP', 120, 2, 1), ('touch_kernelILi0EEvPKhyP', 120, 2, 1), ('_w8a16_gemv_kernel', 120, 2, 1)]
+  persist+stream   Y=  77 lim= 80 hr=1.00  gemv    65.09 us =   1933 GB/s   touches [('touch_kernel<0>', 205.33), ('touch_kernel<0>', 71.47), ('touch_kernel<0>', 50.8)] clk (2295, 2295)
+  persistpfx+stream Y=  77 lim= 80 hr=1.00  gemv    61.25 us =   2054 GB/s   touches [('touch_kernel<0>', 205.3), ('touch_kernel<0>', 37.06), ('touch_kernel<0>', 50.75)] clk (2295, 2295)
+  touched+stream   Y= 190 lim= 80 hr=1.00  gemv    94.91 us =   1326 GB/s   touches [('touch_kernel<0>', 205.22), ('touch_kernel<0>', 78.19), ('touch_kernel<0>', 122.53)] clk (2295, 2302)
+  persist+stream   Y= 190 lim= 80 hr=0.67  gemv    57.86 us =   2175 GB/s   touches [('touch_kernel<0>', 205.38), ('touch_kernel<0>', 40.18), ('touch_kernel<0>', 122.66)] clk (2302, 2302)
+  persist+cs       Y= 190 lim= 80 hr=0.67  gemv    54.43 us =   2312 GB/s   touches [('touch_kernel<0>', 205.34), ('touch_kernel<0>', 40.16), ('touch_kernel<1>', 122.4)] clk (2302, 2302)
+  persist+swin     Y= 190 lim= 80 hr=0.67  gemv    57.66 us =   2182 GB/s   touches [('touch_kernel<0>', 205.47), ('touch_kernel<0>', 40.16), ('touch_kernel<0>', 122.77)] clk (2302, 2302)
+  swin-consumer    Y= 190 lim= 80 hr=0.67  gemv    61.54 us =   2045 GB/s   touches [('touch_kernel<0>', 205.41), ('touch_kernel<0>', 39.97), ('touch_kernel<0>', 122.65)] clk (2302, 2302)
+     nodes: [('touch_kernelILi0EEvPKhyP', 120, 2, 1), ('touch_kernelILi0EEvPKhyP', 120, 2, 1), ('touch_kernelILi0EEvPKhyP', 120, 2, 1), ('_w8a16_gemv_kernel', 120, 2, 1)]
+  persist+stream   Y= 190 lim= 80 hr=1.00  gemv    64.86 us =   1940 GB/s   touches [('touch_kernel<0>', 205.36), ('touch_kernel<0>', 71.46), ('touch_kernel<0>', 122.56)] clk (2302, 2302)
+  persistpfx+stream Y= 190 lim= 80 hr=1.00  gemv    60.96 us =   2064 GB/s   touches [('touch_kernel<0>', 205.36), ('touch_kernel<0>', 37.06), ('touch_kernel<0>', 122.59)] clk (2302, 2310)
+
+=== retention sweep  (21:39:04)
+  normal   X=   8 Y=   0  cold     6.51  re     2.27
+  normal   X=   8 Y=  40  cold     6.56  re     2.30  stream    26.96
+  normal   X=   8 Y=  77  cold     6.46  re     2.27  stream    50.74
+  normal   X=   8 Y= 120  cold     6.46  re     2.48  stream    78.29
+  normal   X=   8 Y= 190  cold     6.51  re     6.66  stream   122.69
+  normal   X=  16 Y=   0  cold    11.84  re     3.46
+  normal   X=  16 Y=  40  cold    11.90  re     3.54  stream    26.90
+  normal   X=  16 Y=  77  cold    11.97  re     3.52  stream    50.56
+  normal   X=  16 Y= 120  cold    11.81  re    11.57  stream    78.18
+  normal   X=  16 Y= 190  cold    11.92  re    11.95  stream   122.78
+  normal   X=  24 Y=   0  cold    16.99  re     4.61
+  normal   X=  24 Y=  40  cold    16.93  re     4.77  stream    26.86
+  normal   X=  24 Y=  77  cold    17.01  re     4.77  stream    50.54
+  normal   X=  24 Y= 120  cold    16.99  re    17.10  stream    78.21
+  normal   X=  24 Y= 190  cold    16.98  re    17.07  stream   122.64
+  normal   X=  32 Y=   0  cold    21.94  re     5.79
+  normal   X=  32 Y=  40  cold    21.90  re     5.98  stream    26.88
+  normal   X=  32 Y=  77  cold    21.92  re     5.98  stream    50.56
+  normal   X=  32 Y= 120  cold    21.94  re    22.05  stream    78.16
+  normal   X=  32 Y= 190  cold    21.90  re    22.02  stream   122.67
+  normal   X=  48 Y=   0  cold    32.45  re     8.13
+  normal   X=  48 Y=  40  cold    32.35  re     8.38  stream    26.82
+  normal   X=  48 Y=  77  cold    32.30  re     9.07  stream    50.88
+  normal   X=  48 Y= 120  cold    32.40  re    32.48  stream    78.13
+  normal   X=  48 Y= 190  cold    32.32  re    32.48  stream   122.67
+  normal   X=  64 Y=   0  cold    42.26  re    10.30
+  normal   X=  64 Y=  40  cold    42.30  re    10.66  stream    26.86
+  normal   X=  64 Y=  77  cold    42.32  re    40.74  stream    50.78
+  normal   X=  64 Y= 120  cold    42.37  re    42.46  stream    78.16
+  normal   X=  64 Y= 190  cold    42.24  re    42.46  stream   122.64
+  normal   X=  80 Y=   0  cold    52.51  re    12.59
+  normal   X=  80 Y=  40  cold    52.59  re    13.22  stream    27.06
+  normal   X=  80 Y=  77  cold    52.54  re    52.64  stream    50.86
+  normal   X=  80 Y= 120  cold    52.58  re    52.64  stream    78.30
+  normal   X=  80 Y= 190  cold    52.51  re    52.54  stream   122.58
+  normal   X=  96 Y=   0  cold    62.91  re    14.82
+  normal   X=  96 Y=  40  cold    62.98  re    32.26  stream    27.07
+  normal   X=  96 Y=  77  cold    63.06  re    63.14  stream    50.69
+  normal   X=  96 Y= 120  cold    63.01  re    63.02  stream    78.13
+  normal   X=  96 Y= 190  cold    63.01  re    63.10  stream   122.72
+  normal   X= 112 Y=   0  cold    73.02  re    17.12
+  normal   X= 112 Y=  40  cold    72.96  re    73.06  stream    27.07
+  normal   X= 112 Y=  77  cold    72.93  re    73.12  stream    50.85
+  normal   X= 112 Y= 120  cold    73.07  re    73.12  stream    78.11
+  normal   X= 112 Y= 190  cold    73.04  re    73.10  stream   122.53
+  persist  X=   8 Y=   0  cold     2.40  re     2.30
+  persist  X=   8 Y=  40  cold     2.37  re     2.29  stream    26.88
+  persist  X=   8 Y=  77  cold     2.40  re     2.27  stream    50.62
+  persist  X=   8 Y= 120  cold     2.40  re     2.50  stream    78.24
+  persist  X=   8 Y= 190  cold     2.37  re     2.46  stream   122.59
+  persist  X=  16 Y=   0  cold     3.58  re     3.50
+  persist  X=  16 Y=  40  cold     3.63  re     3.49  stream    26.88
+  persist  X=  16 Y=  77  cold     3.62  re     3.54  stream    50.56
+  persist  X=  16 Y= 120  cold     3.65  re     3.74  stream    78.14
+  persist  X=  16 Y= 190  cold     3.62  re     3.71  stream   122.64
+  persist  X=  24 Y=   0  cold     4.83  re     4.70
+  persist  X=  24 Y=  40  cold     4.86  re     4.74  stream    26.82
+  persist  X=  24 Y=  77  cold     4.85  re     4.77  stream    50.58
+  persist  X=  24 Y= 120  cold     4.86  re     4.99  stream    78.10
+  persist  X=  24 Y= 190  cold     4.86  re     4.99  stream   122.66
+  persist  X=  32 Y=   0  cold     6.08  re     5.89
+  persist  X=  32 Y=  40  cold     6.08  re     5.98  stream    26.86
+  persist  X=  32 Y=  77  cold     6.08  re     5.98  stream    50.61
+  persist  X=  32 Y= 120  cold     6.08  re     6.21  stream    78.10
+  persist  X=  32 Y= 190  cold     6.11  re     6.21  stream   122.56
+  persist  X=  48 Y=   0  cold     8.48  re     8.06
+  persist  X=  48 Y=  40  cold     8.48  re     8.35  stream    26.91
+  persist  X=  48 Y=  77  cold     8.46  re     8.56  stream    50.74
+  persist  X=  48 Y= 120  cold     8.45  re     8.58  stream    78.13
+  persist  X=  48 Y= 190  cold     8.45  re     8.61  stream   122.70
+  persist  X=  64 Y=   0  cold    10.75  re    10.14
+  persist  X=  64 Y=  40  cold    10.72  re    10.69  stream    26.85
+  persist  X=  64 Y=  77  cold    10.78  re    10.85  stream    50.75
+  persist  X=  64 Y= 120  cold    10.70  re    10.85  stream    78.18
+  persist  X=  64 Y= 190  cold    10.74  re    10.85  stream   122.51
+  persist  X=  80 Y=   0  cold    13.09  re    12.29
+  persist  X=  80 Y=  40  cold    13.09  re    13.18  stream    27.06
+  persist  X=  80 Y=  77  cold    13.09  re    13.18  stream    50.77
+  persist  X=  80 Y= 120  cold    13.12  re    13.17  stream    78.18
+  persist  X=  80 Y= 190  cold    13.09  re    13.18  stream   122.45
+  persist  X=  96 Y=   0  cold    56.08  re    14.82
+  persist  X=  96 Y=  40  cold    47.01  re    16.45  stream    27.09
+  persist  X=  96 Y=  77  cold    46.54  re    21.46  stream    50.88
+  persist  X=  96 Y= 120  cold    46.85  re    21.49  stream    78.27
+  persist  X=  96 Y= 190  cold    46.70  re    21.49  stream   122.54
+  persist  X= 112 Y=   0  cold    72.94  re    17.12
+  persist  X= 112 Y=  40  cold    71.63  re    31.39  stream    27.07
+  persist  X= 112 Y=  77  cold    71.73  re    31.47  stream    50.77
+  persist  X= 112 Y= 120  cold    71.82  re    31.44  stream    78.26
+  persist  X= 112 Y= 190  cold    71.79  re    31.42  stream   122.65
+  elast    X=   8 Y=   0  cold     2.37  re     2.30
+  elast    X=   8 Y=  40  cold     2.37  re     2.29  stream    26.91
+  elast    X=   8 Y=  77  cold     2.37  re     2.27  stream    50.62
+  elast    X=   8 Y= 120  cold     2.40  re     2.27  stream    78.02
+  elast    X=   8 Y= 190  cold     2.38  re     2.27  stream   122.53
+  elast    X=  16 Y=   0  cold     6.94  re     3.47
+  elast    X=  16 Y=  40  cold     6.93  re     3.49  stream    26.88
+  elast    X=  16 Y=  77  cold     6.90  re     3.52  stream    50.53
+  elast    X=  16 Y= 120  cold     6.86  re     3.52  stream    78.10
+  elast    X=  16 Y= 190  cold     6.91  re     3.54  stream   122.53
+  elast    X=  24 Y=   0  cold    16.34  re     4.64
+  elast    X=  24 Y=  40  cold    16.48  re     4.74  stream    26.91
+  elast    X=  24 Y=  77  cold    16.59  re     4.77  stream    50.59
+  elast    X=  24 Y= 120  cold    16.56  re     4.75  stream    77.89
+  elast    X=  24 Y= 190  cold    16.48  re     4.77  stream   122.54
+  elast    X=  32 Y=   0  cold    21.86  re     5.82
+  elast    X=  32 Y=  40  cold    21.90  re     5.98  stream    26.88
+  elast    X=  32 Y=  77  cold    21.95  re     5.98  stream    50.56
+  elast    X=  32 Y= 120  cold    21.92  re     6.00  stream    77.90
+  elast    X=  32 Y= 190  cold    21.98  re     6.02  stream   122.40
+  elast    X=  48 Y=   0  cold    32.37  re     8.10
+  elast    X=  48 Y=  40  cold    32.35  re     8.38  stream    26.94
+  elast    X=  48 Y=  77  cold    32.40  re     8.38  stream    50.70
+  elast    X=  48 Y= 120  cold    32.38  re     8.35  stream    78.00
+  elast    X=  48 Y= 190  cold    32.42  re     8.35  stream   122.53
+  elast    X=  64 Y=   0  cold    42.32  re    10.30
+  elast    X=  64 Y=  40  cold    42.30  re    10.62  stream    26.91
+  elast    X=  64 Y=  77  cold    42.30  re    10.66  stream    50.53
+  elast    X=  64 Y= 120  cold    42.30  re    10.66  stream    77.95
+  elast    X=  64 Y= 190  cold    42.42  re    10.69  stream   122.64
+  elast    X=  80 Y=   0  cold    52.54  re    12.59
+  elast    X=  80 Y=  40  cold    52.48  re    12.99  stream    26.88
+  elast    X=  80 Y=  77  cold    52.51  re    12.96  stream    50.62
+  elast    X=  80 Y= 120  cold    52.58  re    12.96  stream    77.95
+  elast    X=  80 Y= 190  cold    52.50  re    12.99  stream   122.46
+  elast    X=  96 Y=   0  cold    62.94  re    14.82
+  elast    X=  96 Y=  40  cold    63.04  re    15.22  stream    26.91
+  elast    X=  96 Y=  77  cold    62.94  re    15.18  stream    50.48
+  elast    X=  96 Y= 120  cold    63.01  re    15.20  stream    77.97
+  elast    X=  96 Y= 190  cold    62.96  re    15.23  stream   122.38
+  elast    X= 112 Y=   0  cold    73.02  re    17.10
+  elast    X= 112 Y=  40  cold    72.99  re    17.58  stream    26.85
+  elast    X= 112 Y=  77  cold    73.15  re    17.73  stream    50.53
+  elast    X= 112 Y= 120  cold    72.93  re    17.98  stream    78.06
+  elast    X= 112 Y= 190  cold    73.02  re    18.30  stream   122.40
+
+[wrote] $HOME/tools/flash-next-bench/bench/l2_prefetch/results/hit.json

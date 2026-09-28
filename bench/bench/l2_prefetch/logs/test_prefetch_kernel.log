@@ -1,0 +1,9 @@
+l2_prefetch: layer table 2 ranges, 55.0 MB (linear_attn.in_proj_qkvz.weight, linear_attn.out_proj.weight)
+table: 2 ranges 55.0 MB [[127782713556992, 1310720], [127782755500032, 491520]]
+spans: (127782713556992, 41943040) (127782755500032, 15728640)
+
+=== prefetch kernel  (22:55:44)
+  cold GEMVs (control)                         graph   261.29 us   touch_kernel<0>=206.00  _w8a16_gemv_kernel=28.27  _w8a16_gemv_kernel=13.04
+  table prefetch (main stream) then GEMVs      graph   296.72 us   touch_kernel<0>=206.06  touch_table_kernel=56.86  _w8a16_gemv_kernel=17.14  _w8a16_gemv_kernel=6.78
+  fork: prefetch || 40 tiny, join, GEMVs       graph   302.25 us   touch_kernel<0>=205.98  touch_table_kernel=58.14  _w8a16_gemv_kernel=17.12  _w8a16_gemv_kernel=6.80
+  no prefetch: 40 tiny, GEMVs (control)        graph   299.96 us   touch_kernel<0>=206.21  _w8a16_gemv_kernel=28.32  _w8a16_gemv_kernel=13.09

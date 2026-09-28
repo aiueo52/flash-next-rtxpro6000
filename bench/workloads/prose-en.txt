@@ -1,0 +1,6 @@
+# English prose generation workload
+
+Write an original literary short story of 900–1200 words.
+
+A night archivist in a coastal museum discovers that the handwritten tide tables are predicting changes inside the building rather than changes in the sea. Keep the tension understated, vary sentence structure, avoid repeated imagery, and do not use headings or bullet points. The ending should reframe an ordinary object mentioned in the opening paragraph without explicitly explaining the mystery.
+

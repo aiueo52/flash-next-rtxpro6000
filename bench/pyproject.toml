@@ -1,0 +1,18 @@
+[project]
+name = "fnbench"
+version = "0.1.0"
+description = "Local OpenAI-compatible streaming inference benchmark"
+requires-python = ">=3.12"
+dependencies = ["requests>=2.31,<3"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+markers = ["slow: spawns a subprocess (SGLang import-order regression)"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]

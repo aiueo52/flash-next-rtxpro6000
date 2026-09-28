@@ -1,0 +1,37 @@
+# Agent-loop continuation workload
+
+Continue the following tool-using agent transcript for exactly six assistant turns and five tool-result turns. Preserve the JSON call style, check evidence before changing files, and end with a concise user-facing verification summary. Do not invent successful command output.
+
+USER: The invoice export sometimes duplicates the final row. Find the cause, fix it, and run focused tests.
+ASSISTANT: I’ll inspect the export path and its tests first.
+ASSISTANT to=terminal.exec:
+{"cmd":"rg -n \"invoice|export|final row\" src tests"}
+TOOL:
+Chunk ID: a19c2e
+Process exited with code 0
+Final output:
+src/export_csv.py:18:def export_invoices(rows, stream):
+src/export_csv.py:31:    stream.writerow(last_row)
+tests/test_export_csv.py:7:def test_export_invoices():
+ASSISTANT: The explicit final-row write is suspicious. I’ll read the implementation and test before editing.
+ASSISTANT to=terminal.exec:
+{"cmd":"sed -n '1,120p' src/export_csv.py && sed -n '1,160p' tests/test_export_csv.py"}
+TOOL:
+Chunk ID: b728fd
+Process exited with code 0
+Final output:
+def export_invoices(rows, stream):
+    last_row = None
+    for row in rows:
+        stream.writerow(row)
+        last_row = row
+    if last_row is not None:
+        stream.writerow(last_row)
+
+
+def test_export_invoices():
+    stream = FakeWriter()
+    export_invoices([['A'], ['B']], stream)
+    assert stream.rows == [['A'], ['B']]
+ASSISTANT:
+

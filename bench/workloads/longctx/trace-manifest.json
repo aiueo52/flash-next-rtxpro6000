@@ -1,0 +1,122 @@
+[
+  {
+    "path": "prof/traces/ql1-20260908-ql1-w16-doc-a-32k/1788829905.3457272-TP-0.trace.json.gz",
+    "bytes": 3510970,
+    "sha256": "130dbfb292f6a7c9970e22d803f557bf69fbb06e2428dfd5ae0e5bec0e2667c2"
+  },
+  {
+    "path": "prof/traces/ql1-20260908-ql1-w16-doc-a-64k/1788829951.0426672-TP-0.trace.json.gz",
+    "bytes": 3509430,
+    "sha256": "3cf0a29b7c689de6381471a817fbfbf232fa41aa1c750f8c7f37399d6f4c74f0"
+  },
+  {
+    "path": "prof/traces/ql1-20260908-ql1-w16-doc-a-8k/1788829872.1987991-TP-0.trace.json.gz",
+    "bytes": 3497786,
+    "sha256": "f96c19bc46eacc1d1d253bcc5d4edaf5b8b46537a91e4b62deb1c71c3eaecc46"
+  },
+  {
+    "path": "prof/traces/ql1-20260908-ql1-w16-doc-a-96k/1788830015.291558-TP-0.trace.json.gz",
+    "bytes": 3512275,
+    "sha256": "46a1c5eb3d3f985a80edd054de4980b215d577fc560db7d080f085c82e256408"
+  },
+  {
+    "path": "prof/traces/ql1-20260908-ql1-w16-doc-b-32k/1788829917.2663686-TP-0.trace.json.gz",
+    "bytes": 3511940,
+    "sha256": "649d3324e4603ee548f6989365663b1760d492b8a4048099c3c2c217721de212"
+  },
+  {
+    "path": "prof/traces/ql1-20260908-ql1-w16-doc-b-64k/1788829965.879522-TP-0.trace.json.gz",
+    "bytes": 3506770,
+    "sha256": "dbad5acf8261857119072b0c9e48eab1ede12917f72e8c91b3c4dea8fa5a46b8"
+  },
+  {
+    "path": "prof/traces/ql1-20260908-ql1-w16-doc-b-8k/1788829881.8677952-TP-0.trace.json.gz",
+    "bytes": 3511928,
+    "sha256": "bc6f0618935724ab9e323aecaee45a12c4d3a67bc3c59bb31242894033a759ca"
+  },
+  {
+    "path": "prof/traces/ql1-20260908-ql1-w16-doc-b-96k/1788830033.1360395-TP-0.trace.json.gz",
+    "bytes": 3508190,
+    "sha256": "ca93baf9ce3e68eae1faf9a890ad2994df93d9be629f2cdd92a961331650b97f"
+  },
+  {
+    "path": "prof/traces/ql1-20260908-ql1-w16-needle-perf-32k-d40/1788829928.4318562-TP-0.trace.json.gz",
+    "bytes": 3509948,
+    "sha256": "baf6c87a1d1601cd96a7c8ce26cb21a38a39a91ef73cdcaabae169d6e6d08016"
+  },
+  {
+    "path": "prof/traces/ql1-20260908-ql1-w16-needle-perf-64k-d40/1788829980.523296-TP-0.trace.json.gz",
+    "bytes": 3510765,
+    "sha256": "e9bacb6dc976509c7f3fa0f7bc7e106296f2d97a55084ec412eb3641e87d60aa"
+  },
+  {
+    "path": "prof/traces/ql1-20260908-ql1-w16-needle-perf-8k-d40/1788829891.3403797-TP-0.trace.json.gz",
+    "bytes": 3510256,
+    "sha256": "f08e87e7a2a6177c422b48b16aaaa3462263fb8d8b87d6ee4c2075f241a1d93c"
+  },
+  {
+    "path": "prof/traces/ql1-20260908-ql1-w16-needle-perf-96k-d40/1788830049.174735-TP-0.trace.json.gz",
+    "bytes": 3508468,
+    "sha256": "4ec3ec9464fc1659e356ee1446d4a112f6d87f8cb8454a5d95ccac64dd66cc56"
+  },
+  {
+    "path": "prof/traces/ql1-20260908-ql1-w4-doc-a-32k/1788829308.9165573-TP-0.trace.json.gz",
+    "bytes": 2310047,
+    "sha256": "86718a5bfd12db72fe5e5b2382d444788a6aa13ba3f57b6db657923643ea9b76"
+  },
+  {
+    "path": "prof/traces/ql1-20260908-ql1-w4-doc-a-64k/1788829345.6211321-TP-0.trace.json.gz",
+    "bytes": 2311962,
+    "sha256": "a59a1d656800d3121241caffbd118a530d589c3990047c2d350dd70d2d50ca1c"
+  },
+  {
+    "path": "prof/traces/ql1-20260908-ql1-w4-doc-a-8k/1788829284.0839264-TP-0.trace.json.gz",
+    "bytes": 2306450,
+    "sha256": "a3066bd23a097dd83c02b0b70602e671823df0b64b03070aa4792f4fa3971317"
+  },
+  {
+    "path": "prof/traces/ql1-20260908-ql1-w4-doc-a-96k/1788829399.2223408-TP-0.trace.json.gz",
+    "bytes": 2310004,
+    "sha256": "5923ff2203e8d7c0fbe7906f09ebbe3a16b4ed467f9cc200a1462ccbde8abcdd"
+  },
+  {
+    "path": "prof/traces/ql1-20260908-ql1-w4-doc-b-32k/1788829317.8265867-TP-0.trace.json.gz",
+    "bytes": 2309664,
+    "sha256": "e80a949e6eee6be98dff3783474dfaf55a90ee97ecfa0d8d98b595d9dde88e95"
+  },
+  {
+    "path": "prof/traces/ql1-20260908-ql1-w4-doc-b-64k/1788829357.3070087-TP-0.trace.json.gz",
+    "bytes": 2311009,
+    "sha256": "f617f8163c1aecace2d00eb216218f1b303dd29a79d99271aea16cfebefa951f"
+  },
+  {
+    "path": "prof/traces/ql1-20260908-ql1-w4-doc-b-8k/1788829291.2118194-TP-0.trace.json.gz",
+    "bytes": 2310842,
+    "sha256": "5c5451d17430d803d3d48743a14b4cdd76fc37616a4674521132eea8c82195cc"
+  },
+  {
+    "path": "prof/traces/ql1-20260908-ql1-w4-doc-b-96k/1788829413.6892414-TP-0.trace.json.gz",
+    "bytes": 2311459,
+    "sha256": "96b9b7c3cbd4589156d6a8b56a4b2bb33c4690f0d81826635e89f673d653ef99"
+  },
+  {
+    "path": "prof/traces/ql1-20260908-ql1-w4-needle-perf-32k-d40/1788829326.4411254-TP-0.trace.json.gz",
+    "bytes": 2310604,
+    "sha256": "ecf32536abe83f716d1e991e0777d47ed67dbc91326fb64ddbd18aa8960a6b4f"
+  },
+  {
+    "path": "prof/traces/ql1-20260908-ql1-w4-needle-perf-64k-d40/1788829368.765501-TP-0.trace.json.gz",
+    "bytes": 2311159,
+    "sha256": "686329f70d1d268169db1e2272a7119b3bd264a1b751fa75f3e2e1011b4cc0b1"
+  },
+  {
+    "path": "prof/traces/ql1-20260908-ql1-w4-needle-perf-8k-d40/1788829298.0158422-TP-0.trace.json.gz",
+    "bytes": 2311173,
+    "sha256": "7cf748d078b8277e0eefbc5d5ea3eddfaa52918de3d9a9c993f50a2d1eb763c1"
+  },
+  {
+    "path": "prof/traces/ql1-20260908-ql1-w4-needle-perf-96k-d40/1788829428.1672707-TP-0.trace.json.gz",
+    "bytes": 2310192,
+    "sha256": "ac876b0cd1d5a4ce56772a9090262e866ab05e72b1429bc7f840bd14d5a925e3"
+  }
+]

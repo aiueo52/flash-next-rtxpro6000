@@ -1,0 +1,66 @@
+[
+ {
+  "workload": "code-edit",
+  "repeat": 0,
+  "completion_tokens": 320,
+  "secs": 1.3,
+  "chars": 821,
+  "sha256_16": "ae32508f469f0b63"
+ },
+ {
+  "workload": "code-edit",
+  "repeat": 1,
+  "completion_tokens": 320,
+  "secs": 1.4,
+  "chars": 821,
+  "sha256_16": "ae32508f469f0b63"
+ },
+ {
+  "workload": "prose-en",
+  "repeat": 0,
+  "completion_tokens": 320,
+  "secs": 1.5,
+  "chars": 1470,
+  "sha256_16": "b9a9e9a06dc81f42"
+ },
+ {
+  "workload": "prose-en",
+  "repeat": 1,
+  "completion_tokens": 320,
+  "secs": 1.6,
+  "chars": 1470,
+  "sha256_16": "a9b06de1732e4ba4"
+ },
+ {
+  "workload": "agent-loop",
+  "repeat": 0,
+  "completion_tokens": 320,
+  "secs": 1.1,
+  "chars": 982,
+  "sha256_16": "b814158f0b499708"
+ },
+ {
+  "workload": "agent-loop",
+  "repeat": 1,
+  "completion_tokens": 296,
+  "secs": 1.0,
+  "chars": 1008,
+  "sha256_16": "a25ce299fddbb9a4"
+ },
+ {
+  "workload": "prose-ja",
+  "repeat": 0,
+  "completion_tokens": 320,
+  "secs": 1.8,
+  "chars": 477,
+  "sha256_16": "58e94593158cbbcf"
+ },
+ {
+  "workload": "prose-ja",
+  "repeat": 1,
+  "completion_tokens": 320,
+  "secs": 1.7,
+  "chars": 470,
+  "sha256_16": "f0b8286ac8016753"
+ }
+]

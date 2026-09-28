@@ -1,0 +1,91 @@
+
+=== side-only prefetch rate  (21:13:20)
+  grid    8:    64.24 us / 32 MB =    522 GB/s
+  grid   16:    32.81 us / 32 MB =   1023 GB/s
+  grid   32:    18.12 us / 32 MB =   1852 GB/s
+  grid   64:    10.93 us / 32 MB =   3069 GB/s
+  grid  128:     7.97 us / 32 MB =   4212 GB/s
+  grid  188:     8.17 us / 32 MB =   4105 GB/s
+  grid  376:     7.56 us / 32 MB =   4438 GB/s
+
+=== chain tiny20  (21:13:24)
+  main-only:    34.08 us/round   kernels [('_tiny_kernel', 0.8)]
+  grid    8 prio=None : both    64.07 (+ 30.00 vs main; side alone   64.24) hidden  0.53  touch   59.95 us  chain x{'_tiny_kernel': 1.04}
+  grid    8 prio=prio : both    64.72 (+ 30.65 vs main; side alone   64.24) hidden  0.52  touch   59.81 us  chain x{'_tiny_kernel': 1.04}
+     node prios: [('touch_kernelILi0EEvPKhyP', 0), ('_tiny_kernel', -3), ('_tiny_kernel', -3), ('_tiny_kernel', -3), ('_tiny_kernel', -3), ('_tiny_kernel', -3)]
+  grid    8 prio=attr : both    65.02 (+ 30.94 vs main; side alone   64.24) hidden  0.52  touch   59.92 us  chain x{'_tiny_kernel': 1.06}
+     node prios: [('touch_kernelILi0EEvPKhyP', 0), ('_tiny_kernel', -3), ('_tiny_kernel', -3), ('_tiny_kernel', -3), ('_tiny_kernel', -3), ('_tiny_kernel', -3)]
+  grid   16 prio=None : both    39.16 (+  5.08 vs main; side alone   32.81) hidden  0.84  touch   30.90 us  chain x{'_tiny_kernel': 1.04}
+  grid   16 prio=prio : both    38.18 (+  4.11 vs main; side alone   32.81) hidden  0.88  touch   30.86 us  chain x{'_tiny_kernel': 1.04}
+  grid   16 prio=attr : both    38.89 (+  4.82 vs main; side alone   32.81) hidden  0.85  touch   30.82 us  chain x{'_tiny_kernel': 1.04}
+  grid   32 prio=None : both    37.57 (+  3.49 vs main; side alone   18.12) hidden  0.81  touch   16.97 us  chain x{'_tiny_kernel': 1.0}
+  grid   32 prio=prio : both    38.08 (+  4.00 vs main; side alone   18.12) hidden  0.78  touch   16.96 us  chain x{'_tiny_kernel': 1.0}
+  grid   32 prio=attr : both    37.12 (+  3.05 vs main; side alone   18.12) hidden  0.83  touch   16.87 us  chain x{'_tiny_kernel': 1.0}
+  grid   64 prio=None : both    37.64 (+  3.56 vs main; side alone   10.93) hidden  0.67  touch   10.01 us  chain x{'_tiny_kernel': 1.0}
+  grid   64 prio=prio : both    38.15 (+  4.08 vs main; side alone   10.93) hidden  0.63  touch    9.89 us  chain x{'_tiny_kernel': 1.0}
+  grid   64 prio=attr : both    37.78 (+  3.70 vs main; side alone   10.93) hidden  0.66  touch   10.01 us  chain x{'_tiny_kernel': 1.0}
+  grid  128 prio=None : both    38.11 (+  4.03 vs main; side alone    7.97) hidden  0.49  touch    7.42 us  chain x{'_tiny_kernel': 1.0}
+  grid  128 prio=prio : both    38.16 (+  4.08 vs main; side alone    7.97) hidden  0.49  touch    7.50 us  chain x{'_tiny_kernel': 1.0}
+  grid  128 prio=attr : both    37.98 (+  3.90 vs main; side alone    7.97) hidden  0.51  touch    7.50 us  chain x{'_tiny_kernel': 1.0}
+  grid  188 prio=None : both    39.02 (+  4.95 vs main; side alone    8.17) hidden  0.40  touch    7.54 us  chain x{'_tiny_kernel': 1.0}
+  grid  188 prio=prio : both    38.24 (+  4.16 vs main; side alone    8.17) hidden  0.49  touch    7.54 us  chain x{'_tiny_kernel': 1.0}
+  grid  188 prio=attr : both    38.53 (+  4.45 vs main; side alone    8.17) hidden  0.46  touch    7.60 us  chain x{'_tiny_kernel': 1.0}
+  grid  376 prio=None : both    39.35 (+  5.28 vs main; side alone    7.56) hidden  0.30  touch    7.23 us  chain x{'_tiny_kernel': 1.0}
+  grid  376 prio=prio : both    39.91 (+  5.83 vs main; side alone    7.56) hidden  0.23  touch    7.22 us  chain x{'_tiny_kernel': 1.0}
+  grid  376 prio=attr : both    39.62 (+  5.54 vs main; side alone    7.56) hidden  0.27  touch    7.35 us  chain x{'_tiny_kernel': 1.0}
+
+=== chain tiny160  (21:13:42)
+  main-only:    34.22 us/round   kernels [('_tiny_kernel', 0.8)]
+  grid    8 prio=None : both    65.29 (+ 31.06 vs main; side alone   64.24) hidden  0.52  touch   60.06 us  chain x{'_tiny_kernel': 1.05}
+  grid    8 prio=prio : both    64.17 (+ 29.95 vs main; side alone   64.24) hidden  0.53  touch   59.90 us  chain x{'_tiny_kernel': 1.08}
+     node prios: [('touch_kernelILi0EEvPKhyP', 0), ('_tiny_kernel', -3), ('_tiny_kernel', -3), ('_tiny_kernel', -3), ('_tiny_kernel', -3), ('_tiny_kernel', -3)]
+  grid   16 prio=None : both    39.11 (+  4.89 vs main; side alone   32.81) hidden  0.85  touch   31.21 us  chain x{'_tiny_kernel': 1.04}
+  grid   16 prio=prio : both    40.21 (+  5.99 vs main; side alone   32.81) hidden  0.82  touch   30.98 us  chain x{'_tiny_kernel': 1.04}
+  grid   32 prio=None : both    38.24 (+  4.02 vs main; side alone   18.12) hidden  0.78  touch   17.06 us  chain x{'_tiny_kernel': 1.0}
+  grid   32 prio=prio : both    38.29 (+  4.07 vs main; side alone   18.12) hidden  0.78  touch   17.06 us  chain x{'_tiny_kernel': 1.0}
+  grid   64 prio=None : both    38.43 (+  4.20 vs main; side alone   10.93) hidden  0.62  touch   10.04 us  chain x{'_tiny_kernel': 1.0}
+  grid   64 prio=prio : both    38.10 (+  3.88 vs main; side alone   10.93) hidden  0.65  touch   10.16 us  chain x{'_tiny_kernel': 1.0}
+  grid  128 prio=None : both    39.18 (+  4.96 vs main; side alone    7.97) hidden  0.38  touch    7.78 us  chain x{'_tiny_kernel': 1.0}
+  grid  128 prio=prio : both    38.14 (+  3.91 vs main; side alone    7.97) hidden  0.51  touch    7.90 us  chain x{'_tiny_kernel': 1.0}
+  grid  188 prio=None : both    39.05 (+  4.83 vs main; side alone    8.17) hidden  0.41  touch    7.79 us  chain x{'_tiny_kernel': 1.0}
+  grid  188 prio=prio : both    39.33 (+  5.10 vs main; side alone    8.17) hidden  0.38  touch    8.06 us  chain x{'_tiny_kernel': 1.0}
+  grid  376 prio=None : both    40.23 (+  6.01 vs main; side alone    7.56) hidden  0.21  touch    7.54 us  chain x{'_tiny_kernel': 1.0}
+  grid  376 prio=prio : both    39.46 (+  5.23 vs main; side alone    7.56) hidden  0.31  touch    7.50 us  chain x{'_tiny_kernel': 1.0}
+
+=== chain gemv4  (21:13:54)
+  main-only:   122.52 us/round   kernels [('_w8a16_gemv_kernel', 28.88)]
+  grid    8 prio=None : both   156.93 (+ 34.41 vs main; side alone   64.24) hidden  0.46  touch  148.43 us  chain x{'_w8a16_gemv_kernel': 1.073}
+  grid    8 prio=prio : both   155.72 (+ 33.20 vs main; side alone   64.24) hidden  0.48  touch  147.69 us  chain x{'_w8a16_gemv_kernel': 1.077}
+     node prios: [('touch_kernelILi0EEvPKhyP', 0), ('_w8a16_gemv_kernel', -3), ('_w8a16_gemv_kernel', -3), ('_w8a16_gemv_kernel', -3), ('_w8a16_gemv_kernel', -3), ('touch_kernelILi0EEvPKhyP', 0)]
+  grid   16 prio=None : both   140.79 (+ 18.27 vs main; side alone   32.81) hidden  0.44  touch  103.50 us  chain x{'_w8a16_gemv_kernel': 1.181}
+  grid   16 prio=prio : both   140.89 (+ 18.37 vs main; side alone   32.81) hidden  0.44  touch  102.70 us  chain x{'_w8a16_gemv_kernel': 1.183}
+  grid   32 prio=None : both   141.83 (+ 19.31 vs main; side alone   18.12) hidden -0.07  touch   65.60 us  chain x{'_w8a16_gemv_kernel': 1.106}
+  grid   32 prio=prio : both   139.21 (+ 16.69 vs main; side alone   18.12) hidden  0.08  touch   65.71 us  chain x{'_w8a16_gemv_kernel': 1.11}
+  grid   64 prio=None : both   155.79 (+ 33.27 vs main; side alone   10.93) hidden -2.04  touch   49.87 us  chain x{'_w8a16_gemv_kernel': 0.993}
+  grid   64 prio=prio : both   154.10 (+ 31.58 vs main; side alone   10.93) hidden -1.89  touch   52.39 us  chain x{'_w8a16_gemv_kernel': 0.996}
+  grid  128 prio=None : both   153.68 (+ 31.16 vs main; side alone    7.97) hidden -2.91  touch   35.29 us  chain x{'_w8a16_gemv_kernel': 0.997}
+  grid  128 prio=prio : both   148.12 (+ 25.60 vs main; side alone    7.97) hidden -2.21  touch   40.55 us  chain x{'_w8a16_gemv_kernel': 0.998}
+  grid  188 prio=None : both   150.40 (+ 27.88 vs main; side alone    8.17) hidden -2.41  touch   28.25 us  chain x{'_w8a16_gemv_kernel': 0.994}
+  grid  188 prio=prio : both   144.72 (+ 22.20 vs main; side alone    8.17) hidden -1.72  touch   34.01 us  chain x{'_w8a16_gemv_kernel': 0.997}
+  grid  376 prio=None : both   147.13 (+ 24.61 vs main; side alone    7.56) hidden -2.25  touch   26.70 us  chain x{'_w8a16_gemv_kernel': 0.997}
+  grid  376 prio=prio : both   144.94 (+ 22.42 vs main; side alone    7.56) hidden -1.97  touch   31.32 us  chain x{'_w8a16_gemv_kernel': 1.002}
+
+=== chain gemm77  (21:14:06)
+  main-only:    53.67 us/round   kernels [('touch_kernel<0>', 50.61)]
+  grid    8 prio=None : both   123.77 (+ 70.10 vs main; side alone   64.24) hidden -0.09  touch   81.69 us  chain x{'touch_kernel<0>': 1.614}
+  grid    8 prio=prio : both   123.89 (+ 70.22 vs main; side alone   64.24) hidden -0.09  touch   84.37 us  chain x{'touch_kernel<0>': 1.667}
+     node prios: [('touch_kernelILi0EEvPKhyP', 0), ('touch_kernelILi0EEvPKhyP', -3), ('touch_kernelILi0EEvPKhyP', 0), ('touch_kernelILi0EEvPKhyP', -3), ('touch_kernelILi0EEvPKhyP', 0), ('touch_kernelILi0EEvPKhyP', -3)]
+  grid   16 prio=None : both    89.56 (+ 35.89 vs main; side alone   32.81) hidden -0.09  touch   68.82 us  chain x{'touch_kernel<0>': 1.36}
+  grid   16 prio=prio : both    89.62 (+ 35.95 vs main; side alone   32.81) hidden -0.10  touch   69.11 us  chain x{'touch_kernel<0>': 1.366}
+  grid   32 prio=None : both    75.36 (+ 21.69 vs main; side alone   18.12) hidden -0.20  touch   63.58 us  chain x{'touch_kernel<0>': 1.256}
+  grid   32 prio=prio : both    76.51 (+ 22.84 vs main; side alone   18.12) hidden -0.26  touch   63.87 us  chain x{'touch_kernel<0>': 1.262}
+  grid   64 prio=None : both    75.79 (+ 22.12 vs main; side alone   10.93) hidden -1.02  touch   66.56 us  chain x{'touch_kernel<0>': 1.315}
+  grid   64 prio=prio : both    75.81 (+ 22.14 vs main; side alone   10.93) hidden -1.02  touch   65.33 us  chain x{'touch_kernel<0>': 1.291}
+  grid  128 prio=None : both    74.37 (+ 20.70 vs main; side alone    7.97) hidden -1.60  touch   70.79 us  chain x{'touch_kernel<0>': 1.399}
+  grid  128 prio=prio : both    75.43 (+ 21.76 vs main; side alone    7.97) hidden -1.73  touch   70.46 us  chain x{'touch_kernel<0>': 1.392}
+  grid  188 prio=None : both    75.48 (+ 21.81 vs main; side alone    8.17) hidden -1.67  touch   69.79 us  chain x{'touch_kernel<0>': 1.379}
+  grid  188 prio=prio : both    76.12 (+ 22.45 vs main; side alone    8.17) hidden -1.75  touch   70.14 us  chain x{'touch_kernel<0>': 1.386}
+  grid  376 prio=None : both    76.33 (+ 22.66 vs main; side alone    7.56) hidden -2.00  touch   67.35 us  chain x{'touch_kernel<0>': 1.331}
+  grid  376 prio=prio : both    75.78 (+ 22.11 vs main; side alone    7.56) hidden -1.92  touch   68.61 us  chain x{'touch_kernel<0>': 1.356}
+
+[wrote] $HOME/tools/flash-next-bench/bench/l2_prefetch/results/overlap.json

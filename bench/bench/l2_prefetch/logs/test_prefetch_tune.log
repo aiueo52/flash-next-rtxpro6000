@@ -1,0 +1,19 @@
+
+=== touch-table kernel over 55 MB, cold (after 320 MB flush)  (23:09:03)
+  BLOCK  1024 warps 4 grid  32:   59.09 us =   976 GB/s
+  BLOCK  1024 warps 4 grid  64:   38.98 us =  1480 GB/s
+  BLOCK  1024 warps 8 grid  32:   56.86 us =  1014 GB/s
+  BLOCK  1024 warps 8 grid  64:   38.32 us =  1505 GB/s
+  BLOCK  2048 warps 4 grid  32:   58.98 us =   978 GB/s
+  BLOCK  2048 warps 4 grid  64:   39.06 us =  1477 GB/s
+  BLOCK  2048 warps 8 grid  32:   57.95 us =   995 GB/s
+  BLOCK  2048 warps 8 grid  64:   38.03 us =  1516 GB/s
+  BLOCK  4096 warps 4 grid  32:   57.50 us =  1003 GB/s
+  BLOCK  4096 warps 4 grid  64:   39.78 us =  1450 GB/s
+  BLOCK  4096 warps 8 grid  32:   56.40 us =  1023 GB/s
+  BLOCK  4096 warps 8 grid  64:   38.54 us =  1496 GB/s
+  BLOCK  8192 warps 4 grid  32:   57.89 us =   996 GB/s
+  BLOCK  8192 warps 4 grid  64:   42.32 us =  1363 GB/s
+  BLOCK  8192 warps 8 grid  32:   56.72 us =  1017 GB/s
+  BLOCK  8192 warps 8 grid  64:   40.78 us =  1414 GB/s
+best: [(38.0324999999998, 2048, 8, 64), (38.320000000000164, 1024, 8, 64), (38.54399999999987, 4096, 8, 64)]

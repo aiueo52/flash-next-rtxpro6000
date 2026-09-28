@@ -1,0 +1,357 @@
+--- a/flashinfer/data/csrc/fused_moe/cutlass_backend/cutlass_fused_moe_kernels.cuh	2026-09-06 00:00:19.599897599 +0900
++++ b/flashinfer/data/csrc/fused_moe/cutlass_backend/cutlass_fused_moe_kernels.cuh	2026-09-06 00:00:19.583341353 +0900
+@@ -1466,8 +1466,12 @@
+ // Restricted to BLOCK_SIZE = 32 (num_tokens <= 32, i.e. decode/verify) and LOG2_NUM_EXPERTS = 10
+ // (num_experts_per_node + 1 < 1024) to keep the instantiation count to one per top-k value per
+ // runner type.  Everything else falls back to the two separate launches.
+-template <class T, class WeightType, class OutputType, class ScaleBiasType, int BLOCK_SIZE,
+-          int EXPERTS_PER_TOKEN, int LOG2_NUM_EXPERTS>
++// G2-2: the maximum number of 8-element chunks one thread stages per row.  hidden_size /
++// (8 * BLOCK_SIZE) must be <= this; the host gate refuses the fusion otherwise.
++constexpr int G2_EXPAND_MAX_CHUNKS = 16;
++
++template <class T, class WeightType, class OutputType, class ScaleBiasType, class InputAct,
++          int BLOCK_SIZE, int EXPERTS_PER_TOKEN, int LOG2_NUM_EXPERTS, bool FUSE_EXPAND>
+ __global__ void fusedBuildExpertMapsSortFirstTokenAndStridesKernel(
+     int const* const token_selected_experts, int* const permuted_row_to_unpermuted_row,
+     int* const unpermuted_row_to_permuted_row, int64_t* const expert_first_token_offset,
+@@ -1480,7 +1484,12 @@
+     TmaWarpSpecializedGroupedGemmInput::ElementSF const* fp4_act_flat1,
+     TmaWarpSpecializedGroupedGemmInput::ElementSF const* fp4_act_flat2, QuantParams quant_params,
+     ScaleBiasType const* bias1, ScaleBiasType const* bias2, OutputType* gemm1_output,
+-    OutputType* gemm2_output, float const* router_scales) {
++    OutputType* gemm2_output, float const* router_scales, int stride_blocks,
++    InputAct const* expand_input, T* expand_output, float const* expand_unpermuted_scales,
++    float* expand_permuted_scales,
++    TmaWarpSpecializedGroupedGemmInput::ElementSF* expand_act_sf_flat,
++    float const* expand_act_global_scale, bool expand_use_per_expert_act_scale,
++    int64_t expand_hidden_size) {
+   using BlockRadixRank = FusedPrologueRadixRank<BLOCK_SIZE, LOG2_NUM_EXPERTS>;
+   static_assert(BlockRadixRank::BINS_TRACKED_PER_THREAD * BLOCK_SIZE >= (1 << LOG2_NUM_EXPERTS));
+   assert(num_experts_per_node < (1 << LOG2_NUM_EXPERTS));
+@@ -1490,6 +1499,11 @@
+   auto& sort_temp = *reinterpret_cast<typename BlockRadixRank::TempStorage*>(temp_storage);
+   int* const shared_offsets =
+       reinterpret_cast<int*>(temp_storage + sizeof(typename BlockRadixRank::TempStorage));
++  // G2-2: the inverse permutation and the per-permuted-row expert id, published block-locally so
++  // the row expansion below needs neither a global round trip nor the binary search that
++  // expandInputRowsKernel pays.  Every block re-runs the rank, so no grid-wide barrier is needed.
++  int* const shared_inv_row = shared_offsets + (num_experts_per_node + 1);
++  int* const shared_inv_expert = shared_inv_row + BLOCK_SIZE * EXPERTS_PER_TOKEN;
+ 
+   int const token = threadIdx.x;
+   bool const is_valid_token = token < num_tokens;
+@@ -1537,10 +1551,21 @@
+       }
+     }
+   }
++
++  if constexpr (FUSE_EXPAND) {
++    // RankKeys gives BLOCK_SIZE * EXPERTS_PER_TOKEN distinct ranks, so these writes never collide
++    // (invalid tokens rank past num_valid_rows and are simply never read back).
++#pragma unroll
++    for (int i = 0; i < EXPERTS_PER_TOKEN; i++) {
++      int const permuted_row = local_token_permuted_indices[i];
++      shared_inv_row[permuted_row] = i * static_cast<int>(num_tokens) + token;
++      shared_inv_expert[permuted_row] = local_token_selected_experts[i];
++    }
++  }
+   __syncthreads();
+ 
+   int const expert = blockIdx.x * BLOCK_SIZE + threadIdx.x;
+-  if (expert < num_experts_per_node) {
++  if (blockIdx.x < static_cast<unsigned>(stride_blocks) && expert < num_experts_per_node) {
+     computeStridesTmaWarpSpecializedForExpert<T, WeightType, OutputType, ScaleBiasType>(
+         expert, shared_offsets[expert], shared_offsets[expert + 1], layout_info1, layout_info2,
+         gemm1_n, gemm1_k, gemm2_n, gemm2_k, gemm1_in, gemm2_in, weights1, weights2,
+@@ -1548,6 +1573,88 @@
+         bias2, gemm1_output, gemm2_output, router_scales, permuted_row_to_unpermuted_row);
+   }
+ 
++#ifdef ENABLE_FP4
++  if constexpr (FUSE_EXPAND && std::is_same_v<T, __nv_fp4_e2m1> &&
++                (std::is_same_v<InputAct, __nv_bfloat16> || std::is_same_v<InputAct, half>)) {
++    // ---- G2-2: expandInputRowsKernel, folded in -------------------------------------------
++    // Blocks [stride_blocks, gridDim.x) own the rows; the descriptor blocks above are disjoint,
++    // so the two phases run concurrently instead of one launch after the other.
++    constexpr int64_t ELEM_PER_THREAD = CVT_ELTS_PER_THREAD;  // 8
++    constexpr int VecSize = TmaWarpSpecializedGroupedGemmInput::NVFP4BlockScaleVectorSize;
++    constexpr int64_t min_k_dim_alignment =
++        TmaWarpSpecializedGroupedGemmInput::MinKDimAlignmentNVFP4;
++    using DataElem = cutlass::Array<InputAct, ELEM_PER_THREAD>;
++    using OutputElem = uint32_t;
++
++    int const row_slot = static_cast<int>(blockIdx.x) - stride_blocks;
++    int const row_blocks = static_cast<int>(gridDim.x) - stride_blocks;
++    if (row_slot >= 0 && row_blocks > 0) {
++      int64_t const padded_hidden_size =
++          TmaWarpSpecializedGroupedGemmInput::alignToSfDim(expand_hidden_size, min_k_dim_alignment);
++      int64_t const num_elems_in_col = expand_hidden_size / ELEM_PER_THREAD;
++      int const trips = static_cast<int>(num_elems_in_col) / BLOCK_SIZE;  // exact, host-gated
++      int64_t const num_valid_rows = shared_offsets[num_experts_per_node];
++
++      for (int64_t permuted_row = row_slot; permuted_row < num_valid_rows;
++           permuted_row += row_blocks) {
++        int const unpermuted_row = shared_inv_row[permuted_row];
++        int const row_expert = shared_inv_expert[permuted_row];
++        int64_t const num_tokens_before_expert = shared_offsets[row_expert];
++        float const global_scale_val =
++            expand_act_global_scale
++                ? expand_act_global_scale[expand_use_per_expert_act_scale ? row_expert : 0]
++                : 1.0f;
++        int64_t const source_row = unpermuted_row % num_tokens;
++        int64_t const source_k_rank = unpermuted_row / num_tokens;
++
++        auto const* source_row_ptr =
++            reinterpret_cast<DataElem const*>(expand_input + source_row * expand_hidden_size);
++        auto* dest_row_ptr = reinterpret_cast<OutputElem*>(expand_output) +
++                             permuted_row * num_elems_in_col;
++
++        // Stage the whole row in registers first: with one warp per row the loads must all be in
++        // flight at once, or the 10 dependent round trips cost more than the launch we deleted.
++        DataElem staged[G2_EXPAND_MAX_CHUNKS];
++#pragma unroll
++        for (int chunk = 0; chunk < G2_EXPAND_MAX_CHUNKS; chunk++) {
++          if (chunk < trips) {
++            staged[chunk] = source_row_ptr[threadIdx.x + chunk * BLOCK_SIZE];
++          }
++        }
++#pragma unroll
++        for (int chunk = 0; chunk < G2_EXPAND_MAX_CHUNKS; chunk++) {
++          if (chunk < trips) {
++            int64_t const elem_index = threadIdx.x + chunk * BLOCK_SIZE;
++            auto res = quantizePackedFPXValue<InputAct, T, DataElem, VecSize, false,
++                                              std::false_type>(
++                staged[chunk], global_scale_val, num_tokens_before_expert, row_expert, permuted_row,
++                elem_index, padded_hidden_size, expand_act_sf_flat,
++                TmaWarpSpecializedGroupedGemmInput::FpXBlockScalingType::NVFP4);
++            static_assert(sizeof(res) == sizeof(*dest_row_ptr),
++                          "Quantized value must be the same size as the output");
++            dest_row_ptr[elem_index] = res;
++          }
++        }
++
++        // K-dim SF padding, exactly as expandInputRowsKernel does it (a no-op when
++        // hidden_size % 64 == 0).
++        for (int64_t elem_index = expand_hidden_size / VecSize + threadIdx.x;
++             elem_index < padded_hidden_size / VecSize; elem_index += BLOCK_SIZE) {
++          writeSF<VecSize, VecSize>(num_tokens_before_expert, row_expert, /*source_row*/ -1,
++                                    permuted_row, elem_index, padded_hidden_size,
++                                    expand_act_sf_flat, /*input_sf*/ nullptr);
++        }
++
++        if (expand_permuted_scales && threadIdx.x == 0) {
++          int64_t const source_k_idx = source_row * EXPERTS_PER_TOKEN + source_k_rank;
++          expand_permuted_scales[permuted_row] =
++              expand_unpermuted_scales ? expand_unpermuted_scales[source_k_idx] : 1.0f;
++        }
++      }
++    }
++  }
++#endif
++
+ #if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
+   cudaTriggerProgrammaticLaunchCompletion();
+ #endif
+@@ -1563,6 +1670,15 @@
+   return enabled;
+ }
+ 
++// G2-2: FLASHINFER_MOE_FOLD_EXPAND=0 keeps expandInputRowsKernel as its own launch.
++inline bool foldExpandEnabled() {
++  static bool const enabled = [] {
++    char const* v = std::getenv("FLASHINFER_MOE_FOLD_EXPAND");
++    return !(v && v[0] == '0' && v[1] == '\0');
++  }();
++  return enabled;
++}
++
+ // FLASHINFER_MOE_FUSED_STRIDES=0 keeps computeStridesTmaWarpSpecialized as its own launch.
+ inline bool fusedStridesEnabled() {
+   static bool const enabled = [] {
+@@ -1572,7 +1688,8 @@
+   return enabled;
+ }
+ 
+-template <class T, class WeightType, class OutputType, class ScaleBiasType, int EXPERTS_PER_TOKEN>
++template <class T, class WeightType, class OutputType, class ScaleBiasType, class InputAct,
++          int EXPERTS_PER_TOKEN, bool FUSE_EXPAND>
+ bool launchFusedPrologueAndStrides(
+     FusedPrologueRequest& req, TmaWarpSpecializedGroupedGemmInput layout_info1,
+     TmaWarpSpecializedGroupedGemmInput layout_info2, int const num_experts_per_node,
+@@ -1587,8 +1704,10 @@
+   constexpr int LOG2_NUM_EXPERTS = 10;
+   using BlockRadixRank = FusedPrologueRadixRank<BLOCK_SIZE, LOG2_NUM_EXPERTS>;
+ 
+-  size_t const shared_size = sizeof(typename BlockRadixRank::TempStorage) +
+-                             sizeof(int) * static_cast<size_t>(num_experts_per_node + 1);
++  size_t const shared_size =
++      sizeof(typename BlockRadixRank::TempStorage) +
++      sizeof(int) * static_cast<size_t>(num_experts_per_node + 1) +
++      (FUSE_EXPAND ? 2 * sizeof(int) * size_t(BLOCK_SIZE) * size_t(EXPERTS_PER_TOKEN) : 0);
+ 
+   int device = 0;
+   int max_smem_per_block = 0;
+@@ -1600,12 +1719,17 @@
+   }
+ 
+   auto kernel = &fusedBuildExpertMapsSortFirstTokenAndStridesKernel<
+-      T, WeightType, OutputType, ScaleBiasType, BLOCK_SIZE, EXPERTS_PER_TOKEN, LOG2_NUM_EXPERTS>;
++      T, WeightType, OutputType, ScaleBiasType, InputAct, BLOCK_SIZE, EXPERTS_PER_TOKEN,
++      LOG2_NUM_EXPERTS, FUSE_EXPAND>;
+   check_cuda_error(
+       cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, shared_size));
+ 
++  int const stride_blocks = (num_experts_per_node + BLOCK_SIZE - 1) / BLOCK_SIZE;
++  int const row_blocks =
++      FUSE_EXPAND ? static_cast<int>(req.num_tokens * req.experts_per_token) : 0;
++
+   cudaLaunchConfig_t config;
+-  config.gridDim = (num_experts_per_node + BLOCK_SIZE - 1) / BLOCK_SIZE;
++  config.gridDim = stride_blocks + row_blocks;
+   config.blockDim = BLOCK_SIZE;
+   config.dynamicSmemBytes = shared_size;
+   config.stream = stream;
+@@ -1621,11 +1745,14 @@
+       req.start_expert, req.end_expert, num_experts_per_node, layout_info1, layout_info2, gemm1_n,
+       gemm1_k, gemm2_n, gemm2_k, gemm1_in, gemm2_in, weights1, weights2, alpha_scale_flat1,
+       alpha_scale_flat2, fp4_act_flat1, fp4_act_flat2, quant_params, bias1, bias2, gemm1_output,
+-      gemm2_output, router_scales));
++      gemm2_output, router_scales, stride_blocks,
++      reinterpret_cast<InputAct const*>(req.expand_input), reinterpret_cast<T*>(req.expand_output),
++      req.expand_unpermuted_scales, req.expand_permuted_scales, req.expand_act_sf_flat,
++      req.expand_act_global_scale, req.expand_use_per_expert_act_scale, req.expand_hidden_size));
+   return true;
+ }
+ 
+-template <class T, class WeightType, class OutputType, class ScaleBiasType>
++template <class T, class WeightType, class OutputType, class ScaleBiasType, class InputAct>
+ bool tryFusedPrologueAndStrides(
+     FusedPrologueRequest& req, TmaWarpSpecializedGroupedGemmInput const& layout_info1,
+     TmaWarpSpecializedGroupedGemmInput const& layout_info2, int const num_experts_per_node,
+@@ -1643,9 +1770,44 @@
+       num_experts_per_node != (req.end_expert - req.start_expert)) {
+     return false;
+   }
++
++  // G2-2 gate.  Everything not covered here keeps the standalone expandInputRowsKernel launch.
++  constexpr int BLOCK_SIZE = 32;
++  bool fuse_expand = req.expand_requested && foldExpandEnabled();
++#ifdef ENABLE_FP4
++  if (fuse_expand) {
++    constexpr bool kTypesOk =
++        std::is_same_v<T, __nv_fp4_e2m1> &&
++        (std::is_same_v<InputAct, __nv_bfloat16> || std::is_same_v<InputAct, half>);
++    int64_t const elems_per_row = req.expand_hidden_size / CVT_ELTS_PER_THREAD;
++    fuse_expand =
++        kTypesOk && req.expand_input != nullptr && req.expand_output != nullptr &&
++        req.expand_act_sf_flat != nullptr && req.expand_hidden_size > 0 &&
++        req.expand_hidden_size % (CVT_ELTS_PER_THREAD * BLOCK_SIZE) == 0 &&
++        elems_per_row / BLOCK_SIZE <= G2_EXPAND_MAX_CHUNKS && req.num_tokens > 0 &&
++        req.experts_per_token > 0 &&
++        // the kernel hard-codes the default quantiser tags to keep one instantiation
++        !tensorrt_llm::common::getEnvNVFP4Use4Over6() &&
++        !tensorrt_llm::common::getEnvDisableFP4QuantFastMath();
++  }
++#else
++  fuse_expand = false;
++#endif
++  req.expand_fused = false;
++
+   auto go = [&](auto tag) {
+-    return launchFusedPrologueAndStrides<T, WeightType, OutputType, ScaleBiasType,
+-                                         decltype(tag)::value>(
++    if (fuse_expand) {
++      bool const ok = launchFusedPrologueAndStrides<T, WeightType, OutputType, ScaleBiasType,
++                                                    InputAct, decltype(tag)::value, true>(
++          req, layout_info1, layout_info2, num_experts_per_node, gemm1_n, gemm1_k, gemm2_n, gemm2_k,
++          gemm1_in, gemm2_in, weights1, weights2, alpha_scale_flat1, alpha_scale_flat2,
++          fp4_act_flat1, fp4_act_flat2, quant_params, bias1, bias2, gemm1_output, gemm2_output,
++          router_scales, enable_pdl, stream);
++      req.expand_fused = ok;
++      return ok;
++    }
++    return launchFusedPrologueAndStrides<T, WeightType, OutputType, ScaleBiasType, InputAct,
++                                         decltype(tag)::value, false>(
+         req, layout_info1, layout_info2, num_experts_per_node, gemm1_n, gemm1_k, gemm2_n, gemm2_k,
+         gemm1_in, gemm2_in, weights1, weights2, alpha_scale_flat1, alpha_scale_flat2, fp4_act_flat1,
+         fp4_act_flat2, quant_params, bias1, bias2, gemm1_output, gemm2_output, router_scales,
+@@ -4162,6 +4324,22 @@
+       fused_prologue_req.experts_per_token = experts_per_token;
+       fused_prologue_req.start_expert = start_expert;
+       fused_prologue_req.end_expert = end_expert;
++      // G2-2: ask for the row expansion to be folded into the same launch.  The gate lives in
++      // tryFusedPrologueAndStrides; `expand_fused` below says whether it took the offer.
++      if (foldExpandEnabled() && use_fp4 && !use_awq && !use_w4afp8 && !use_lora &&
++          input_sf == nullptr && !use_wfp4afp8 && !use_mxfp8_act_scaling &&
++          quant_params.fp4.fc1.weight_block_scale && fc1_fp4_act_scale_ != nullptr) {
++        fused_prologue_req.expand_requested = true;
++        fused_prologue_req.expand_input = static_cast<void const*>(input_activations);
++        fused_prologue_req.expand_output = static_cast<void*>(permuted_data_);
++        fused_prologue_req.expand_unpermuted_scales = token_topk_unpermuted_scales;
++        fused_prologue_req.expand_permuted_scales = permuted_token_final_scales_;
++        fused_prologue_req.expand_act_sf_flat = fc1_fp4_act_scale_;
++        fused_prologue_req.expand_act_global_scale = quant_params.fp4.fc1.act_global_scale;
++        fused_prologue_req.expand_use_per_expert_act_scale =
++            use_fp4 ? quant_params.fp4.fc1.use_per_expert_act_scale : false;
++        fused_prologue_req.expand_hidden_size = hidden_size;
++      }
+       std::tie(a3_gemm1_input, a3_gemm2_input) = setupTmaWarpSpecializedInputs(
+           num_rows, expanded_num_rows, fc1_activation_type, hidden_size, unpadded_hidden_size,
+           inter_size, num_experts_per_node, input_activations_void, input_sf, final_output,
+@@ -4212,13 +4390,16 @@
+     bool use_per_expert_act_scale = use_fp4 ? quant_params.fp4.fc1.use_per_expert_act_scale : false;
+     T* gemm1_input_expand =
+         use_w4afp8 ? reinterpret_cast<T*>(smoothed_act_) : reinterpret_cast<T*>(permuted_data_);
+-    expandInputRowsKernelLauncher(
+-        input_activations, gemm1_input_expand, token_topk_unpermuted_scales,
+-        permuted_token_final_scales_, permuted_row_to_unpermuted_row_, num_rows, hidden_size,
+-        experts_per_token, num_experts_per_node, quant_params, use_per_expert_act_scale,
+-        expert_first_token_offset_, fc1_fp4_act_scale_, input_sf, swizzled_input_sf,
+-        (use_w4afp8 && !use_fp8_input) ? quant_params.groupwise.fc1.act_scales : nullptr,
+-        enable_pdl, stream);
++    // G2-2: skipped when the fused prologue already permuted and re-quantised the rows.
++    if (!fused_prologue_req.expand_fused) {
++      expandInputRowsKernelLauncher(
++          input_activations, gemm1_input_expand, token_topk_unpermuted_scales,
++          permuted_token_final_scales_, permuted_row_to_unpermuted_row_, num_rows, hidden_size,
++          experts_per_token, num_experts_per_node, quant_params, use_per_expert_act_scale,
++          expert_first_token_offset_, fc1_fp4_act_scale_, input_sf, swizzled_input_sf,
++          (use_w4afp8 && !use_fp8_input) ? quant_params.groupwise.fc1.act_scales : nullptr,
++          enable_pdl, stream);
++    }
+     auto const* gemm1_input = gemm1_input_expand;
+ 
+     sync_check_cuda_error(stream);
+@@ -4373,7 +4554,7 @@
+   // this function again in the usual place.
+   if (fused_prologue != nullptr) {
+     fused_prologue->succeeded =
+-        tryFusedPrologueAndStrides<T, WeightType, OutputType, ScaleBiasType>(
++        tryFusedPrologueAndStrides<T, WeightType, OutputType, ScaleBiasType, InputType>(
+             *fused_prologue, layout_info1, layout_info2, num_experts_per_node, gemm1_n, gemm1_k,
+             gemm2_n, gemm2_k, gemm1_in, gemm2_in, weights1, weights2, alpha_scale_flat1,
+             alpha_scale_flat2, fp4_act_flat1, fp4_act_flat2, quant_params, bias1, bias2,
+--- a/flashinfer/data/csrc/nv_internal/tensorrt_llm/kernels/cutlass_kernels/include/moe_kernels.h	2026-09-06 00:00:19.600147494 +0900
++++ b/flashinfer/data/csrc/nv_internal/tensorrt_llm/kernels/cutlass_kernels/include/moe_kernels.h	2026-09-06 00:00:19.583918930 +0900
+@@ -457,6 +457,20 @@
+   int start_expert = 0;
+   int end_expert = 0;
+   bool succeeded = false;  // set by computeStridesTmaWarpSpecialized
++
++  // G2-2: fold expandInputRowsKernel (the permute + NVFP4 re-quantisation of the routed rows)
++  // into the same launch.  The host fills these in and then checks `expand_fused`; when that is
++  // false the standalone expandInputRowsKernel launch must still be made.
++  bool expand_requested = false;
++  bool expand_fused = false;
++  void const* expand_input = nullptr;   // InputType const*, [num_tokens, hidden_size]
++  void* expand_output = nullptr;        // T*, [num_tokens * k, hidden_size]
++  float const* expand_unpermuted_scales = nullptr;
++  float* expand_permuted_scales = nullptr;
++  TmaWarpSpecializedGroupedGemmInput::ElementSF* expand_act_sf_flat = nullptr;
++  float const* expand_act_global_scale = nullptr;
++  bool expand_use_per_expert_act_scale = false;
++  int64_t expand_hidden_size = 0;
+ };
+ 
+ class CutlassMoeFCRunnerInterface {

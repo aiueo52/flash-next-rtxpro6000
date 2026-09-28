@@ -1,0 +1,115 @@
+{
+  "domain": "prose-ja",
+  "version": "v1",
+  "provenance": "Original synthetic fixtures authored for BN1 on 2026-09-08; build_sets.py. No training parent sampled. Domain style only follows legacy workloads.",
+  "token_count_method": "tokenizer.json encode(strip(prompt), add_special_tokens=False); excludes server chat template",
+  "tokenizer_path": "/home/user/models/RadixArk/Qwen3.8-Flash-Next-NVFP4-mtpft5/tokenizer.json",
+  "tokenizer_sha256": "0997f410c57a1f4e53b09e4be8f4a172d90edd9564368fb0847030937229b9f3",
+  "exclusion_audit": "../../sets/provenance-audit.json",
+  "prompts": [
+    {
+      "id": "bn1-prose-ja-01",
+      "parent_id": "bn1-prose-ja-01",
+      "file": "01.txt",
+      "sha256": "6d21e4ad4f9eb048725c6fd4ce21e993bab56f11fd913f15d904250fa6dc76cc",
+      "input_tokens": 189,
+      "max_tokens": 6144,
+      "duration_seconds_target": [
+        15,
+        60
+      ],
+      "duration_status": "GPU calibration pending"
+    },
+    {
+      "id": "bn1-prose-ja-02",
+      "parent_id": "bn1-prose-ja-02",
+      "file": "02.txt",
+      "sha256": "5ca9099f9cd6835f08ea53270d13f0270cdb5d5220616b707893da434299e191",
+      "input_tokens": 180,
+      "max_tokens": 6144,
+      "duration_seconds_target": [
+        15,
+        60
+      ],
+      "duration_status": "GPU calibration pending"
+    },
+    {
+      "id": "bn1-prose-ja-03",
+      "parent_id": "bn1-prose-ja-03",
+      "file": "03.txt",
+      "sha256": "47ff937e690eb0283239b65e30668d01d4dd6aa7d5dcd35aed6dc86cc742ce79",
+      "input_tokens": 187,
+      "max_tokens": 6144,
+      "duration_seconds_target": [
+        15,
+        60
+      ],
+      "duration_status": "GPU calibration pending"
+    },
+    {
+      "id": "bn1-prose-ja-04",
+      "parent_id": "bn1-prose-ja-04",
+      "file": "04.txt",
+      "sha256": "63fa6feb8e886527aebeec8389be7edeaa85abc48f9e1b3aeded3dd6b5cee68c",
+      "input_tokens": 186,
+      "max_tokens": 6144,
+      "duration_seconds_target": [
+        15,
+        60
+      ],
+      "duration_status": "GPU calibration pending"
+    },
+    {
+      "id": "bn1-prose-ja-05",
+      "parent_id": "bn1-prose-ja-05",
+      "file": "05.txt",
+      "sha256": "8feb6d79eea6994f7ad72e8e86412c1d891034dba148b1a69e9c1500566ea943",
+      "input_tokens": 191,
+      "max_tokens": 6144,
+      "duration_seconds_target": [
+        15,
+        60
+      ],
+      "duration_status": "GPU calibration pending"
+    },
+    {
+      "id": "bn1-prose-ja-06",
+      "parent_id": "bn1-prose-ja-06",
+      "file": "06.txt",
+      "sha256": "9af5c516397f98a8c9b652c2576a66a97d051f9cf846d1be3e56162e9275d122",
+      "input_tokens": 183,
+      "max_tokens": 6144,
+      "duration_seconds_target": [
+        15,
+        60
+      ],
+      "duration_status": "GPU calibration pending"
+    },
+    {
+      "id": "bn1-prose-ja-07",
+      "parent_id": "bn1-prose-ja-07",
+      "file": "07.txt",
+      "sha256": "7c33adc1949771336d35a13c15830000d061b777543e08a2cb2beb6648072e28",
+      "input_tokens": 186,
+      "max_tokens": 6144,
+      "duration_seconds_target": [
+        15,
+        60
+      ],
+      "duration_status": "GPU calibration pending"
+    },
+    {
+      "id": "bn1-prose-ja-08",
+      "parent_id": "bn1-prose-ja-08",
+      "file": "08.txt",
+      "sha256": "1443f6b4c54bcfc9f051afec4ef37a07c66675801bfc8e4342134f4703bb41b0",
+      "input_tokens": 185,
+      "max_tokens": 6144,
+      "duration_seconds_target": [
+        15,
+        60
+      ],
+      "duration_status": "GPU calibration pending"
+    }
+  ]
+}

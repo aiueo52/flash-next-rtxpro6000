@@ -1,0 +1,315 @@
+--- a/flashinfer/fused_moe/core.py
++++ b/flashinfer/fused_moe/core.py
+@@ -509,7 +509,7 @@
+ 
+     @register_custom_op(
+         "flashinfer::cutlass_fused_moe",
+-        mutates_args=("output", "workspace_buffer"),
++        mutates_args=("output", "workspace_buffer", "contrib_ids_out", "contrib_scales_out"),
+     )
+     def cutlass_fused_moe(
+         output: torch.Tensor,
+@@ -545,6 +545,12 @@
+         use_fused_finalize: bool = True,
+         profile_ids: Optional[List[int]] = None,
+         workspace_buffer: Optional[torch.Tensor] = None,
++        contrib_table: Optional[torch.Tensor] = None,
++        contrib_inv_norm: Optional[torch.Tensor] = None,
++        contrib_ids_out: Optional[torch.Tensor] = None,
++        contrib_scales_out: Optional[torch.Tensor] = None,
++        contrib_threshold: float = 0.0,
++        contrib_joint: bool = False,
+     ) -> List[torch.Tensor]:
+         if enable_pdl is None:
+             enable_pdl = device_support_pdl(input.device)
+@@ -661,6 +667,8 @@
+             enable_pdl,
+             activation_type,
+             workspace_buffer,
++            *([] if min_latency_mode else [contrib_table, contrib_inv_norm,
++                contrib_ids_out, contrib_scales_out, contrib_threshold, contrib_joint]),
+         )
+ 
+         return (
+@@ -709,6 +717,12 @@
+         use_fused_finalize: bool = True,
+         profile_ids: Optional[List[int]] = None,
+         workspace_buffer: Optional[torch.Tensor] = None,
++        contrib_table: Optional[torch.Tensor] = None,
++        contrib_inv_norm: Optional[torch.Tensor] = None,
++        contrib_ids_out: Optional[torch.Tensor] = None,
++        contrib_scales_out: Optional[torch.Tensor] = None,
++        contrib_threshold: float = 0.0,
++        contrib_joint: bool = False,
+     ) -> List[torch.Tensor]:
+         seq_len = input.shape[0]
+         hidden_size = fc2_expert_weights.shape[1]
+@@ -943,6 +957,12 @@
+     use_fused_finalize: bool = True,
+     profile_ids: Optional[List[int]] = None,
+     workspace_buffer: Optional[torch.Tensor] = None,
++        contrib_table: Optional[torch.Tensor] = None,
++        contrib_inv_norm: Optional[torch.Tensor] = None,
++        contrib_ids_out: Optional[torch.Tensor] = None,
++        contrib_scales_out: Optional[torch.Tensor] = None,
++        contrib_threshold: float = 0.0,
++        contrib_joint: bool = False,
+ ) -> torch.Tensor:
+     """Compute a Mixture of Experts (MoE) layer using CUTLASS backend.
+ 
+@@ -1186,6 +1206,9 @@
+             use_fused_finalize=use_fused_finalize,
+             profile_ids=profile_ids,
+             workspace_buffer=workspace_buffer,
++            contrib_table=contrib_table, contrib_inv_norm=contrib_inv_norm,
++            contrib_ids_out=contrib_ids_out, contrib_scales_out=contrib_scales_out,
++            contrib_threshold=contrib_threshold, contrib_joint=contrib_joint,
+         )
+ 
+ 
+--- a/flashinfer/data/csrc/fused_moe/cutlass_backend/cutlass_fused_moe_kernels.cuh
++++ b/flashinfer/data/csrc/fused_moe/cutlass_backend/cutlass_fused_moe_kernels.cuh
+@@ -1566,7 +1566,9 @@
+     TmaWarpSpecializedGroupedGemmInput::ElementSF* expand_act_sf_flat,
+     float const* expand_act_global_scale, bool expand_use_per_expert_act_scale,
+     int64_t expand_hidden_size, float prune_tau, int prune_min_rank, float const* prune_scales,
+-    int* prune_ids_out, float* prune_scales_out) {
++    int* prune_ids_out, float* prune_scales_out, float const* contrib_table,
++    float const* contrib_inv_norm, float contrib_threshold, bool contrib_joint,
++    int* contrib_ids_out, float* contrib_scales_out) {
+   using BlockRadixRank = FusedPrologueRadixRank<BLOCK_SIZE, LOG2_NUM_EXPERTS>;
+   static_assert(BlockRadixRank::BINS_TRACKED_PER_THREAD * BLOCK_SIZE >= (1 << LOG2_NUM_EXPERTS));
+   static_assert(EXPERTS_PER_TOKEN <= 32, "P2 keeps the prune mask in one 32-bit word");
+@@ -1613,7 +1615,69 @@
+   // expansion below then all see the pruned set with no further change.  The histogram borrows
+   // `shared_offsets`, which is dead until after RankKeys.  prune_tau <= 0 skips all of it.
+   unsigned prune_mask = 0u;
+-  if (prune_tau > 0.f) {
++  if (contrib_table != nullptr) {
++    // For the gated E512/k10/BLOCK32 specialization: two 512-int bins fit
++    // inside the 4256-byte radix-rank storage, which is dead before RankKeys.
++    int* first = reinterpret_cast<int*>(temp_storage);
++    int* last = first + num_experts_per_node;
++    for (int e = threadIdx.x; e < num_experts_per_node; e += BLOCK_SIZE) {
++      first[e] = INT_MAX; last[e] = -1; shared_offsets[e] = 0;
++    }
++    float local_w[EXPERTS_PER_TOKEN];
++    int top = 0;
++    bool valid = true;
++    float inv = is_valid_token ? contrib_inv_norm[token] : 1.f;
++    valid = isfinite(inv) && inv > 0.f;
++#pragma unroll
++    for (int j = 0; j < EXPERTS_PER_TOKEN; ++j) {
++      local_w[j] = is_valid_token ? prune_scales[token * EXPERTS_PER_TOKEN + j] : 0.f;
++      if (local_w[j] > local_w[top]) top = j;
++      int key = local_token_selected_experts[j];
++      if (is_valid_token) {
++        float norm = key < num_experts_per_node ? contrib_table[key] : -1.f;
++        float score = __fmul_rn(__fmul_rn(local_w[j], norm), inv);
++        valid = valid && key < num_experts_per_node && isfinite(norm) && norm >= 0.f &&
++                isfinite(local_w[j]) && local_w[j] >= 0.f && isfinite(score);
++      }
++    }
++    __syncthreads();
++#pragma unroll
++    for (int j = 0; j < EXPERTS_PER_TOKEN; ++j) {
++      int key = local_token_selected_experts[j];
++      if (is_valid_token && key < num_experts_per_node) {
++        int idx = token * EXPERTS_PER_TOKEN + j;
++        atomicAdd(shared_offsets + key, 1 + (j == top ? 1024 : 0));
++        atomicMin(first + key, idx); atomicMax(last + key, idx);
++      }
++    }
++    bool call_valid = __syncthreads_and(valid);
++#pragma unroll
++    for (int j = 0; j < EXPERTS_PER_TOKEN; ++j) {
++      int key = local_token_selected_experts[j];
++      bool drop = false;
++      if (is_valid_token && call_valid && key < num_experts_per_node) {
++        int count = shared_offsets[key]; // protected groups have count >= 1024
++        if (count == 1 || (contrib_joint && count == 2)) {
++          int a = first[key], b = last[key];
++          float score = __fmul_rn(__fmul_rn(prune_scales[a], contrib_table[key]),
++                                  contrib_inv_norm[a / EXPERTS_PER_TOKEN]);
++          if (count == 2) {
++            float second = __fmul_rn(__fmul_rn(prune_scales[b], contrib_table[key]),
++                                     contrib_inv_norm[b / EXPERTS_PER_TOKEN]);
++            score = __fadd_rn(score, second);
++          }
++          drop = score < contrib_threshold;
++        }
++      }
++      if (drop) { prune_mask |= 1u << j; local_token_selected_experts[j] = num_experts_per_node; }
++      if (blockIdx.x == 0 && is_valid_token) {
++        int idx = token * EXPERTS_PER_TOKEN + j;
++        contrib_ids_out[idx] = drop ? -1 : token_selected_experts[idx];
++        contrib_scales_out[idx] = drop ? 0.f : prune_scales[idx];
++      }
++    }
++    __syncthreads(); // all original bin readers finish before RankKeys overwrites it
++  } else if (prune_tau > 0.f) {
+     float local_w[EXPERTS_PER_TOKEN];
+ #pragma unroll
+     for (int i = 0; i < EXPERTS_PER_TOKEN; i++) {
+@@ -1668,7 +1732,7 @@
+     // maps straight to the not-on-node bucket, and a zeroed weight only lowers the ranks of
+     // routes that were dropped anyway), so the order of these writes against those reads does
+     // not matter.
+-    if (prune_mask != 0u) {
++    if (contrib_table == nullptr && prune_mask != 0u) {
+ #pragma unroll
+       for (int i = 0; i < EXPERTS_PER_TOKEN; i++) {
+         if (prune_mask & (1u << i)) {
+@@ -1963,7 +2027,8 @@
+       req.expand_unpermuted_scales, req.expand_permuted_scales, req.expand_act_sf_flat,
+       req.expand_act_global_scale, req.expand_use_per_expert_act_scale, req.expand_hidden_size,
+       req.prune_tau, req.prune_min_rank, req.prune_scales, req.prune_ids_out,
+-      req.prune_scales_out));
++      req.prune_scales_out, req.contrib_table, req.contrib_inv_norm,
++      req.contrib_threshold, req.contrib_joint, req.contrib_ids_out, req.contrib_scales_out));
+   req.prune_fused = req.prune_tau > 0.f;
+   return true;
+ }
+@@ -4561,7 +4626,8 @@
+       // when it declines nothing is pruned.
+       {
+         auto const& pc = moePruneConfig();
+-        if (pc.tau > 0.f && token_final_scales != nullptr && parallelism_config.ep_size == 1 &&
++        if (std::getenv("SGLANG_MOE_PRUNE_POLICY") == nullptr &&
++            pc.tau > 0.f && token_final_scales != nullptr && parallelism_config.ep_size == 1 &&
+             num_rows >= pc.min_rows && num_rows <= pc.max_rows &&
+             pc.min_rank < experts_per_token) {
+           fused_prologue_req.prune_tau = pc.tau;
+@@ -4571,6 +4637,18 @@
+           fused_prologue_req.prune_scales_out = const_cast<float*>(token_final_scales);
+         }
+       }
++      if (quant_params.contrib_table && parallelism_config.ep_size == 1 &&
++          parallelism_config.tp_size == 1 && (num_rows == 4 || num_rows == 16) &&
++          num_experts_per_node == 512 && experts_per_token == 10 && token_final_scales &&
++          std::isfinite(quant_params.contrib_threshold) && quant_params.contrib_threshold > 0.f) {
++        fused_prologue_req.contrib_table = quant_params.contrib_table;
++        fused_prologue_req.contrib_inv_norm = quant_params.contrib_inv_norm;
++        fused_prologue_req.contrib_ids_out = quant_params.contrib_ids_out;
++        fused_prologue_req.contrib_scales_out = quant_params.contrib_scales_out;
++        fused_prologue_req.contrib_threshold = quant_params.contrib_threshold;
++        fused_prologue_req.contrib_joint = quant_params.contrib_joint;
++        fused_prologue_req.prune_scales = token_final_scales;
++      }
+       std::tie(a3_gemm1_input, a3_gemm2_input) = setupTmaWarpSpecializedInputs(
+           num_rows, expanded_num_rows, fc1_activation_type, hidden_size, unpadded_hidden_size,
+           inter_size, num_experts_per_node, input_activations_void, input_sf, final_output,
+@@ -4579,6 +4657,12 @@
+           parallelism_config, enable_pdl, stream, &fused_prologue_req);
+     }
+     bool const strides_fused = fused_prologue_req.succeeded;
++    if (strides_fused && fused_prologue_req.contrib_table) {
++      // Only downstream consumers see effective routing; every CTA read the originals.
++      token_selected_experts = fused_prologue_req.contrib_ids_out;
++      token_final_scales = fused_prologue_req.contrib_scales_out;
++      token_topk_unpermuted_scales = fused_prologue_req.contrib_scales_out;
++    }
+     bool fused_prologue_result = strides_fused;
+     if (!fused_prologue_result && !use_w4_groupwise) {
+       // WAR: fusedBuildExpertMapsSortFirstToken kernel will lead to illegal memory access for
+--- a/flashinfer/data/csrc/fused_moe/cutlass_backend/flashinfer_cutlass_fused_moe_binding.cu
++++ b/flashinfer/data/csrc/fused_moe/cutlass_backend/flashinfer_cutlass_fused_moe_binding.cu
+@@ -257,7 +257,12 @@
+               int64_t ep_rank, int64_t cluster_size, int64_t cluster_rank, bool enable_alltoall,
+               bool min_latency_mode, Optional<Array<int64_t>> profile_ids, bool enable_pdl,
+               ActivationType base_activation_type = ActivationType::Swiglu,
+-              Optional<TensorView> workspace_buffer = Optional<TensorView>{}) {
++              Optional<TensorView> workspace_buffer = Optional<TensorView>{},
++              Optional<TensorView> contrib_table = Optional<TensorView>{},
++              Optional<TensorView> contrib_inv_norm = Optional<TensorView>{},
++              Optional<TensorView> contrib_ids_out = Optional<TensorView>{},
++              Optional<TensorView> contrib_scales_out = Optional<TensorView>{},
++              double contrib_threshold = 0., bool contrib_joint = false) {
+     std::lock_guard<std::mutex> lock(mMutex);
+     ffi::CUDADeviceGuard device_guard(input.device().device_id);
+ 
+@@ -387,8 +392,31 @@
+                          static_cast<int>(experts_per_token), base_activation_type,
+                          parallelism_config, min_latency_mode, input.device(), workspace_buffer);
+ 
+-    auto const quant_params = getQuantParams(num_experts_on_rank, hidden_size, inter_size,
++    auto quant_params = getQuantParams(num_experts_on_rank, hidden_size, inter_size,
+                                              quant_scales, base_activation_type);
++    if (contrib_table.has_value()) {
++      TVM_FFI_ICHECK(contrib_inv_norm && contrib_ids_out && contrib_scales_out);
++      auto table = contrib_table.value(); auto inv = contrib_inv_norm.value();
++      auto ids = contrib_ids_out.value(); auto scales = contrib_scales_out.value();
++      CHECK_INPUT_TYPE(table, dl_float32); CHECK_INPUT_TYPE(inv, dl_float32);
++      CHECK_INPUT_TYPE(ids, dl_int32); CHECK_INPUT_TYPE(scales, dl_float32);
++      CHECK_DIM(1, table); CHECK_DIM(1, inv); CHECK_DIM(2, ids); CHECK_DIM(2, scales);
++      TVM_FFI_ICHECK(table.size(0) == 512 && inv.size(0) == num_rows);
++      TVM_FFI_ICHECK(ids.size(0) == num_rows && ids.size(1) == experts_per_token);
++      TVM_FFI_ICHECK(scales.size(0) == num_rows && scales.size(1) == experts_per_token);
++      TVM_FFI_ICHECK(ids.data_ptr() != token_selected_experts.data_ptr());
++      TVM_FFI_ICHECK(token_final_scales && scales.data_ptr() != token_final_scales.value().data_ptr());
++      TVM_FFI_ICHECK(table.device().device_id == input.device().device_id &&
++                    inv.device().device_id == input.device().device_id &&
++                    ids.device().device_id == input.device().device_id &&
++                    scales.device().device_id == input.device().device_id);
++      quant_params.contrib_table = static_cast<float const*>(table.data_ptr());
++      quant_params.contrib_inv_norm = static_cast<float const*>(inv.data_ptr());
++      quant_params.contrib_ids_out = static_cast<int*>(ids.data_ptr());
++      quant_params.contrib_scales_out = static_cast<float*>(scales.data_ptr());
++      quant_params.contrib_threshold = static_cast<float>(contrib_threshold);
++      quant_params.contrib_joint = contrib_joint;
++    }
+     kernels::MoeMinLatencyParams min_latency_params{};
+ 
+     // TODO: support lora in the future
+@@ -756,13 +784,17 @@
+                  bool swizzled_input_sf, int64_t tp_size, int64_t tp_rank, int64_t ep_size,
+                  int64_t ep_rank, int64_t cluster_size, int64_t cluster_rank, bool enable_alltoall,
+                  bool min_latency_mode, Optional<Array<int64_t>> profile_ids, bool enable_pdl,
+-                 int64_t base_activation_type, Optional<TensorView> workspace_buffer) {
++                 int64_t base_activation_type, Optional<TensorView> workspace_buffer,
++                 Optional<TensorView> contrib_table, Optional<TensorView> contrib_inv_norm,
++                 Optional<TensorView> contrib_ids_out, Optional<TensorView> contrib_scales_out,
++                 double contrib_threshold, bool contrib_joint) {
+             runMoe(output, input, token_selected_experts, token_final_scales, fc1_expert_weights,
+                    fc1_expert_biases, fc2_expert_weights, fc2_expert_biases, quant_scales, input_sf,
+                    swiglu_alpha, swiglu_beta, swiglu_limit, swizzled_input_sf, tp_size, tp_rank,
+                    ep_size, ep_rank, cluster_size, cluster_rank, enable_alltoall, min_latency_mode,
+                    profile_ids, enable_pdl, static_cast<ActivationType>(base_activation_type),
+-                   workspace_buffer);
++                   workspace_buffer, contrib_table, contrib_inv_norm, contrib_ids_out,
++                   contrib_scales_out, contrib_threshold, contrib_joint);
+           });
+     } else if (name == "run_moe_min_latency") {
+       return Function::FromTyped(
+--- a/flashinfer/data/csrc/nv_internal/tensorrt_llm/kernels/cutlass_kernels/include/moe_kernels.h
++++ b/flashinfer/data/csrc/nv_internal/tensorrt_llm/kernels/cutlass_kernels/include/moe_kernels.h
+@@ -225,6 +225,14 @@
+ enum class MoeGemmId : int { Undefined = 0, GEMM_1, GEMM_2 };
+ 
+ struct QuantParams {
++  // P4: explicit per-call immutable routing metadata; no process-global device pointers.
++  float const* contrib_table = nullptr;
++  float const* contrib_inv_norm = nullptr;
++  int* contrib_ids_out = nullptr;
++  float* contrib_scales_out = nullptr;
++  float contrib_threshold = 0.f;
++  bool contrib_joint = false;
++
+   // Int weight only quantization params
+   struct {
+     void const* fc1_weight_scales = nullptr;
+@@ -457,6 +465,14 @@
+ };
+ 
+ struct FusedPrologueRequest {
++  // P4: explicit per-call immutable routing metadata; no process-global device pointers.
++  float const* contrib_table = nullptr;
++  float const* contrib_inv_norm = nullptr;
++  int* contrib_ids_out = nullptr;
++  float* contrib_scales_out = nullptr;
++  float contrib_threshold = 0.f;
++  bool contrib_joint = false;
++
+   G1PackParams g1{};
+   int const* token_selected_experts = nullptr;
+   int* permuted_row_to_unpermuted_row = nullptr;

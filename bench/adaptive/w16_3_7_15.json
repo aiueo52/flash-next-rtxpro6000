@@ -1,0 +1,48 @@
+{
+  "1": {
+    "candidate_steps": [
+      3,
+      7,
+      15
+    ],
+    "warmup_batches": 15,
+    "min_bucket_samples": 20,
+    "buckets": [
+      0.8,
+      0.95,
+      0.99,
+      0.999
+    ],
+    "confidence_weight": 1.0,
+    "switch_margin": 0.12,
+    "up_margin": 0.3,
+    "tail_bias": 0.75,
+    "weight_alpha": 0.05,
+    "rate_alpha": 0.1,
+    "switch_grace_batches": 40,
+    "update_interval": 10,
+    "grace_backoff": 2.0
+  },
+  "2": {
+    "candidate_steps": [
+      15
+    ],
+    "warmup_batches": 15,
+    "min_bucket_samples": 20,
+    "buckets": [
+      0.8,
+      0.95,
+      0.99,
+      0.999
+    ],
+    "confidence_weight": 1.0,
+    "switch_margin": 0.12,
+    "up_margin": 0.3,
+    "tail_bias": 0.75,
+    "weight_alpha": 0.05,
+    "rate_alpha": 0.1,
+    "switch_grace_batches": 40,
+    "update_interval": 10,
+    "grace_backoff": 2.0
+  }
+}

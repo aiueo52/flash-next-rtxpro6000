@@ -1,0 +1,50 @@
+
+=== qkvz N=16384 K=2560 M=4: production cfg (32, 128, 1, True, None, 4, 3)  (21:58:10)
+  production: cold   28.51 us ( 1471 GB/s)  hot   16.96 us ( 2473 GB/s)
+  (64, 256, 2, True, None, 8, 3): hot   13.22 us ( 3174 GB/s)  cold   29.82 us ( 1406 GB/s)  match=True
+  (128, 64, 4, True, None, 4, 3): hot   13.66 us ( 3069 GB/s)  cold   36.14 us ( 1160 GB/s)  match=True
+  (64, 128, 2, True, None, 4, 3): hot   13.78 us ( 3045 GB/s)  cold   29.84 us ( 1406 GB/s)  match=True
+  (64, 64, 2, True, None, 4, 3): hot   14.08 us ( 2979 GB/s)  cold   35.23 us ( 1190 GB/s)  match=True
+  (64, 128, 4, True, None, 8, 3): hot   14.10 us ( 2975 GB/s)  cold   30.53 us ( 1374 GB/s)  match=True
+
+=== qkvz N=16384 K=2560 M=16: production cfg (64, 128, 1, True, None, 4, 3)  (21:58:44)
+  production: cold   28.91 us ( 1451 GB/s)  hot   16.30 us ( 2573 GB/s)
+  (128, 64, 4, True, None, 4, 3): hot   13.84 us ( 3031 GB/s)  cold   36.03 us ( 1164 GB/s)  match=True
+  (128, 64, 4, True, None, 8, 3): hot   14.50 us ( 2893 GB/s)  cold   36.03 us ( 1164 GB/s)  match=True
+  (64, 256, 2, True, None, 8, 3): hot   14.53 us ( 2887 GB/s)  cold   30.11 us ( 1393 GB/s)  match=True
+  (128, 256, 1, True, None, 8, 3): hot   14.85 us ( 2825 GB/s)  cold   29.10 us ( 1441 GB/s)  match=True
+  (64, 128, 4, True, None, 8, 3): hot   15.01 us ( 2795 GB/s)  cold   30.32 us ( 1383 GB/s)  match=True
+
+=== out_proj N=2560 K=6144 M=4: production cfg (32, 128, 6, True, None, 4, 3)  (21:59:18)
+  production: cold   13.04 us ( 1206 GB/s)  hot    6.94 us ( 2265 GB/s)
+  (64, 256, 4, True, None, 8, 3): hot    6.69 us ( 2352 GB/s)  cold   13.02 us ( 1208 GB/s)  match=True
+  (32, 256, 4, True, None, 4, 3): hot    7.10 us ( 2214 GB/s)  cold   13.15 us ( 1196 GB/s)  match=True
+  (32, 128, 4, True, None, 4, 3): hot    7.12 us ( 2209 GB/s)  cold   12.96 us ( 1214 GB/s)  match=True
+  (32, 128, 8, True, None, 4, 3): hot    7.17 us ( 2194 GB/s)  cold   13.26 us ( 1186 GB/s)  match=True
+  (64, 128, 8, True, None, 4, 3): hot    7.26 us ( 2165 GB/s)  cold   14.37 us ( 1095 GB/s)  match=True
+
+=== out_proj N=2560 K=6144 M=16: production cfg (32, 128, 6, True, None, 4, 3)  (21:59:41)
+  production: cold   13.31 us ( 1182 GB/s)  hot    8.32 us ( 1891 GB/s)
+  (64, 256, 4, True, None, 8, 3): hot    7.55 us ( 2083 GB/s)  cold   13.26 us ( 1186 GB/s)  match=True
+  (64, 128, 8, True, None, 8, 3): hot    7.78 us ( 2023 GB/s)  cold   13.73 us ( 1146 GB/s)  match=True
+  (64, 128, 4, True, None, 8, 3): hot    7.94 us ( 1982 GB/s)  cold   13.18 us ( 1193 GB/s)  match=True
+  (32, 128, 8, True, None, 4, 3): hot    8.13 us ( 1935 GB/s)  cold   13.41 us ( 1173 GB/s)  match=True
+  (64, 64, 8, True, None, 8, 3): hot    8.16 us ( 1928 GB/s)  cold   13.66 us ( 1151 GB/s)  match=True
+
+=== attn_qkv N=13312 K=2560 M=4: production cfg (32, 128, 1, True, None, 4, 3)  (22:00:03)
+  production: cold   23.87 us ( 1428 GB/s)  hot   13.39 us ( 2545 GB/s)
+  (64, 128, 4, True, None, 8, 3): hot   11.89 us ( 2867 GB/s)  cold   28.53 us ( 1195 GB/s)  match=True
+  (32, 128, 4, True, None, 4, 3): hot   11.90 us ( 2863 GB/s)  cold   24.72 us ( 1379 GB/s)  match=True
+  (64, 64, 4, True, None, 4, 3): hot   11.98 us ( 2844 GB/s)  cold   28.29 us ( 1205 GB/s)  match=True
+  (64, 256, 4, True, None, 8, 3): hot   12.21 us ( 2791 GB/s)  cold   25.70 us ( 1326 GB/s)  match=True
+  (32, 64, 4, True, None, 4, 3): hot   12.29 us ( 2773 GB/s)  cold   26.54 us ( 1284 GB/s)  match=True
+
+=== attn_qkv N=13312 K=2560 M=16: production cfg (32, 128, 1, True, None, 4, 3)  (22:00:26)
+  production: cold   25.18 us ( 1353 GB/s)  hot   18.83 us ( 1810 GB/s)
+  (64, 128, 4, True, None, 8, 3): hot   13.34 us ( 2554 GB/s)  cold   28.94 us ( 1177 GB/s)  match=True
+  (64, 64, 4, True, None, 4, 3): hot   13.97 us ( 2440 GB/s)  cold   28.53 us ( 1195 GB/s)  match=True
+  (64, 128, 2, True, None, 4, 3): hot   14.05 us ( 2426 GB/s)  cold   24.98 us ( 1364 GB/s)  match=True
+  (64, 128, 4, True, None, 4, 3): hot   14.13 us ( 2412 GB/s)  cold   30.10 us ( 1132 GB/s)  match=True
+  (64, 256, 2, True, None, 8, 3): hot   14.34 us ( 2377 GB/s)  cold   28.61 us ( 1191 GB/s)  match=True
+
+[wrote] bench/l2_prefetch/results/hotcfg_v2.json

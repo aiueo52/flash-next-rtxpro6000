@@ -1,0 +1,15 @@
+[c1fix-w16] up 17:22:30
+measured prose-ja 2/2: 139.24 t/s
+warming up agent-loop ...
+measured agent-loop 1/2: 311.57 t/s
+measured agent-loop 2/2: 249.54 t/s
+$HOME/tools/flash-next-bench/adaptive/c1/fixed_run.sh: 26 行: 2626607 強制終了            PYTHONPATH=~/tools/sglang-c1/python PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True setsid ./serve-fast.sh $PROFILE > $LOG 2>&1 < /dev/null  (wd: ~/tools/sglang-rtxpro6000)
+[c1fix-w16] done 17:24:03
+[c1fix-w4] up 17:26:43
+measured prose-ja 2/2: 209.69 t/s
+warming up agent-loop ...
+measured agent-loop 1/2: 282.79 t/s
+measured agent-loop 2/2: 283.71 t/s
+$HOME/tools/flash-next-bench/adaptive/c1/fixed_run.sh: 26 行: 2628939 強制終了            PYTHONPATH=~/tools/sglang-c1/python PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True setsid ./serve-fast.sh $PROFILE > $LOG 2>&1 < /dev/null  (wd: ~/tools/sglang-rtxpro6000)
+[c1fix-w4] done 17:28:06
+=== fixed refs done 2026-09-06 17:28:06

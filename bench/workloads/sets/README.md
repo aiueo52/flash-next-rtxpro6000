@@ -1,0 +1,9 @@
+# BN1 held-out evaluation sets
+
+Each `<domain>-v1/manifest.json` lists eight independently authored synthetic parents, exact untemplated token counts, fixed output caps and prompt SHA-256 values. These parents are reserved for evaluation. Do not use the prompts or their generated continuations in MTP training, calibration, candidate selection or prompt tuning for a candidate under evaluation.
+
+`provenance-audit.json` records the method of the provenance audit run by `bench/stats/audit_sets.py` against the author's private prompt files; the audit's result is not published (evaluation on private data). A local re-run needs an explicit output path (`audit_sets.py --out PATH`); keep it outside the repository, since the report names the private sources and their hashes, and point `validate_study.py` at it with `PROVENANCE_AUDIT=PATH`. Neither novel authorship nor such an audit can exclude unavailable data or prevent future leakage. Keep parent IDs intact when making variants or larger sets, and never count variants of one parent as independent bootstrap units.
+
+The manifest's duration status is the status at initial freezing, not a mutable live result. The actual six-restart timing validation and noise estimates are recorded in `specs/BN1_BENCH_NOISE.md` and its linked study artifacts. EOS is respected: the token cap is not an assertion that every output reaches that length. The first eight prompts are the measured cohort; the n=16 MDE in the report is a projection to additional independent, equivalently distributed held-out parents.
+
+Use `fnbench run --prompt-sets workloads/sets --prompt-limit 8` with the four explicit workload names. Set mode interleaves domains in manifest order and performs no holdout-specific warmup. The external locked driver supplies one fixed, non-holdout warmup before the full sequence. See the BN1 spec's run paragraph for exact commands, strict acceptance collection and paired analysis.

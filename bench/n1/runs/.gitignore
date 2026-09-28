@@ -1,0 +1,20 @@
+# New run output in this directory is not committed by default. The files listed below are the
+# published measurements (tracked); re-running the tools overwrites them in place, review before committing.
+*
+!.gitignore
+!n1a-off-w16.log
+!n1a-off-w4.log
+!n1a-offr1-w16.log
+!n1a-offr1-w4.log
+!n1a-offr2-w16.log
+!n1a-offr2-w4.log
+!n1a-offr3-w16.log
+!n1a-offr3-w4.log
+!n1a-on-w16.log
+!n1a-on-w4.log
+!n1a-onr1-w16.log
+!n1a-onr1-w4.log
+!n1a-onr2-w16.log
+!n1a-onr2-w4.log
+!n1a-onr3-w16.log
+!n1a-onr3-w4.log

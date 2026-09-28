@@ -1,0 +1,81 @@
+{
+  "schema": 1,
+  "dtype": "float32",
+  "shape": [
+    48,
+    512
+  ],
+  "split": "first floor(complete_verify_steps/2) steps per workload train; remaining steps holdout",
+  "smoothing": "8 layer-mean pseudo-observations per expert",
+  "policy": "singleton plus count-two; group SUM strictly below cut; stable top-1 protected",
+  "widths": {
+    "4": {
+      "file": "p4-norm-w4.npy",
+      "sha256": "209fd59da4f5a876a64c0fd45f8c3755261e9c28a58a11f5e7f61e872647abd1",
+      "p3_threshold": 0.04199233496772392,
+      "threshold": 0.04199234023690224,
+      "threshold_rounding": "one FP32 ULP toward +infinity after nearest rounding; strict-cut boundary preservation",
+      "min_observations": 0,
+      "sources": [
+        {
+          "file": "runs/census-p3-20260907-2300-w4-agent-loop.npz",
+          "sha256": "66d882b63a02ad34872dd0e7c7e76368e521abf486d03ef5a05fb67cb56caf82",
+          "train_steps": 390,
+          "holdout_steps": 390
+        },
+        {
+          "file": "runs/census-p3-20260907-2300-w4-code-edit.npz",
+          "sha256": "db008ef0fd19e49d16a66b9cd513d29e60b643ca1479b6cfaea07df330bab21f",
+          "train_steps": 615,
+          "holdout_steps": 616
+        },
+        {
+          "file": "runs/census-p3-20260907-2300-w4-prose-en.npz",
+          "sha256": "0dd46cdd82250d5da9a991fd842f9b19db461ef4aac7d352f8a24adfcdb3b06f",
+          "train_steps": 469,
+          "holdout_steps": 470
+        },
+        {
+          "file": "runs/census-p3-20260907-2300-w4-prose-ja.npz",
+          "sha256": "47c85ba15e70c577e613dcad50f06f0354b98c456cc117a57ed8e3c699fa1084",
+          "train_steps": 498,
+          "holdout_steps": 499
+        }
+      ]
+    },
+    "16": {
+      "file": "p4-norm-w16.npy",
+      "sha256": "1f573253611fb89a2f6de4438f7792a8747aafe7ca736f91af9736419d4be972",
+      "p3_threshold": 0.04226923952110562,
+      "threshold": 0.04226924479007721,
+      "threshold_rounding": "one FP32 ULP toward +infinity after nearest rounding; strict-cut boundary preservation",
+      "min_observations": 0,
+      "sources": [
+        {
+          "file": "runs/census-p3-20260907-2300-w16-agent-loop.npz",
+          "sha256": "0977b6c513ddb3b11aa55639457615231b564652b57f560ec1a704e9afeda255",
+          "train_steps": 242,
+          "holdout_steps": 243
+        },
+        {
+          "file": "runs/census-p3-20260907-2300-w16-code-edit.npz",
+          "sha256": "6a01f7a028138f87e135079c5a93453f544dae604871539259457b8e8910eecf",
+          "train_steps": 220,
+          "holdout_steps": 221
+        },
+        {
+          "file": "runs/census-p3-20260907-2300-w16-prose-en.npz",
+          "sha256": "6a30fbfaa0ce745247ecbcd4290ab2294d914a3853055cb4f44749fc8ce4001b",
+          "train_steps": 394,
+          "holdout_steps": 395
+        },
+        {
+          "file": "runs/census-p3-20260907-2300-w16-prose-ja.npz",
+          "sha256": "46993681d49bf220e7d229e48201f6e6018f912e250c982637a726de9021b900",
+          "train_steps": 463,
+          "holdout_steps": 464
+        }
+      ]
+    }
+  }
+}

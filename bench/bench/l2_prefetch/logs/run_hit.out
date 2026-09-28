@@ -1,0 +1,79 @@
+=== bench_hit  2026-09-06T21:05:54+09:00 ===
+
+=== device limits: {"l2_bytes": 134217728, "max_persisting_bytes": 83886080, "max_window_bytes": 134217728, "sms": 188, "prio_least": 0, "prio_greatest": -5, "persisting_limit_now": 25165824, "l2_bytes_driver": 134217728}  (21:13:04)
+persisting limit requested 80 MB -> actual 80 MB
+
+=== qkvz N=16384 K=2560 M=4 weight 40.0 MB  (21:13:09)
+USDT:2026-09-06 21:13:10 2744288:2744288 SyncActivityProfilerHandler.cpp:52] profiler_start
+USDT:2026-09-06 21:13:10 2744288:2744288 SyncActivityProfilerHandler.cpp:59] profiler_stop
+  cold             Y=   0 lim=  0 hr=1.00  gemv    28.75 us =   1459 GB/s   touches [('touch_kernel<0>', 205.1)]
+USDT:2026-09-06 21:13:10 2744288:2744288 SyncActivityProfilerHandler.cpp:52] profiler_start
+USDT:2026-09-06 21:13:10 2744288:2744288 SyncActivityProfilerHandler.cpp:59] profiler_stop
+  touched          Y=   0 lim=  0 hr=1.00  gemv    19.26 us =   2177 GB/s   touches [('touch_kernel<0>', 205.15), ('touch_kernel<0>', 27.15)]
+USDT:2026-09-06 21:13:10 2744288:2744288 SyncActivityProfilerHandler.cpp:52] profiler_start
+USDT:2026-09-06 21:13:10 2744288:2744288 SyncActivityProfilerHandler.cpp:59] profiler_stop
+  touched+stream   Y=  77 lim=  0 hr=1.00  gemv    19.30 us =   2174 GB/s   touches [('touch_kernel<0>', 205.13), ('touch_kernel<0>', 27.12), ('touch_kernel<0>', 50.53)]
+USDT:2026-09-06 21:13:10 2744288:2744288 SyncActivityProfilerHandler.cpp:52] profiler_start
+USDT:2026-09-06 21:13:10 2744288:2744288 SyncActivityProfilerHandler.cpp:59] profiler_stop
+  elast+stream     Y=  77 lim=  0 hr=1.00  gemv    19.31 us =   2172 GB/s   touches [('touch_kernel<0>', 205.08), ('touch_kernel<2>', 27.17), ('touch_kernel<0>', 50.59)]
+USDT:2026-09-06 21:13:11 2744288:2744288 SyncActivityProfilerHandler.cpp:52] profiler_start
+USDT:2026-09-06 21:13:11 2744288:2744288 SyncActivityProfilerHandler.cpp:59] profiler_stop
+  elast+cs         Y=  77 lim=  0 hr=1.00  gemv    19.30 us =   2174 GB/s   touches [('touch_kernel<0>', 205.07), ('touch_kernel<2>', 27.12), ('touch_kernel<1>', 50.51)]
+USDT:2026-09-06 21:13:11 2744288:2744288 SyncActivityProfilerHandler.cpp:52] profiler_start
+USDT:2026-09-06 21:13:11 2744288:2744288 SyncActivityProfilerHandler.cpp:59] profiler_stop
+  touched+stream   Y= 190 lim=  0 hr=1.00  gemv    28.67 us =   1463 GB/s   touches [('touch_kernel<0>', 205.08), ('touch_kernel<0>', 27.18), ('touch_kernel<0>', 122.53)]
+USDT:2026-09-06 21:13:11 2744288:2744288 SyncActivityProfilerHandler.cpp:52] profiler_start
+USDT:2026-09-06 21:13:11 2744288:2744288 SyncActivityProfilerHandler.cpp:59] profiler_stop
+  elast+stream     Y= 190 lim=  0 hr=1.00  gemv    26.05 us =   1610 GB/s   touches [('touch_kernel<0>', 205.15), ('touch_kernel<2>', 27.1), ('touch_kernel<0>', 122.51)]
+USDT:2026-09-06 21:13:11 2744288:2744288 SyncActivityProfilerHandler.cpp:52] profiler_start
+USDT:2026-09-06 21:13:11 2744288:2744288 SyncActivityProfilerHandler.cpp:59] profiler_stop
+  elast+cs         Y= 190 lim=  0 hr=1.00  gemv    19.33 us =   2170 GB/s   touches [('touch_kernel<0>', 205.23), ('touch_kernel<2>', 27.17), ('touch_kernel<1>', 122.3)]
+USDT:2026-09-06 21:13:12 2744288:2744288 SyncActivityProfilerHandler.cpp:52] profiler_start
+USDT:2026-09-06 21:13:12 2744288:2744288 SyncActivityProfilerHandler.cpp:59] profiler_stop
+  touched          Y=   0 lim= 80 hr=1.00  gemv    19.28 us =   2176 GB/s   touches [('touch_kernel<0>', 205.12), ('touch_kernel<0>', 27.13)]
+USDT:2026-09-06 21:13:12 2744288:2744288 SyncActivityProfilerHandler.cpp:52] profiler_start
+USDT:2026-09-06 21:13:12 2744288:2744288 SyncActivityProfilerHandler.cpp:59] profiler_stop
+  touched+stream   Y=  77 lim= 80 hr=1.00  gemv    19.33 us =   2170 GB/s   touches [('touch_kernel<0>', 205.24), ('touch_kernel<0>', 27.07), ('touch_kernel<0>', 50.61)]
+USDT:2026-09-06 21:13:12 2744288:2744288 SyncActivityProfilerHandler.cpp:52] profiler_start
+USDT:2026-09-06 21:13:12 2744288:2744288 SyncActivityProfilerHandler.cpp:59] profiler_stop
+  persist+stream   Y=  77 lim= 80 hr=1.00  gemv    19.33 us =   2170 GB/s   touches [('touch_kernel<0>', 205.16), ('touch_kernel<0>', 7.23), ('touch_kernel<0>', 50.59)]
+USDT:2026-09-06 21:13:12 2744288:2744288 SyncActivityProfilerHandler.cpp:52] profiler_start
+USDT:2026-09-06 21:13:12 2744288:2744288 SyncActivityProfilerHandler.cpp:59] profiler_stop
+  persist+cs       Y=  77 lim= 80 hr=1.00  gemv    19.26 us =   2177 GB/s   touches [('touch_kernel<0>', 204.96), ('touch_kernel<0>', 7.23), ('touch_kernel<1>', 50.56)]
+USDT:2026-09-06 21:13:13 2744288:2744288 SyncActivityProfilerHandler.cpp:52] profiler_start
+USDT:2026-09-06 21:13:13 2744288:2744288 SyncActivityProfilerHandler.cpp:59] profiler_stop
+  persist+swin     Y=  77 lim= 80 hr=1.00  gemv    19.30 us =   2174 GB/s   touches [('touch_kernel<0>', 205.12), ('touch_kernel<0>', 7.23), ('touch_kernel<0>', 50.51)]
+USDT:2026-09-06 21:13:13 2744288:2744288 SyncActivityProfilerHandler.cpp:52] profiler_start
+USDT:2026-09-06 21:13:13 2744288:2744288 SyncActivityProfilerHandler.cpp:59] profiler_stop
+  swin-consumer    Y=  77 lim= 80 hr=1.00  gemv    19.34 us =   2168 GB/s   touches [('touch_kernel<0>', 205.16), ('touch_kernel<0>', 7.26), ('touch_kernel<0>', 50.59)]
+     nodes: [('touch_kernelILi0EEvPKhyP', 40, 2, 1), ('touch_kernelILi0EEvPKhyP', 40, 2, 1), ('touch_kernelILi0EEvPKhyP', 40, 2, 1), ('_w8a16_gemv_kernel', 40, 2, 1)]
+USDT:2026-09-06 21:13:13 2744288:2744288 SyncActivityProfilerHandler.cpp:52] profiler_start
+USDT:2026-09-06 21:13:13 2744288:2744288 SyncActivityProfilerHandler.cpp:59] profiler_stop
+  touched+stream   Y= 190 lim= 80 hr=1.00  gemv    28.50 us =   1472 GB/s   touches [('touch_kernel<0>', 205.0), ('touch_kernel<0>', 27.07), ('touch_kernel<0>', 122.46)]
+USDT:2026-09-06 21:13:13 2744288:2744288 SyncActivityProfilerHandler.cpp:52] profiler_start
+USDT:2026-09-06 21:13:13 2744288:2744288 SyncActivityProfilerHandler.cpp:59] profiler_stop
+  persist+stream   Y= 190 lim= 80 hr=1.00  gemv    19.49 us =   2152 GB/s   touches [('touch_kernel<0>', 205.2), ('touch_kernel<0>', 7.26), ('touch_kernel<0>', 122.53)]
+USDT:2026-09-06 21:13:13 2744288:2744288 SyncActivityProfilerHandler.cpp:52] profiler_start
+USDT:2026-09-06 21:13:13 2744288:2744288 SyncActivityProfilerHandler.cpp:59] profiler_stop
+  persist+cs       Y= 190 lim= 80 hr=1.00  gemv    19.30 us =   2174 GB/s   touches [('touch_kernel<0>', 205.18), ('touch_kernel<0>', 7.25), ('touch_kernel<1>', 122.3)]
+Traceback (most recent call last):
+  File "$HOME/tools/flash-next-bench/bench/l2_prefetch/bench_hit.py", line 218, in <module>
+    main()
+  File "$HOME/tools/flash-next-bench/bench/l2_prefetch/bench_hit.py", line 200, in main
+    row = run_cond(ctl, cond, w, s, x, y, gemv, evict, other, y_mb, hr, capture_stream, lim)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "$HOME/tools/flash-next-bench/bench/l2_prefetch/bench_hit.py", line 77, in run_cond
+    gr = Graph(ctl, call, capture_stream=capture_stream)
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "$HOME/tools/flash-next-bench/bench/l2_prefetch/common.py", line 63, in __init__
+    call()
+  File "$HOME/tools/flash-next-bench/bench/l2_prefetch/bench_hit.py", line 69, in call
+    ctl.touch(st, other, mode=MODE_NORMAL, grid=GRID_BIG, nbytes=ybytes,
+  File "$HOME/tools/flash-next-bench/bench/l2_prefetch/l2ctl.py", line 136, in touch
+    self._launch(stream, 0, mode, base, nb // SECTOR, grid, block, window, prio)
+  File "$HOME/tools/flash-next-bench/bench/l2_prefetch/l2ctl.py", line 129, in _launch
+    self._ck(self.lib.l2_launch(_sid(stream), kind, mode, ptr, n, grid, block, won, wb, wn, hr, hp, mp,
+  File "$HOME/tools/flash-next-bench/bench/l2_prefetch/l2ctl.py", line 98, in _ck
+    raise RuntimeError(f"{what}: rc={rc} {self.lib.l2_last_error().decode()}")
+RuntimeError: l2_launch: rc=1 cudaLaunchKernelEx(&cfg, touch_kernel<0>, b, n, s): invalid argument
+=== bench_hit done rc=1 2026-09-06T21:13:15+09:00 ===

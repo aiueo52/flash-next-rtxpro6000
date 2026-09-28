@@ -1,0 +1,31 @@
+[n1a-off/w4] server up (19:18:28)
+
+chunks=160 decode_tps~60.8
+
+chunks=218 decode_tps~69.2
+$HOME/tools/flash-next-bench/prof/traces/n1a-off-w4-code-edit/1788689909.580024-TP-0.trace.json.gz
+  step wall= 10.31ms  gpu_busy= 10.20ms  gpu_idle_in_step= 0.08ms
+  draft                        occ= 20 kernels/step=    109 busy_ms=  0.56 raw_ms=  0.64 legacy_trimmed_ms=  0.53
+  step[TARGET_VERIFY bs=1]     occ= 20 kernels/step=   1317 busy_ms=  9.11 raw_ms= 10.68 legacy_trimmed_ms=  9.38
+  draft_extend                 occ= 20 kernels/step=     88 busy_ms=  0.43 raw_ms=  0.51 legacy_trimmed_ms=  0.45
+  TOTAL                        kernels/step=   1514 busy_ms= 10.10 wall_ms= 10.31 idle_ms= 0.08 legacy_trimmed_ms= 10.36
+  (check)                      sum(busy)+idle= 10.18ms vs wall= 10.31ms  residual= 0.13ms (86 unattributed kernels/step)
+$HOME/tools/flash-next-bench/prof/traces/n1a-off-w4-prose-en/1788689915.3348613-TP-0.trace.json.gz
+  step wall=  9.94ms  gpu_busy=  9.88ms  gpu_idle_in_step= 0.08ms
+  draft                        occ= 20 kernels/step=    109 busy_ms=  0.56 raw_ms=  0.64 legacy_trimmed_ms=  0.53
+  step[TARGET_VERIFY bs=1]     occ= 20 kernels/step=   1317 busy_ms=  8.66 raw_ms= 10.21 legacy_trimmed_ms=  9.00
+  draft_extend                 occ= 20 kernels/step=     88 busy_ms=  0.43 raw_ms=  0.50 legacy_trimmed_ms=  0.45
+  TOTAL                        kernels/step=   1514 busy_ms=  9.64 wall_ms=  9.94 idle_ms= 0.08 legacy_trimmed_ms=  9.97
+  (check)                      sum(busy)+idle=  9.72ms vs wall=  9.94ms  residual= 0.22ms (96 unattributed kernels/step)
+warming up code-edit ...
+measured code-edit 1/2: 369.30 t/s
+measured code-edit 2/2: 373.51 t/s
+warming up prose-en ...
+measured prose-en 1/2: 257.46 t/s
+measured prose-en 2/2: 243.35 t/s
+warming up agent-loop ...
+measured agent-loop 1/2: 323.00 t/s
+measured agent-loop 2/2: 306.25 t/s
+[n1a-off-w4] prompt_tokens=17307 completion=12 time=1.4s PASS=True out='AURORA-CEDAR-7319'
+$HOME/tools/flash-next-bench/prof/validate.sh: 29 行: 2685493 強制終了            env ${SERVER_ENV:-} setsid ./serve-fast.sh $PROFILE ${SERVER_ARGS:-} > $LOG 2>&1 < /dev/null  (wd: ~/tools/sglang-rtxpro6000)
+[n1a-off/w4] done (19:19:42); gpu mem: 5503 MiB

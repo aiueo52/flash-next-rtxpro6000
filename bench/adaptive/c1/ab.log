@@ -1,0 +1,45 @@
+=== C1 A/B start 2026-09-06 16:05:13
+[c1ab-ema] up 16:07:25 policy=ema cfg=$HOME/tools/flash-next-bench/adaptive/w16_3_15.json
+[2026-09-06 16:05:47] Load weight begin. avail mem=88.71 GB
+measured prose-en 1/2: 240.34 t/s
+measured prose-en 2/2: 251.36 t/s
+warming up prose-ja ...
+measured prose-ja 1/2: 231.76 t/s
+measured prose-ja 2/2: 223.64 t/s
+warming up agent-loop ...
+measured agent-loop 1/2: 295.73 t/s
+measured agent-loop 2/2: 289.23 t/s
+[c1ab-ema] prompt_tokens=17307 completion=12 time=1.5s PASS=True out='AURORA-CEDAR-7319'
+[c1ab-ema] switches during bench: 13
+[2026-09-06 16:07:29] Adaptive spec params updated: steps 3 -> 15 (ema_accept_len=2.75)
+[2026-09-06 16:07:38] Adaptive spec params updated: steps 15 -> 3 (ema_accept_len=3.39, ema reseeded to 2.00)
+[2026-09-06 16:07:39] Adaptive spec params updated: steps 3 -> 15 (ema_accept_len=2.88)
+[2026-09-06 16:07:43] Adaptive spec params updated: steps 15 -> 3 (ema_accept_len=4.29, ema reseeded to 2.00)
+[2026-09-06 16:07:43] Adaptive spec params updated: steps 3 -> 15 (ema_accept_len=2.77)
+[2026-09-06 16:07:47] Adaptive spec params updated: steps 15 -> 3 (ema_accept_len=4.21, ema reseeded to 2.00)
+[2026-09-06 16:08:19] Adaptive spec params updated: steps 3 -> 15 (ema_accept_len=2.51)
+[2026-09-06 16:08:20] Adaptive spec params updated: steps 15 -> 3 (ema_accept_len=3.37, ema reseeded to 2.00)
+[2026-09-06 16:08:26] Adaptive spec params updated: steps 3 -> 15 (ema_accept_len=2.51)
+[2026-09-06 16:08:27] Adaptive spec params updated: steps 15 -> 3 (ema_accept_len=4.53, ema reseeded to 2.00)
+[2026-09-06 16:08:28] Adaptive spec params updated: steps 3 -> 15 (ema_accept_len=2.76)
+[2026-09-06 16:08:29] Adaptive spec params updated: steps 15 -> 3 (ema_accept_len=4.05, ema reseeded to 2.00)
+$HOME/tools/flash-next-bench/adaptive/c1/ab_run.sh: 41 行: 2591692 強制終了            PYTHONPATH=~/tools/sglang-c1/python PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True SGLANG_ADAPTIVE_POLICY=$POLICY setsid ./serve-fast.sh wa --speculative-adaptive-config "$CFG" > $LOG 2>&1 < /dev/null  (wd: ~/tools/sglang-rtxpro6000)
+[c1ab-ema] done 16:08:40; gpu: 5503 MiB
+[c1ab-conf] up 16:10:36 policy=confidence cfg=$HOME/tools/flash-next-bench/adaptive/w16_conf.json
+[2026-09-06 16:09:12] Load weight begin. avail mem=88.70 GB
+measured prose-en 1/2: 247.75 t/s
+measured prose-en 2/2: 244.61 t/s
+warming up prose-ja ...
+measured prose-ja 1/2: 220.07 t/s
+measured prose-ja 2/2: 221.77 t/s
+warming up agent-loop ...
+measured agent-loop 1/2: 268.49 t/s
+measured agent-loop 2/2: 265.81 t/s
+[c1ab-conf] prompt_tokens=17307 completion=12 time=1.5s PASS=True out='AURORA-CEDAR-7319'
+[c1ab-conf] switches during bench: 3
+[2026-09-06 16:10:58] Adaptive spec params updated (confidence): steps 15 -> 3 (E@15=2.60 -> 178 tok/s, E@3=1.50 -> 211 tok/s, conf=0.907)
+[2026-09-06 16:11:35] Adaptive spec params updated (confidence): steps 3 -> 15 (E@3=2.16 -> 267 tok/s, E@15=5.53 -> 323 tok/s, conf=0.782)
+[2026-09-06 16:11:40] Adaptive spec params updated (confidence): steps 15 -> 3 (E@15=3.21 -> 208 tok/s, E@3=1.91 -> 246 tok/s, conf=0.993)
+$HOME/tools/flash-next-bench/adaptive/c1/ab_run.sh: 41 行: 2593814 強制終了            PYTHONPATH=~/tools/sglang-c1/python PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True SGLANG_ADAPTIVE_POLICY=$POLICY setsid ./serve-fast.sh wa --speculative-adaptive-config "$CFG" > $LOG 2>&1 < /dev/null  (wd: ~/tools/sglang-rtxpro6000)
+[c1ab-conf] done 16:11:51; gpu: 5539 MiB
+=== C1 A/B done 2026-09-06 16:11:51

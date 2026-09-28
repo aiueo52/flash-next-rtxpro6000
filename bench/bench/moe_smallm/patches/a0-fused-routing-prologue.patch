@@ -1,0 +1,99 @@
+--- a/flashinfer/data/csrc/fused_moe/cutlass_backend/cutlass_fused_moe_kernels.cuh
++++ b/flashinfer/data/csrc/fused_moe/cutlass_backend/cutlass_fused_moe_kernels.cuh
+@@ -68,6 +68,8 @@
+ #include "3rdparty/cub/cub.cuh"
+ #endif
+ 
++#include <cstdlib>
++
+ using namespace tensorrt_llm::kernels;
+ using namespace tensorrt_llm::common;
+ 
+@@ -346,6 +348,19 @@
+                      smart_routing, cluster_rank, cluster_size, num_experts_smem);
+ }
+ 
++// A0: cub::BlockRadixRank's temp storage is COUNTER_LANES * BLOCK_THREADS * PACKING_RATIO
++// digit counters, i.e. 64 KiB at BLOCK_SIZE=32 / RADIX_BITS=10 (512 experts + sentinel).
++// Zeroing and raking that with 32 threads costs ~15 us -- more than the 3-kernel fallback it
++// replaces.  BlockRadixRankMatch keeps one counter per (digit, warp) instead (~4 KiB here) and
++// ranks with warp match_any, so it is ~10x cheaper at this block size.  Only the >=10-bit tier
++// (which upstream never reached) switches over; every existing configuration keeps
++// cub::BlockRadixRank bit-for-bit.
++template <int BLOCK_SIZE, int LOG2_NUM_EXPERTS>
++using FusedPrologueRadixRank =
++    ::cuda::std::conditional_t<(LOG2_NUM_EXPERTS >= 10),
++                               cub::BlockRadixRankMatch<BLOCK_SIZE, LOG2_NUM_EXPERTS, false>,
++                               cub::BlockRadixRank<BLOCK_SIZE, LOG2_NUM_EXPERTS, false>>;
++
+ template <int BLOCK_SIZE, int EXPERTS_PER_TOKEN, int LOG2_NUM_EXPERTS>
+ __global__ void fusedBuildExpertMapsSortFirstTokenKernel(
+     int const* const token_selected_experts, int* const permuted_row_to_unpermuted_row,
+@@ -395,7 +410,7 @@
+   // that to elide the binary search
+ 
+   // sort the expert map
+-  using BlockRadixRank = cub::BlockRadixRank<BLOCK_SIZE, LOG2_NUM_EXPERTS, false>;
++  using BlockRadixRank = FusedPrologueRadixRank<BLOCK_SIZE, LOG2_NUM_EXPERTS>;
+   extern __shared__ unsigned char temp_storage[];
+   auto& sort_temp = *reinterpret_cast<typename BlockRadixRank::TempStorage*>(temp_storage);
+ 
+@@ -446,7 +461,7 @@
+   int const blocks = (num_tokens + threads - 1) / threads;
+   TLLM_CHECK_WITH_INFO(blocks == 1, "Current implementation requires single block");
+ 
+-  using BlockRadixRank = cub::BlockRadixRank<BLOCK_SIZE, LOG2_NUM_EXPERTS, false>;
++  using BlockRadixRank = FusedPrologueRadixRank<BLOCK_SIZE, LOG2_NUM_EXPERTS>;
+   size_t shared_size = sizeof(typename BlockRadixRank::TempStorage);
+ 
+   cudaLaunchConfig_t config;
+@@ -542,6 +557,10 @@
+       func = &fusedBuildExpertMapsSortFirstTokenBlockSize<8, LOG2_NUM_EXPERTS>;
+       break;
+     }
++    case 10: {
++      func = &fusedBuildExpertMapsSortFirstTokenBlockSize<10, LOG2_NUM_EXPERTS>;
++      break;
++    }
+     default: {
+       TLLM_LOG_TRACE("Top-K value %d does not have supported fused moe prologues",
+                      experts_per_token);
+@@ -554,15 +573,27 @@
+               stream);
+ }
+ 
++// FLASHINFER_MOE_FUSED_PROLOGUE=0 forces the unfused 3-kernel prologue (A0 kill switch).
++inline bool fusedPrologueEnabled() {
++  static bool const enabled = [] {
++    char const* v = std::getenv("FLASHINFER_MOE_FUSED_PROLOGUE");
++    return !(v && v[0] == '0' && v[1] == '\0');
++  }();
++  return enabled;
++}
++
+ bool fusedBuildExpertMapsSortFirstToken(
+     int const* token_selected_experts, int* permuted_row_to_unpermuted_row,
+     int* unpermuted_row_to_permuted_row, int64_t* expert_first_token_offset,
+     int64_t const num_tokens, int const num_experts_per_node, int const experts_per_token,
+     int const start_expert, int const end_expert, bool enable_pdl, cudaStream_t stream) {
++  if (!fusedPrologueEnabled()) {
++    return false;
++  }
+   // We need enough bits to represent [0, num_experts_per_node+1] (inclusive) i.e.
+   // num_experts_per_node + 2 values This is floor(log2(num_experts_per_node+1)) + 1
+   int expert_log = static_cast<int>(log2(num_experts_per_node + 1)) + 1;
+-  if (expert_log <= 9) {
++  if (expert_log <= 10) {
+     auto funcs = std::array{&fusedBuildExpertMapsSortFirstTokenBlockSize<1>,
+                             &fusedBuildExpertMapsSortFirstTokenBlockSize<2>,
+                             &fusedBuildExpertMapsSortFirstTokenBlockSize<3>,
+@@ -571,7 +602,8 @@
+                             &fusedBuildExpertMapsSortFirstTokenBlockSize<6>,
+                             &fusedBuildExpertMapsSortFirstTokenBlockSize<7>,
+                             &fusedBuildExpertMapsSortFirstTokenBlockSize<8>,
+-                            &fusedBuildExpertMapsSortFirstTokenBlockSize<9>};
++                            &fusedBuildExpertMapsSortFirstTokenBlockSize<9>,
++                            &fusedBuildExpertMapsSortFirstTokenBlockSize<10>};
+ 
+     return funcs[expert_log - 1](token_selected_experts, permuted_row_to_unpermuted_row,
+                                  unpermuted_row_to_permuted_row, expert_first_token_offset,

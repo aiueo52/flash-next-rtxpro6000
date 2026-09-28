@@ -1,0 +1,16 @@
+# New run output in this directory is not committed by default. The files listed below are the
+# published measurements (tracked); re-running the tools overwrites them in place, review before committing.
+*
+!.gitignore
+!hit.json
+!hit_v2.json
+!hotcfg.json
+!hotcfg_v2.json
+!overlap.json
+!pipeline.json
+!pipeline2.json
+!pipeline3.json
+!pipeline_v2.json
+!pipeline_v2_glue12.json
+!pipeline_v2_nojoin.json
+!smoke.json

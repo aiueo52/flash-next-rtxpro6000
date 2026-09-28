@@ -1,0 +1,14 @@
+$HOME/tools/flash-next-bench/prof/traces/n1cq-off-w4-code-edit/1788692338.7089162-TP-0.trace.json.gz
+  step wall= 10.50ms  gpu_busy= 10.26ms  gpu_idle_in_step= 0.08ms
+  draft                        occ= 20 kernels/step=    109 busy_ms=  0.56 raw_ms=  0.64 legacy_trimmed_ms=  0.53
+  step[TARGET_VERIFY bs=1]     occ= 20 kernels/step=   1317 busy_ms=  9.18 raw_ms= 10.81 legacy_trimmed_ms=  9.36
+  draft_extend                 occ= 20 kernels/step=     88 busy_ms=  0.44 raw_ms=  0.51 legacy_trimmed_ms=  0.46
+  TOTAL                        kernels/step=   1514 busy_ms= 10.18 wall_ms= 10.50 idle_ms= 0.08 legacy_trimmed_ms= 10.34
+  (check)                      sum(busy)+idle= 10.26ms vs wall= 10.50ms  residual= 0.24ms (86 unattributed kernels/step)
+$HOME/tools/flash-next-bench/prof/traces/n1cq-off-w4-prose-en/1788692344.5576384-TP-0.trace.json.gz
+  step wall= 10.36ms  gpu_busy= 10.13ms  gpu_idle_in_step= 0.08ms
+  draft                        occ= 20 kernels/step=    109 busy_ms=  0.56 raw_ms=  0.63 legacy_trimmed_ms=  0.53
+  step[TARGET_VERIFY bs=1]     occ= 20 kernels/step=   1317 busy_ms=  9.00 raw_ms= 10.61 legacy_trimmed_ms=  9.04
+  draft_extend                 occ= 20 kernels/step=     88 busy_ms=  0.42 raw_ms=  0.50 legacy_trimmed_ms=  0.44
+  TOTAL                        kernels/step=   1514 busy_ms=  9.98 wall_ms= 10.36 idle_ms= 0.08 legacy_trimmed_ms= 10.01
+  (check)                      sum(busy)+idle= 10.06ms vs wall= 10.36ms  residual= 0.30ms (94 unattributed kernels/step)

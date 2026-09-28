@@ -1,0 +1,14 @@
+# New run output in this directory is not committed by default. The files listed below are the
+# published measurements (tracked); re-running the tools overwrites them in place, review before committing.
+*
+!.gitignore
+!agree-b-w4.txt
+!agree-c-w4.txt
+!n1bq-off-w4.agree.json
+!n1bq-off-w4.step.txt
+!n1bq-on-w4.agree.json
+!n1bq-on-w4.step.txt
+!n1cq-off-w4.agree.json
+!n1cq-off-w4.step.txt
+!n1cq-on-w4.agree.json
+!n1cq-on-w4.step.txt

@@ -1,0 +1,10 @@
+l2_pin enabled: True file: $HOME/tools/sglang-l2/python/sglang/srt/layers/l2_pin.py
+
+=== draft head 49152x2560 M=1, after 190 MB of streaming  (22:22:58)
+  no pin (flag path untouched)       gemv   78.43 us   nodes [('_Z12touch_kernelILi0EEvP', 0, 0, 0.0), ('_Z12touch_kernelILi0EEvP', 0, 0, 0.0), ('_w8a16_gemv_kernel', 0, 0, 0.0)]
+  pin_tensor -> True window (120, 'MiB')
+  pinned via l2_pin (capture stream) gemv   78.40 us   nodes [('_Z12touch_kernelILi0EEvP', 120, 2, 1.0), ('_Z12touch_kernelILi0EEvP', 120, 2, 1.0), ('_w8a16_gemv_kernel', 120, 2, 1.0)]
+  pinned, second capture stream      gemv   78.37 us   nodes [('_Z12touch_kernelILi0EEvP', 120, 2, 1.0), ('_Z12touch_kernelILi0EEvP', 120, 2, 1.0), ('_w8a16_gemv_kernel', 120, 2, 1.0)]
+  fresh stream without apply (should miss) gemv   78.43 us   nodes [('_Z12touch_kernelILi0EEvP', 0, 0, 0.0), ('_Z12touch_kernelILi0EEvP', 0, 0, 0.0), ('_w8a16_gemv_kernel', 0, 0, 0.0)]
+
+RESULT: off 78.43 us -> on 78.40 us (1.00x); fresh-stream 78.43

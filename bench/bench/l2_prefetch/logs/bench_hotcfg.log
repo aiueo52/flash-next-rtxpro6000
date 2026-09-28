@@ -1,0 +1,74 @@
+
+=== qkvz N=16384 K=2560 M=4: production cfg (32, 128, 1, True, None, 4, 3)  (21:16:56)
+  production: cold   32.45 us ( 1293 GB/s)  hot   22.83 us ( 1837 GB/s)
+  skip (128, 256, 1, True, None, 8, 4): out of resource: shared memory, Required: 122880, Hardware l
+  skip (128, 256, 2, True, None, 8, 4): out of resource: shared memory, Required: 122880, Hardware l
+  skip (128, 256, 4, True, None, 8, 4): out of resource: shared memory, Required: 122880, Hardware l
+  skip (128, 256, 8, True, None, 8, 4): out of resource: shared memory, Required: 122880, Hardware l
+  (128, 128, 4, True, None, 4, 2): hot   16.90 us ( 2482 GB/s)  cold   31.50 us ( 1331 GB/s)  match=True
+  (128, 128, 4, True, None, 4, 3): hot   17.02 us ( 2464 GB/s)  cold   31.39 us ( 1336 GB/s)  match=True
+  (128, 64, 4, True, None, 4, 3): hot   17.17 us ( 2443 GB/s)  cold   30.82 us ( 1361 GB/s)  match=True
+  (128, 64, 4, True, None, 4, 2): hot   17.18 us ( 2441 GB/s)  cold   31.63 us ( 1326 GB/s)  match=True
+  (64, 64, 2, True, None, 4, 3): hot   17.57 us ( 2387 GB/s)  cold   29.47 us ( 1423 GB/s)  match=True
+
+=== qkvz N=16384 K=2560 M=16: production cfg (64, 128, 1, True, None, 4, 3)  (21:18:39)
+  production: cold   31.78 us ( 1320 GB/s)  hot   20.83 us ( 2013 GB/s)
+  skip (128, 256, 1, True, None, 8, 4): out of resource: shared memory, Required: 122880, Hardware l
+  skip (128, 256, 2, True, None, 8, 4): out of resource: shared memory, Required: 122880, Hardware l
+  skip (128, 256, 4, True, None, 8, 4): out of resource: shared memory, Required: 122880, Hardware l
+  skip (128, 256, 8, True, None, 8, 4): out of resource: shared memory, Required: 122880, Hardware l
+  (128, 128, 4, True, None, 4, 3): hot   17.15 us ( 2445 GB/s)  cold   31.22 us ( 1344 GB/s)  match=True
+  (128, 64, 4, True, None, 4, 3): hot   17.38 us ( 2414 GB/s)  cold   30.86 us ( 1359 GB/s)  match=True
+  (128, 128, 4, True, None, 4, 2): hot   17.47 us ( 2401 GB/s)  cold   31.54 us ( 1330 GB/s)  match=True
+  (128, 128, 4, True, None, 8, 3): hot   17.78 us ( 2360 GB/s)  cold   30.99 us ( 1353 GB/s)  match=True
+  (128, 64, 4, True, None, 4, 2): hot   17.86 us ( 2349 GB/s)  cold   32.51 us ( 1290 GB/s)  match=True
+
+=== out_proj N=2560 K=6144 M=4: production cfg (32, 128, 6, True, None, 4, 3)  (21:20:21)
+  production: cold   19.14 us (  822 GB/s)  hot   11.92 us ( 1320 GB/s)
+  skip (128, 256, 1, True, None, 8, 4): out of resource: shared memory, Required: 122880, Hardware l
+  skip (128, 256, 2, True, None, 8, 4): out of resource: shared memory, Required: 122880, Hardware l
+  skip (128, 256, 4, True, None, 8, 4): out of resource: shared memory, Required: 122880, Hardware l
+  skip (128, 256, 8, True, None, 8, 4): out of resource: shared memory, Required: 122880, Hardware l
+  (64, 256, 4, True, None, 8, 3): hot    9.73 us ( 1617 GB/s)  cold   14.90 us ( 1056 GB/s)  match=True
+  (64, 256, 8, True, None, 8, 2): hot    9.76 us ( 1612 GB/s)  cold   15.44 us ( 1019 GB/s)  match=True
+  (64, 256, 8, True, None, 4, 2): hot    9.79 us ( 1606 GB/s)  cold   16.32 us (  964 GB/s)  match=True
+  (64, 64, 8, True, None, 4, 3): hot    9.79 us ( 1606 GB/s)  cold   15.71 us ( 1001 GB/s)  match=True
+  (64, 128, 4, True, None, 8, 3): hot    9.84 us ( 1599 GB/s)  cold   14.50 us ( 1085 GB/s)  match=True
+
+=== out_proj N=2560 K=6144 M=16: production cfg (32, 128, 6, True, None, 4, 3)  (21:21:23)
+  production: cold   19.63 us (  801 GB/s)  hot   12.91 us ( 1218 GB/s)
+  skip (128, 256, 1, True, None, 8, 4): out of resource: shared memory, Required: 122880, Hardware l
+  skip (128, 256, 2, True, None, 8, 4): out of resource: shared memory, Required: 122880, Hardware l
+  skip (128, 256, 4, True, None, 8, 4): out of resource: shared memory, Required: 122880, Hardware l
+  skip (128, 256, 8, True, None, 8, 4): out of resource: shared memory, Required: 122880, Hardware l
+  (64, 128, 4, True, None, 8, 3): hot   10.18 us ( 1546 GB/s)  cold   14.59 us ( 1078 GB/s)  match=True
+  (128, 128, 8, True, None, 4, 3): hot   10.18 us ( 1546 GB/s)  cold   15.90 us (  989 GB/s)  match=True
+  (64, 64, 4, True, None, 8, 4): hot   10.22 us ( 1538 GB/s)  cold   14.05 us ( 1120 GB/s)  match=True
+  (64, 256, 4, True, None, 8, 3): hot   10.22 us ( 1538 GB/s)  cold   14.98 us ( 1050 GB/s)  match=True
+  (64, 128, 8, True, None, 8, 3): hot   10.27 us ( 1531 GB/s)  cold   15.30 us ( 1028 GB/s)  match=True
+
+=== attn_qkv N=13312 K=2560 M=4: production cfg (32, 128, 1, True, None, 4, 3)  (21:22:26)
+  production: cold   33.28 us ( 1024 GB/s)  hot   21.28 us ( 1601 GB/s)
+  skip (128, 256, 1, True, None, 8, 4): out of resource: shared memory, Required: 122880, Hardware l
+  skip (128, 256, 2, True, None, 8, 4): out of resource: shared memory, Required: 122880, Hardware l
+  skip (128, 256, 4, True, None, 8, 4): out of resource: shared memory, Required: 122880, Hardware l
+  skip (128, 256, 8, True, None, 8, 4): out of resource: shared memory, Required: 122880, Hardware l
+  (64, 128, 4, True, None, 4, 2): hot   15.84 us ( 2151 GB/s)  cold   27.04 us ( 1260 GB/s)  match=True
+  (64, 128, 4, True, None, 4, 3): hot   16.19 us ( 2105 GB/s)  cold   26.58 us ( 1282 GB/s)  match=True
+  (64, 128, 8, True, None, 4, 2): hot   16.19 us ( 2105 GB/s)  cold   27.26 us ( 1250 GB/s)  match=True
+  (64, 64, 4, True, None, 4, 2): hot   16.27 us ( 2094 GB/s)  cold   27.18 us ( 1254 GB/s)  match=True
+  (64, 256, 4, True, None, 4, 2): hot   16.45 us ( 2072 GB/s)  cold   28.72 us ( 1187 GB/s)  match=True
+
+=== attn_qkv N=13312 K=2560 M=16: production cfg (32, 128, 1, True, None, 4, 3)  (21:23:27)
+  production: cold   34.93 us (  976 GB/s)  hot   25.79 us ( 1321 GB/s)
+  skip (128, 256, 1, True, None, 8, 4): out of resource: shared memory, Required: 122880, Hardware l
+  skip (128, 256, 2, True, None, 8, 4): out of resource: shared memory, Required: 122880, Hardware l
+  skip (128, 256, 4, True, None, 8, 4): out of resource: shared memory, Required: 122880, Hardware l
+  skip (128, 256, 8, True, None, 8, 4): out of resource: shared memory, Required: 122880, Hardware l
+  (64, 128, 4, True, None, 4, 3): hot   17.36 us ( 1963 GB/s)  cold   26.61 us ( 1281 GB/s)  match=True
+  (64, 128, 4, True, None, 4, 2): hot   17.49 us ( 1949 GB/s)  cold   27.42 us ( 1243 GB/s)  match=True
+  (64, 128, 4, True, None, 8, 3): hot   17.52 us ( 1945 GB/s)  cold   25.98 us ( 1312 GB/s)  match=True
+  (64, 64, 8, True, None, 4, 3): hot   17.62 us ( 1935 GB/s)  cold   26.82 us ( 1271 GB/s)  match=True
+  (128, 128, 4, True, None, 4, 3): hot   17.70 us ( 1926 GB/s)  cold   28.54 us ( 1194 GB/s)  match=True
+
+[wrote] $HOME/tools/flash-next-bench/bench/l2_prefetch/results/hotcfg.json

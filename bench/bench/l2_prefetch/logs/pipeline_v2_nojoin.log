@@ -1,0 +1,38 @@
+
+=== M=4 expert stream 77 MB/layer  (21:57:26)
+  none               grid    0 prio=0:   165.45 us/layer  qkvz 28.56 out 13.23 tiny 0.8 touch [50.46] clk (2287, 2302)
+  postgemm           grid   32 prio=0:   154.99 us/layer  qkvz 16.98 out 7.06 tiny 0.8 touch [41.8, 50.42] clk (2302, 2332)
+  postgemm           grid   64 prio=0:   163.52 us/layer  qkvz 15.94 out 6.98 tiny 0.8 touch [38.56, 50.46] clk (2310, 2325)
+  postgemm+persist   grid   32 prio=0:   155.50 us/layer  qkvz 16.62 out 7.04 tiny 0.8 touch [40.26, 51.54] clk (2310, 2340)
+  postgemm+persist   grid   64 prio=0:   173.55 us/layer  qkvz 15.98 out 6.99 tiny 0.8 touch [37.81, 51.51] clk (2310, 2332)
+  jit                grid   32 prio=0:   155.85 us/layer  qkvz 15.96 out 6.95 tiny 0.8 touch [11.62, 39.96] clk (2317, 2325)
+  jit                grid   64 prio=0:   168.25 us/layer  qkvz 16.14 out 6.96 tiny 0.8 touch [11.42, 39.26] clk (2317, 2340)
+
+=== M=4 expert stream 190 MB/layer  (21:57:35)
+  none               grid    0 prio=0:   244.08 us/layer  qkvz 28.31 out 12.85 tiny 0.8 touch [123.66] clk (2302, 2325)
+  postgemm           grid   32 prio=0:   234.09 us/layer  qkvz 16.58 out 7.06 tiny 0.8 touch [40.05, 123.61] clk (2317, 2332)
+  postgemm           grid   64 prio=0:   241.88 us/layer  qkvz 15.97 out 6.94 tiny 0.8 touch [37.65, 123.66] clk (2317, 2325)
+  postgemm+persist   grid   32 prio=0:   236.03 us/layer  qkvz 16.51 out 7.02 tiny 0.8 touch [40.16, 123.51] clk (2325, 2332)
+  postgemm+persist   grid   64 prio=0:   243.81 us/layer  qkvz 15.95 out 6.98 tiny 0.8 touch [37.62, 123.63] clk (2332, 2332)
+  jit                grid   32 prio=0:   234.14 us/layer  qkvz 15.86 out 6.89 tiny 0.8 touch [11.45, 75.91] clk (2325, 2332)
+  jit                grid   64 prio=0:   241.92 us/layer  qkvz 16.01 out 7.01 tiny 0.8 touch [11.37, 75.66] clk (2325, 2340)
+
+=== M=16 expert stream 77 MB/layer  (21:57:44)
+  none               grid    0 prio=0:   167.24 us/layer  qkvz 29.32 out 13.69 tiny 0.8 touch [50.53] clk (2302, 2332)
+  postgemm           grid   32 prio=0:   159.88 us/layer  qkvz 16.61 out 8.62 tiny 0.8 touch [41.94, 50.53] clk (2302, 2340)
+  postgemm           grid   64 prio=0:   167.59 us/layer  qkvz 16.14 out 8.48 tiny 0.8 touch [38.86, 50.44] clk (2302, 2332)
+  postgemm+persist   grid   32 prio=0:   159.14 us/layer  qkvz 15.98 out 8.58 tiny 0.8 touch [39.49, 51.81] clk (2310, 2332)
+  postgemm+persist   grid   64 prio=0:   173.18 us/layer  qkvz 16.22 out 8.48 tiny 0.8 touch [37.65, 51.73] clk (2325, 2340)
+  jit                grid   32 prio=0:   155.03 us/layer  qkvz 16.13 out 8.16 tiny 0.8 touch [11.73, 40.18] clk (2317, 2325)
+  jit                grid   64 prio=0:   165.83 us/layer  qkvz 16.34 out 8.32 tiny 0.8 touch [11.49, 39.37] clk (2317, 2340)
+
+=== M=16 expert stream 190 MB/layer  (21:57:53)
+  none               grid    0 prio=0:   248.17 us/layer  qkvz 28.92 out 13.37 tiny 0.8 touch [123.94] clk (2302, 2317)
+  postgemm           grid   32 prio=0:   243.63 us/layer  qkvz 15.91 out 8.57 tiny 0.8 touch [39.6, 123.95] clk (2317, 2340)
+  postgemm           grid   64 prio=0:   250.67 us/layer  qkvz 16.2 out 8.53 tiny 0.8 touch [37.66, 124.1] clk (2317, 2332)
+  postgemm+persist   grid   32 prio=0:   246.45 us/layer  qkvz 15.91 out 8.54 tiny 0.8 touch [39.55, 123.89] clk (2317, 2332)
+  postgemm+persist   grid   64 prio=0:   247.51 us/layer  qkvz 16.18 out 8.44 tiny 0.8 touch [37.6, 123.95] clk (2332, 2340)
+  jit                grid   32 prio=0:   240.21 us/layer  qkvz 16.11 out 8.17 tiny 0.8 touch [11.45, 76.08] clk (2332, 2332)
+  jit                grid   64 prio=0:   254.97 us/layer  qkvz 16.26 out 8.37 tiny 0.8 touch [11.4, 75.83] clk (2325, 2340)
+
+[wrote] bench/l2_prefetch/results/pipeline_v2_nojoin.json

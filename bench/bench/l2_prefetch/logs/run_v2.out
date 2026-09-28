@@ -1,0 +1,340 @@
+=== hit_v2 2026-09-06T21:55:12+09:00 ===
+
+=== device limits: {"l2_bytes": 134217728, "max_persisting_bytes": 83886080, "max_window_bytes": 134217728, "sms": 188, "prio_least": 0, "prio_greatest": -5, "persisting_limit_now": 25165824, "l2_bytes_driver": 134217728}  (21:55:13)
+persisting limit requested 80 MB -> actual 80 MB
+
+=== qkvz N=16384 K=2560 M=4 weight 40.0 MB  (21:55:17)
+  cold             Y=   0 lim=  0 hr=1.00  gemv    28.64 us =   1464 GB/s   touches [('touch_kernel<0>', 204.93)] clk (2287, 2287)
+  touched          Y=   0 lim=  0 hr=1.00  gemv    16.93 us =   2478 GB/s   touches [('touch_kernel<0>', 205.28), ('touch_kernel<0>', 27.12)] clk (2287, 2287)
+  touched+stream   Y=  77 lim=  0 hr=1.00  gemv    17.15 us =   2445 GB/s   touches [('touch_kernel<0>', 205.28), ('touch_kernel<0>', 27.14), ('touch_kernel<0>', 50.56)] clk (2287, 2340)
+  elast+stream     Y=  77 lim=  0 hr=1.00  gemv    17.18 us =   2441 GB/s   touches [('touch_kernel<0>', 205.27), ('touch_kernel<2>', 27.17), ('touch_kernel<0>', 50.61)] clk (2340, 2340)
+  elast+cs         Y=  77 lim=  0 hr=1.00  gemv    17.17 us =   2443 GB/s   touches [('touch_kernel<0>', 205.22), ('touch_kernel<2>', 27.14), ('touch_kernel<1>', 50.61)] clk (2332, 2340)
+  touched+stream   Y= 190 lim=  0 hr=1.00  gemv    28.64 us =   1464 GB/s   touches [('touch_kernel<0>', 205.52), ('touch_kernel<0>', 27.14), ('touch_kernel<0>', 122.62)] clk (2332, 2332)
+  elast+stream     Y= 190 lim=  0 hr=1.00  gemv    24.29 us =   1727 GB/s   touches [('touch_kernel<0>', 205.33), ('touch_kernel<2>', 27.18), ('touch_kernel<0>', 122.59)] clk (2332, 2332)
+  elast+cs         Y= 190 lim=  0 hr=1.00  gemv    17.18 us =   2441 GB/s   touches [('touch_kernel<0>', 205.38), ('touch_kernel<2>', 27.18), ('touch_kernel<1>', 122.45)] clk (2332, 2332)
+  touched          Y=   0 lim= 80 hr=1.00  gemv    16.93 us =   2478 GB/s   touches [('touch_kernel<0>', 205.22), ('touch_kernel<0>', 27.1)] clk (2332, 2332)
+  touched+stream   Y=  77 lim= 80 hr=1.00  gemv    17.18 us =   2441 GB/s   touches [('touch_kernel<0>', 205.22), ('touch_kernel<0>', 27.14), ('touch_kernel<0>', 50.59)] clk (2332, 2340)
+  persist+stream   Y=  77 lim= 80 hr=1.00  gemv    17.15 us =   2445 GB/s   touches [('touch_kernel<0>', 205.23), ('touch_kernel<0>', 7.23), ('touch_kernel<0>', 50.58)] clk (2340, 2340)
+  persist+cs       Y=  77 lim= 80 hr=1.00  gemv    17.18 us =   2441 GB/s   touches [('touch_kernel<0>', 205.22), ('touch_kernel<0>', 7.26), ('touch_kernel<1>', 50.56)] clk (2332, 2340)
+  persist+swin     Y=  77 lim= 80 hr=1.00  gemv    17.17 us =   2443 GB/s   touches [('touch_kernel<0>', 205.19), ('touch_kernel<0>', 7.26), ('touch_kernel<0>', 50.51)] clk (2332, 2332)
+  swin-consumer    Y=  77 lim= 80 hr=1.00  gemv    17.18 us =   2441 GB/s   touches [('touch_kernel<0>', 205.23), ('touch_kernel<0>', 7.3), ('touch_kernel<0>', 50.59)] clk (2332, 2332)
+     nodes: [('touch_kernelILi0EEvPKhyP', 40, 2, 1), ('touch_kernelILi0EEvPKhyP', 40, 2, 1), ('touch_kernelILi0EEvPKhyP', 40, 2, 1), ('_w8a16_gemv_kernel', 40, 2, 1)]
+  touched+stream   Y= 190 lim= 80 hr=1.00  gemv    28.54 us =   1469 GB/s   touches [('touch_kernel<0>', 205.3), ('touch_kernel<0>', 27.14), ('touch_kernel<0>', 122.55)] clk (2332, 2332)
+  persist+stream   Y= 190 lim= 80 hr=1.00  gemv    17.44 us =   2405 GB/s   touches [('touch_kernel<0>', 205.28), ('touch_kernel<0>', 7.3), ('touch_kernel<0>', 122.56)] clk (2332, 2332)
+  persist+cs       Y= 190 lim= 80 hr=1.00  gemv    17.14 us =   2448 GB/s   touches [('touch_kernel<0>', 205.28), ('touch_kernel<0>', 7.3), ('touch_kernel<1>', 122.38)] clk (2332, 2332)
+  persist+swin     Y= 190 lim= 80 hr=1.00  gemv    17.39 us =   2412 GB/s   touches [('touch_kernel<0>', 205.25), ('touch_kernel<0>', 7.23), ('touch_kernel<0>', 122.59)] clk (2332, 2332)
+  swin-consumer    Y= 190 lim= 80 hr=1.00  gemv    17.38 us =   2414 GB/s   touches [('touch_kernel<0>', 205.2), ('touch_kernel<0>', 7.23), ('touch_kernel<0>', 122.59)] clk (2340, 2340)
+     nodes: [('touch_kernelILi0EEvPKhyP', 40, 2, 1), ('touch_kernelILi0EEvPKhyP', 40, 2, 1), ('touch_kernelILi0EEvPKhyP', 40, 2, 1), ('_w8a16_gemv_kernel', 40, 2, 1)]
+
+=== qkvz N=16384 K=2560 M=16 weight 40.0 MB  (21:55:22)
+  cold             Y=   0 lim=  0 hr=1.00  gemv    28.94 us =   1449 GB/s   touches [('touch_kernel<0>', 205.27)] clk (2332, 2340)
+  touched          Y=   0 lim=  0 hr=1.00  gemv    16.26 us =   2580 GB/s   touches [('touch_kernel<0>', 205.51), ('touch_kernel<0>', 27.1)] clk (2332, 2332)
+  touched+stream   Y=  77 lim=  0 hr=1.00  gemv    16.61 us =   2525 GB/s   touches [('touch_kernel<0>', 205.54), ('touch_kernel<0>', 27.17), ('touch_kernel<0>', 50.66)] clk (2332, 2332)
+  elast+stream     Y=  77 lim=  0 hr=1.00  gemv    16.54 us =   2535 GB/s   touches [('touch_kernel<0>', 205.39), ('touch_kernel<2>', 27.17), ('touch_kernel<0>', 50.51)] clk (2325, 2325)
+  elast+cs         Y=  77 lim=  0 hr=1.00  gemv    16.61 us =   2525 GB/s   touches [('touch_kernel<0>', 205.54), ('touch_kernel<2>', 27.14), ('touch_kernel<1>', 50.58)] clk (2325, 2325)
+  touched+stream   Y= 190 lim=  0 hr=1.00  gemv    28.90 us =   1452 GB/s   touches [('touch_kernel<0>', 205.54), ('touch_kernel<0>', 27.14), ('touch_kernel<0>', 122.67)] clk (2325, 2332)
+  elast+stream     Y= 190 lim=  0 hr=1.00  gemv    23.86 us =   1758 GB/s   touches [('touch_kernel<0>', 205.52), ('touch_kernel<2>', 27.14), ('touch_kernel<0>', 122.51)] clk (2332, 2332)
+  elast+cs         Y= 190 lim=  0 hr=1.00  gemv    16.61 us =   2525 GB/s   touches [('touch_kernel<0>', 205.51), ('touch_kernel<2>', 27.15), ('touch_kernel<1>', 122.34)] clk (2325, 2332)
+  touched          Y=   0 lim= 80 hr=1.00  gemv    16.26 us =   2580 GB/s   touches [('touch_kernel<0>', 205.54), ('touch_kernel<0>', 27.07)] clk (2325, 2325)
+  touched+stream   Y=  77 lim= 80 hr=1.00  gemv    16.58 us =   2530 GB/s   touches [('touch_kernel<0>', 205.47), ('touch_kernel<0>', 27.14), ('touch_kernel<0>', 50.54)] clk (2325, 2325)
+  persist+stream   Y=  77 lim= 80 hr=1.00  gemv    16.56 us =   2533 GB/s   touches [('touch_kernel<0>', 205.54), ('touch_kernel<0>', 7.26), ('touch_kernel<0>', 50.58)] clk (2332, 2332)
+  persist+cs       Y=  77 lim= 80 hr=1.00  gemv    16.56 us =   2533 GB/s   touches [('touch_kernel<0>', 205.49), ('touch_kernel<0>', 7.26), ('touch_kernel<1>', 50.53)] clk (2332, 2332)
+  persist+swin     Y=  77 lim= 80 hr=1.00  gemv    16.54 us =   2535 GB/s   touches [('touch_kernel<0>', 205.44), ('touch_kernel<0>', 7.23), ('touch_kernel<0>', 50.46)] clk (2332, 2332)
+  swin-consumer    Y=  77 lim= 80 hr=1.00  gemv    16.58 us =   2530 GB/s   touches [('touch_kernel<0>', 205.41), ('touch_kernel<0>', 7.26), ('touch_kernel<0>', 50.66)] clk (2332, 2332)
+     nodes: [('touch_kernelILi0EEvPKhyP', 40, 2, 1), ('touch_kernelILi0EEvPKhyP', 40, 2, 1), ('touch_kernelILi0EEvPKhyP', 40, 2, 1), ('_w8a16_gemv_kernel', 40, 2, 1)]
+  touched+stream   Y= 190 lim= 80 hr=1.00  gemv    28.96 us =   1448 GB/s   touches [('touch_kernel<0>', 205.47), ('touch_kernel<0>', 27.17), ('touch_kernel<0>', 122.5)] clk (2332, 2332)
+  persist+stream   Y= 190 lim= 80 hr=1.00  gemv    16.75 us =   2504 GB/s   touches [('touch_kernel<0>', 205.49), ('touch_kernel<0>', 7.26), ('touch_kernel<0>', 122.48)] clk (2332, 2332)
+  persist+cs       Y= 190 lim= 80 hr=1.00  gemv    16.54 us =   2535 GB/s   touches [('touch_kernel<0>', 205.47), ('touch_kernel<0>', 7.3), ('touch_kernel<1>', 122.35)] clk (2332, 2332)
+  persist+swin     Y= 190 lim= 80 hr=1.00  gemv    16.78 us =   2499 GB/s   touches [('touch_kernel<0>', 205.54), ('touch_kernel<0>', 7.26), ('touch_kernel<0>', 122.54)] clk (2332, 2332)
+  swin-consumer    Y= 190 lim= 80 hr=1.00  gemv    16.77 us =   2501 GB/s   touches [('touch_kernel<0>', 205.47), ('touch_kernel<0>', 7.25), ('touch_kernel<0>', 122.58)] clk (2332, 2332)
+     nodes: [('touch_kernelILi0EEvPKhyP', 40, 2, 1), ('touch_kernelILi0EEvPKhyP', 40, 2, 1), ('touch_kernelILi0EEvPKhyP', 40, 2, 1), ('_w8a16_gemv_kernel', 40, 2, 1)]
+
+=== out_proj N=2560 K=6144 M=4 weight 15.0 MB  (21:55:26)
+  cold             Y=   0 lim=  0 hr=1.00  gemv    12.95 us =   1215 GB/s   touches [('touch_kernel<0>', 205.55)] clk (2332, 2332)
+  touched          Y=   0 lim=  0 hr=1.00  gemv     7.10 us =   2214 GB/s   touches [('touch_kernel<0>', 205.89), ('touch_kernel<0>', 11.18)] clk (2332, 2332)
+  touched+stream   Y=  77 lim=  0 hr=1.00  gemv     7.15 us =   2199 GB/s   touches [('touch_kernel<0>', 205.79), ('touch_kernel<0>', 11.18), ('touch_kernel<0>', 50.59)] clk (2340, 2340)
+  elast+stream     Y=  77 lim=  0 hr=1.00  gemv     7.17 us =   2194 GB/s   touches [('touch_kernel<0>', 205.78), ('touch_kernel<2>', 6.19), ('touch_kernel<0>', 50.46)] clk (2340, 2340)
+  elast+cs         Y=  77 lim=  0 hr=1.00  gemv     7.17 us =   2194 GB/s   touches [('touch_kernel<0>', 205.79), ('touch_kernel<2>', 6.13), ('touch_kernel<1>', 50.56)] clk (2340, 2340)
+  touched+stream   Y= 190 lim=  0 hr=1.00  gemv    12.96 us =   1214 GB/s   touches [('touch_kernel<0>', 205.76), ('touch_kernel<0>', 11.17), ('touch_kernel<0>', 122.53)] clk (2340, 2340)
+  elast+stream     Y= 190 lim=  0 hr=1.00  gemv     8.30 us =   1894 GB/s   touches [('touch_kernel<0>', 205.84), ('touch_kernel<2>', 6.18), ('touch_kernel<0>', 122.53)] clk (2340, 2340)
+  elast+cs         Y= 190 lim=  0 hr=1.00  gemv     7.15 us =   2199 GB/s   touches [('touch_kernel<0>', 205.79), ('touch_kernel<2>', 6.21), ('touch_kernel<1>', 122.34)] clk (2340, 2340)
+  touched          Y=   0 lim= 80 hr=1.00  gemv     7.10 us =   2214 GB/s   touches [('touch_kernel<0>', 205.78), ('touch_kernel<0>', 11.17)] clk (2340, 2340)
+  touched+stream   Y=  77 lim= 80 hr=1.00  gemv     7.17 us =   2194 GB/s   touches [('touch_kernel<0>', 205.89), ('touch_kernel<0>', 11.14), ('touch_kernel<0>', 50.58)] clk (2340, 2340)
+  persist+stream   Y=  77 lim= 80 hr=1.00  gemv     7.17 us =   2194 GB/s   touches [('touch_kernel<0>', 205.81), ('touch_kernel<0>', 3.39), ('touch_kernel<0>', 50.67)] clk (2332, 2340)
+  persist+cs       Y=  77 lim= 80 hr=1.00  gemv     7.17 us =   2194 GB/s   touches [('touch_kernel<0>', 205.79), ('touch_kernel<0>', 3.39), ('touch_kernel<1>', 50.5)] clk (2332, 2332)
+  persist+swin     Y=  77 lim= 80 hr=1.00  gemv     7.14 us =   2204 GB/s   touches [('touch_kernel<0>', 205.78), ('touch_kernel<0>', 3.39), ('touch_kernel<0>', 50.64)] clk (2332, 2332)
+  swin-consumer    Y=  77 lim= 80 hr=1.00  gemv     7.15 us =   2199 GB/s   touches [('touch_kernel<0>', 205.84), ('touch_kernel<0>', 3.42), ('touch_kernel<0>', 50.46)] clk (2332, 2332)
+     nodes: [('touch_kernelILi0EEvPKhyP', 15, 2, 1), ('touch_kernelILi0EEvPKhyP', 15, 2, 1), ('touch_kernelILi0EEvPKhyP', 15, 2, 1), ('_w8a16_gemv_kernel', 15, 2, 1)]
+  touched+stream   Y= 190 lim= 80 hr=1.00  gemv    12.98 us =   1212 GB/s   touches [('touch_kernel<0>', 205.75), ('touch_kernel<0>', 11.14), ('touch_kernel<0>', 122.47)] clk (2332, 2332)
+  persist+stream   Y= 190 lim= 80 hr=1.00  gemv     7.36 us =   2137 GB/s   touches [('touch_kernel<0>', 205.73), ('touch_kernel<0>', 3.39), ('touch_kernel<0>', 122.53)] clk (2332, 2340)
+  persist+cs       Y= 190 lim= 80 hr=1.00  gemv     7.17 us =   2194 GB/s   touches [('touch_kernel<0>', 205.78), ('touch_kernel<0>', 3.41), ('touch_kernel<1>', 122.3)] clk (2340, 2340)
+  persist+swin     Y= 190 lim= 80 hr=1.00  gemv     7.36 us =   2137 GB/s   touches [('touch_kernel<0>', 205.75), ('touch_kernel<0>', 3.39), ('touch_kernel<0>', 122.48)] clk (2340, 2340)
+  swin-consumer    Y= 190 lim= 80 hr=1.00  gemv     7.36 us =   2137 GB/s   touches [('touch_kernel<0>', 205.73), ('touch_kernel<0>', 3.42), ('touch_kernel<0>', 122.53)] clk (2340, 2340)
+     nodes: [('touch_kernelILi0EEvPKhyP', 15, 2, 1), ('touch_kernelILi0EEvPKhyP', 15, 2, 1), ('touch_kernelILi0EEvPKhyP', 15, 2, 1), ('_w8a16_gemv_kernel', 15, 2, 1)]
+
+=== out_proj N=2560 K=6144 M=16 weight 15.0 MB  (21:55:31)
+  cold             Y=   0 lim=  0 hr=1.00  gemv    13.58 us =   1158 GB/s   touches [('touch_kernel<0>', 205.73)] clk (2340, 2340)
+  touched          Y=   0 lim=  0 hr=1.00  gemv     8.54 us =   1841 GB/s   touches [('touch_kernel<0>', 205.94), ('touch_kernel<0>', 11.23)] clk (2340, 2340)
+  touched+stream   Y=  77 lim=  0 hr=1.00  gemv     8.64 us =   1820 GB/s   touches [('touch_kernel<0>', 205.86), ('touch_kernel<0>', 11.18), ('touch_kernel<0>', 50.67)] clk (2340, 2340)
+  elast+stream     Y=  77 lim=  0 hr=1.00  gemv     8.64 us =   1820 GB/s   touches [('touch_kernel<0>', 205.95), ('touch_kernel<2>', 6.1), ('touch_kernel<0>', 50.51)] clk (2332, 2332)
+  elast+cs         Y=  77 lim=  0 hr=1.00  gemv     8.64 us =   1820 GB/s   touches [('touch_kernel<0>', 205.84), ('touch_kernel<2>', 6.21), ('touch_kernel<1>', 50.59)] clk (2332, 2332)
+  touched+stream   Y= 190 lim=  0 hr=1.00  gemv    13.54 us =   1162 GB/s   touches [('touch_kernel<0>', 205.94), ('touch_kernel<0>', 11.2), ('touch_kernel<0>', 122.53)] clk (2332, 2332)
+  elast+stream     Y= 190 lim=  0 hr=1.00  gemv     9.19 us =   1713 GB/s   touches [('touch_kernel<0>', 205.91), ('touch_kernel<2>', 6.21), ('touch_kernel<0>', 122.61)] clk (2332, 2332)
+  elast+cs         Y= 190 lim=  0 hr=1.00  gemv     8.64 us =   1820 GB/s   touches [('touch_kernel<0>', 206.07), ('touch_kernel<2>', 6.16), ('touch_kernel<1>', 122.48)] clk (2332, 2340)
+  touched          Y=   0 lim= 80 hr=1.00  gemv     8.48 us =   1855 GB/s   touches [('touch_kernel<0>', 205.86), ('touch_kernel<0>', 11.17)] clk (2340, 2340)
+  touched+stream   Y=  77 lim= 80 hr=1.00  gemv     8.64 us =   1820 GB/s   touches [('touch_kernel<0>', 205.99), ('touch_kernel<0>', 11.18), ('touch_kernel<0>', 50.56)] clk (2340, 2340)
+  persist+stream   Y=  77 lim= 80 hr=1.00  gemv     8.61 us =   1827 GB/s   touches [('touch_kernel<0>', 205.81), ('touch_kernel<0>', 3.42), ('touch_kernel<0>', 50.58)] clk (2332, 2332)
+  persist+cs       Y=  77 lim= 80 hr=1.00  gemv     8.64 us =   1820 GB/s   touches [('touch_kernel<0>', 206.03), ('touch_kernel<0>', 3.44), ('touch_kernel<1>', 50.59)] clk (2332, 2332)
+  persist+swin     Y=  77 lim= 80 hr=1.00  gemv     8.64 us =   1820 GB/s   touches [('touch_kernel<0>', 206.06), ('touch_kernel<0>', 3.42), ('touch_kernel<0>', 50.66)] clk (2332, 2332)
+  swin-consumer    Y=  77 lim= 80 hr=1.00  gemv     8.64 us =   1820 GB/s   touches [('touch_kernel<0>', 205.97), ('touch_kernel<0>', 3.42), ('touch_kernel<0>', 50.66)] clk (2332, 2332)
+     nodes: [('touch_kernelILi0EEvPKhyP', 15, 2, 1), ('touch_kernelILi0EEvPKhyP', 15, 2, 1), ('touch_kernelILi0EEvPKhyP', 15, 2, 1), ('_w8a16_gemv_kernel', 15, 2, 1)]
+  touched+stream   Y= 190 lim= 80 hr=1.00  gemv    13.60 us =   1157 GB/s   touches [('touch_kernel<0>', 205.95), ('touch_kernel<0>', 11.2), ('touch_kernel<0>', 122.62)] clk (2332, 2332)
+  persist+stream   Y= 190 lim= 80 hr=1.00  gemv     8.80 us =   1787 GB/s   touches [('touch_kernel<0>', 205.94), ('touch_kernel<0>', 3.39), ('touch_kernel<0>', 122.58)] clk (2332, 2332)
+  persist+cs       Y= 190 lim= 80 hr=1.00  gemv     8.67 us =   1814 GB/s   touches [('touch_kernel<0>', 205.97), ('touch_kernel<0>', 3.39), ('touch_kernel<1>', 122.34)] clk (2332, 2332)
+  persist+swin     Y= 190 lim= 80 hr=1.00  gemv     8.80 us =   1787 GB/s   touches [('touch_kernel<0>', 205.94), ('touch_kernel<0>', 3.42), ('touch_kernel<0>', 122.61)] clk (2332, 2332)
+  swin-consumer    Y= 190 lim= 80 hr=1.00  gemv     8.83 us =   1781 GB/s   touches [('touch_kernel<0>', 206.0), ('touch_kernel<0>', 3.42), ('touch_kernel<0>', 122.56)] clk (2332, 2332)
+     nodes: [('touch_kernelILi0EEvPKhyP', 15, 2, 1), ('touch_kernelILi0EEvPKhyP', 15, 2, 1), ('touch_kernelILi0EEvPKhyP', 15, 2, 1), ('_w8a16_gemv_kernel', 15, 2, 1)]
+
+=== attn_qkv N=13312 K=2560 M=4 weight 32.5 MB  (21:55:35)
+  cold             Y=   0 lim=  0 hr=1.00  gemv    23.90 us =   1426 GB/s   touches [('touch_kernel<0>', 204.99)] clk (2332, 2332)
+  touched          Y=   0 lim=  0 hr=1.00  gemv    14.00 us =   2434 GB/s   touches [('touch_kernel<0>', 205.41), ('touch_kernel<0>', 22.24)] clk (2332, 2332)
+  touched+stream   Y=  77 lim=  0 hr=1.00  gemv    14.21 us =   2399 GB/s   touches [('touch_kernel<0>', 205.3), ('touch_kernel<0>', 22.24), ('touch_kernel<0>', 50.59)] clk (2332, 2332)
+  elast+stream     Y=  77 lim=  0 hr=1.00  gemv    14.19 us =   2401 GB/s   touches [('touch_kernel<0>', 205.12), ('touch_kernel<2>', 22.27), ('touch_kernel<0>', 50.59)] clk (2332, 2332)
+  elast+cs         Y=  77 lim=  0 hr=1.00  gemv    14.21 us =   2399 GB/s   touches [('touch_kernel<0>', 205.25), ('touch_kernel<2>', 22.21), ('touch_kernel<1>', 50.56)] clk (2332, 2332)
+  touched+stream   Y= 190 lim=  0 hr=1.00  gemv    23.98 us =   1421 GB/s   touches [('touch_kernel<0>', 205.25), ('touch_kernel<0>', 22.16), ('touch_kernel<0>', 122.56)] clk (2332, 2332)
+  elast+stream     Y= 190 lim=  0 hr=1.00  gemv    18.78 us =   1814 GB/s   touches [('touch_kernel<0>', 205.35), ('touch_kernel<2>', 22.34), ('touch_kernel<0>', 122.62)] clk (2332, 2332)
+  elast+cs         Y= 190 lim=  0 hr=1.00  gemv    14.21 us =   2399 GB/s   touches [('touch_kernel<0>', 205.09), ('touch_kernel<2>', 22.26), ('touch_kernel<1>', 122.42)] clk (2332, 2332)
+  touched          Y=   0 lim= 80 hr=1.00  gemv    14.00 us =   2434 GB/s   touches [('touch_kernel<0>', 205.38), ('touch_kernel<0>', 22.34)] clk (2332, 2332)
+  touched+stream   Y=  77 lim= 80 hr=1.00  gemv    14.22 us =   2396 GB/s   touches [('touch_kernel<0>', 205.18), ('touch_kernel<0>', 22.22), ('touch_kernel<0>', 50.54)] clk (2332, 2332)
+  persist+stream   Y=  77 lim= 80 hr=1.00  gemv    14.18 us =   2404 GB/s   touches [('touch_kernel<0>', 205.25), ('touch_kernel<0>', 6.1), ('touch_kernel<0>', 50.58)] clk (2332, 2332)
+  persist+cs       Y=  77 lim= 80 hr=1.00  gemv    14.24 us =   2393 GB/s   touches [('touch_kernel<0>', 205.28), ('touch_kernel<0>', 6.11), ('touch_kernel<1>', 50.61)] clk (2332, 2340)
+  persist+swin     Y=  77 lim= 80 hr=1.00  gemv    14.18 us =   2404 GB/s   touches [('touch_kernel<0>', 205.23), ('touch_kernel<0>', 6.11), ('touch_kernel<0>', 50.54)] clk (2340, 2340)
+  swin-consumer    Y=  77 lim= 80 hr=1.00  gemv    14.18 us =   2404 GB/s   touches [('touch_kernel<0>', 205.39), ('touch_kernel<0>', 6.14), ('touch_kernel<0>', 50.56)] clk (2332, 2340)
+     nodes: [('touch_kernelILi0EEvPKhyP', 32, 2, 1), ('touch_kernelILi0EEvPKhyP', 32, 2, 1), ('touch_kernelILi0EEvPKhyP', 32, 2, 1), ('_w8a16_gemv_kernel', 32, 2, 1)]
+  touched+stream   Y= 190 lim= 80 hr=1.00  gemv    23.92 us =   1425 GB/s   touches [('touch_kernel<0>', 205.17), ('touch_kernel<0>', 22.21), ('touch_kernel<0>', 122.59)] clk (2332, 2332)
+  persist+stream   Y= 190 lim= 80 hr=1.00  gemv    14.40 us =   2367 GB/s   touches [('touch_kernel<0>', 205.12), ('touch_kernel<0>', 6.08), ('touch_kernel<0>', 122.53)] clk (2332, 2332)
+  persist+cs       Y= 190 lim= 80 hr=1.00  gemv    14.21 us =   2399 GB/s   touches [('touch_kernel<0>', 205.15), ('touch_kernel<0>', 6.11), ('touch_kernel<1>', 122.3)] clk (2332, 2332)
+  persist+swin     Y= 190 lim= 80 hr=1.00  gemv    14.40 us =   2366 GB/s   touches [('touch_kernel<0>', 205.17), ('touch_kernel<0>', 6.1), ('touch_kernel<0>', 122.53)] clk (2332, 2332)
+  swin-consumer    Y= 190 lim= 80 hr=1.00  gemv    14.42 us =   2364 GB/s   touches [('touch_kernel<0>', 205.12), ('touch_kernel<0>', 6.08), ('touch_kernel<0>', 122.43)] clk (2332, 2332)
+     nodes: [('touch_kernelILi0EEvPKhyP', 32, 2, 1), ('touch_kernelILi0EEvPKhyP', 32, 2, 1), ('touch_kernelILi0EEvPKhyP', 32, 2, 1), ('_w8a16_gemv_kernel', 32, 2, 1)]
+
+=== attn_qkv N=13312 K=2560 M=16 weight 32.5 MB  (21:55:40)
+  cold             Y=   0 lim=  0 hr=1.00  gemv    24.66 us =   1382 GB/s   touches [('touch_kernel<0>', 205.22)] clk (2332, 2332)
+  touched          Y=   0 lim=  0 hr=1.00  gemv    18.00 us =   1893 GB/s   touches [('touch_kernel<0>', 205.34), ('touch_kernel<0>', 22.22)] clk (2325, 2325)
+  touched+stream   Y=  77 lim=  0 hr=1.00  gemv    18.34 us =   1859 GB/s   touches [('touch_kernel<0>', 205.49), ('touch_kernel<0>', 22.24), ('touch_kernel<0>', 50.59)] clk (2325, 2325)
+  elast+stream     Y=  77 lim=  0 hr=1.00  gemv    18.37 us =   1855 GB/s   touches [('touch_kernel<0>', 205.38), ('touch_kernel<2>', 22.26), ('touch_kernel<0>', 50.56)] clk (2325, 2332)
+  elast+cs         Y=  77 lim=  0 hr=1.00  gemv    18.37 us =   1855 GB/s   touches [('touch_kernel<0>', 205.39), ('touch_kernel<2>', 22.18), ('touch_kernel<1>', 50.56)] clk (2332, 2332)
+  touched+stream   Y= 190 lim=  0 hr=1.00  gemv    24.51 us =   1390 GB/s   touches [('touch_kernel<0>', 205.44), ('touch_kernel<0>', 22.27), ('touch_kernel<0>', 122.53)] clk (2332, 2332)
+  elast+stream     Y= 190 lim=  0 hr=1.00  gemv    20.19 us =   1688 GB/s   touches [('touch_kernel<0>', 205.39), ('touch_kernel<2>', 22.26), ('touch_kernel<0>', 122.58)] clk (2332, 2332)
+  elast+cs         Y= 190 lim=  0 hr=1.00  gemv    18.32 us =   1860 GB/s   touches [('touch_kernel<0>', 205.44), ('touch_kernel<2>', 22.14), ('touch_kernel<1>', 122.34)] clk (2332, 2332)
+  touched          Y=   0 lim= 80 hr=1.00  gemv    18.02 us =   1892 GB/s   touches [('touch_kernel<0>', 205.38), ('touch_kernel<0>', 22.27)] clk (2332, 2332)
+  touched+stream   Y=  77 lim= 80 hr=1.00  gemv    18.34 us =   1859 GB/s   touches [('touch_kernel<0>', 205.41), ('touch_kernel<0>', 22.21), ('touch_kernel<0>', 50.51)] clk (2332, 2332)
+  persist+stream   Y=  77 lim= 80 hr=1.00  gemv    18.34 us =   1859 GB/s   touches [('touch_kernel<0>', 205.34), ('touch_kernel<0>', 6.08), ('touch_kernel<0>', 50.53)] clk (2332, 2332)
+  persist+cs       Y=  77 lim= 80 hr=1.00  gemv    18.40 us =   1852 GB/s   touches [('touch_kernel<0>', 205.52), ('touch_kernel<0>', 6.14), ('touch_kernel<1>', 50.59)] clk (2332, 2332)
+  persist+swin     Y=  77 lim= 80 hr=1.00  gemv    18.30 us =   1862 GB/s   touches [('touch_kernel<0>', 205.35), ('touch_kernel<0>', 6.11), ('touch_kernel<0>', 50.53)] clk (2340, 2340)
+  swin-consumer    Y=  77 lim= 80 hr=1.00  gemv    18.30 us =   1862 GB/s   touches [('touch_kernel<0>', 205.39), ('touch_kernel<0>', 6.11), ('touch_kernel<0>', 50.48)] clk (2340, 2340)
+     nodes: [('touch_kernelILi0EEvPKhyP', 32, 2, 1), ('touch_kernelILi0EEvPKhyP', 32, 2, 1), ('touch_kernelILi0EEvPKhyP', 32, 2, 1), ('_w8a16_gemv_kernel', 32, 2, 1)]
+  touched+stream   Y= 190 lim= 80 hr=1.00  gemv    24.66 us =   1382 GB/s   touches [('touch_kernel<0>', 205.43), ('touch_kernel<0>', 22.24), ('touch_kernel<0>', 122.53)] clk (2332, 2340)
+  persist+stream   Y= 190 lim= 80 hr=1.00  gemv    18.56 us =   1836 GB/s   touches [('touch_kernel<0>', 205.35), ('touch_kernel<0>', 6.08), ('touch_kernel<0>', 122.5)] clk (2332, 2332)
+  persist+cs       Y= 190 lim= 80 hr=1.00  gemv    18.35 us =   1857 GB/s   touches [('touch_kernel<0>', 205.38), ('touch_kernel<0>', 6.11), ('touch_kernel<1>', 122.34)] clk (2332, 2340)
+  persist+swin     Y= 190 lim= 80 hr=1.00  gemv    18.56 us =   1836 GB/s   touches [('touch_kernel<0>', 205.47), ('touch_kernel<0>', 6.11), ('touch_kernel<0>', 122.47)] clk (2340, 2340)
+  swin-consumer    Y= 190 lim= 80 hr=1.00  gemv    18.56 us =   1836 GB/s   touches [('touch_kernel<0>', 205.44), ('touch_kernel<0>', 6.1), ('touch_kernel<0>', 122.53)] clk (2332, 2340)
+     nodes: [('touch_kernelILi0EEvPKhyP', 32, 2, 1), ('touch_kernelILi0EEvPKhyP', 32, 2, 1), ('touch_kernelILi0EEvPKhyP', 32, 2, 1), ('_w8a16_gemv_kernel', 32, 2, 1)]
+
+=== draft_head N=49152 K=2560 M=1 weight 120.0 MB  (21:55:44)
+  cold             Y=   0 lim=  0 hr=1.00  gemv    78.48 us =   1603 GB/s   touches [('touch_kernel<0>', 205.09)] clk (2332, 2332)
+  touched          Y=   0 lim=  0 hr=1.00  gemv    21.34 us =   5895 GB/s   touches [('touch_kernel<0>', 205.17), ('touch_kernel<0>', 78.06)] clk (2325, 2332)
+  touched+stream   Y=  77 lim=  0 hr=1.00  gemv    69.62 us =   1807 GB/s   touches [('touch_kernel<0>', 205.15), ('touch_kernel<0>', 78.08), ('touch_kernel<0>', 50.75)] clk (2325, 2325)
+  elast+stream     Y=  77 lim=  0 hr=1.00  gemv    66.72 us =   1886 GB/s   touches [('touch_kernel<0>', 205.11), ('touch_kernel<2>', 78.05), ('touch_kernel<0>', 50.82)] clk (2317, 2325)
+  elast+cs         Y=  77 lim=  0 hr=1.00  gemv    21.65 us =   5812 GB/s   touches [('touch_kernel<0>', 205.22), ('touch_kernel<2>', 78.14), ('touch_kernel<1>', 50.74)] clk (2317, 2317)
+  touched+stream   Y= 190 lim=  0 hr=1.00  gemv    78.50 us =   1603 GB/s   touches [('touch_kernel<0>', 205.3), ('touch_kernel<0>', 78.18), ('touch_kernel<0>', 122.56)] clk (2310, 2317)
+  elast+stream     Y= 190 lim=  0 hr=1.00  gemv    73.78 us =   1706 GB/s   touches [('touch_kernel<0>', 205.19), ('touch_kernel<2>', 78.14), ('touch_kernel<0>', 122.64)] clk (2310, 2310)
+  elast+cs         Y= 190 lim=  0 hr=1.00  gemv    21.76 us =   5783 GB/s   touches [('touch_kernel<0>', 205.2), ('touch_kernel<2>', 78.05), ('touch_kernel<1>', 122.51)] clk (2310, 2317)
+  touched          Y=   0 lim= 80 hr=1.00  gemv    21.28 us =   5913 GB/s   touches [('touch_kernel<0>', 205.25), ('touch_kernel<0>', 78.08)] clk (2317, 2317)
+  touched+stream   Y=  77 lim= 80 hr=1.00  gemv    69.70 us =   1805 GB/s   touches [('touch_kernel<0>', 205.12), ('touch_kernel<0>', 78.11), ('touch_kernel<0>', 50.75)] clk (2310, 2317)
+  persist+stream   Y=  77 lim= 80 hr=0.67  gemv    30.78 us =   4087 GB/s   touches [('touch_kernel<0>', 205.19), ('touch_kernel<0>', 36.9), ('touch_kernel<0>', 50.75)] clk (2310, 2310)
+  persist+cs       Y=  77 lim= 80 hr=0.67  gemv    26.53 us =   4743 GB/s   touches [('touch_kernel<0>', 205.3), ('touch_kernel<0>', 37.02), ('touch_kernel<1>', 50.62)] clk (2310, 2310)
+  persist+swin     Y=  77 lim= 80 hr=0.67  gemv    26.59 us =   4732 GB/s   touches [('touch_kernel<0>', 205.23), ('touch_kernel<0>', 36.9), ('touch_kernel<0>', 50.61)] clk (2302, 2302)
+  swin-consumer    Y=  77 lim= 80 hr=0.67  gemv    34.91 us =   3604 GB/s   touches [('touch_kernel<0>', 205.2), ('touch_kernel<0>', 33.94), ('touch_kernel<0>', 50.8)] clk (2302, 2302)
+     nodes: [('touch_kernelILi0EEvPKhyP', 120, 2, 1), ('touch_kernelILi0EEvPKhyP', 120, 2, 1), ('touch_kernelILi0EEvPKhyP', 120, 2, 1), ('_w8a16_gemv_kernel', 120, 2, 1)]
+  persist+stream   Y=  77 lim= 80 hr=1.00  gemv    28.34 us =   4441 GB/s   touches [('touch_kernel<0>', 205.25), ('touch_kernel<0>', 64.83), ('touch_kernel<0>', 50.83)] clk (2310, 2310)
+  persistpfx+stream Y=  77 lim= 80 hr=1.00  gemv    28.93 us =   4350 GB/s   touches [('touch_kernel<0>', 205.27), ('touch_kernel<0>', 37.06), ('touch_kernel<0>', 50.8)] clk (2310, 2310)
+  touched+stream   Y= 190 lim= 80 hr=1.00  gemv    78.46 us =   1604 GB/s   touches [('touch_kernel<0>', 205.12), ('touch_kernel<0>', 78.02), ('touch_kernel<0>', 122.48)] clk (2302, 2310)
+  persist+stream   Y= 190 lim= 80 hr=0.67  gemv    30.85 us =   4079 GB/s   touches [('touch_kernel<0>', 205.23), ('touch_kernel<0>', 36.91), ('touch_kernel<0>', 122.51)] clk (2302, 2302)
+  persist+cs       Y= 190 lim= 80 hr=0.67  gemv    26.56 us =   4738 GB/s   touches [('touch_kernel<0>', 205.09), ('touch_kernel<0>', 36.9), ('touch_kernel<1>', 122.29)] clk (2302, 2310)
+  persist+swin     Y= 190 lim= 80 hr=0.67  gemv    30.88 us =   4075 GB/s   touches [('touch_kernel<0>', 205.22), ('touch_kernel<0>', 36.96), ('touch_kernel<0>', 122.48)] clk (2310, 2310)
+  swin-consumer    Y= 190 lim= 80 hr=0.67  gemv    34.98 us =   3598 GB/s   touches [('touch_kernel<0>', 205.22), ('touch_kernel<0>', 33.9), ('touch_kernel<0>', 122.56)] clk (2310, 2310)
+     nodes: [('touch_kernelILi0EEvPKhyP', 120, 2, 1), ('touch_kernelILi0EEvPKhyP', 120, 2, 1), ('touch_kernelILi0EEvPKhyP', 120, 2, 1), ('_w8a16_gemv_kernel', 120, 2, 1)]
+  persist+stream   Y= 190 lim= 80 hr=1.00  gemv    28.35 us =   4438 GB/s   touches [('touch_kernel<0>', 205.12), ('touch_kernel<0>', 64.9), ('touch_kernel<0>', 122.58)] clk (2310, 2310)
+  persistpfx+stream Y= 190 lim= 80 hr=1.00  gemv    29.02 us =   4335 GB/s   touches [('touch_kernel<0>', 205.17), ('touch_kernel<0>', 37.06), ('touch_kernel<0>', 122.59)] clk (2302, 2310)
+
+[wrote] bench/l2_prefetch/results/hit_v2.json
+=== done rc=0 2026-09-06T21:55:51+09:00 ===
+=== pipeline_v2 2026-09-06T21:55:51+09:00 ===
+
+=== M=4 expert stream 77 MB/layer  (21:55:56)
+  none               grid    0 prio=0:   168.19 us/layer  qkvz 28.58 out 13.34 tiny 0.8 touch [50.51] clk (2287, 2310)
+  start              grid   32 prio=0:   181.76 us/layer  qkvz 37.28 out 12.78 tiny 0.82 touch [50.5, 64.97] clk (2295, 2325)
+  start              grid   64 prio=0:   192.53 us/layer  qkvz 41.06 out 12.73 tiny 0.8 touch [50.42, 62.25] clk (2295, 2317)
+  start              grid  188 prio=0:   199.75 us/layer  qkvz 28.3 out 12.78 tiny 0.8 touch [37.36, 50.5] clk (2310, 2340)
+  start+persist      grid   32 prio=0:   167.34 us/layer  qkvz 25.38 out 7.67 tiny 0.83 touch [51.05, 51.82] clk (2280, 2317)
+  start+persist      grid   64 prio=0:   180.12 us/layer  qkvz 34.32 out 7.67 tiny 0.8 touch [51.55, 56.06] clk (2287, 2295)
+  start+persist      grid  188 prio=0:   189.61 us/layer  qkvz 24.7 out 7.54 tiny 0.8 touch [36.65, 51.62] clk (2317, 2340)
+  postgemm           grid   32 prio=0:   170.55 us/layer  qkvz 15.93 out 6.94 tiny 0.8 touch [39.51, 50.46] clk (2317, 2325)
+  postgemm           grid   64 prio=0:   176.46 us/layer  qkvz 15.9 out 6.97 tiny 0.8 touch [38.52, 50.46] clk (2325, 2340)
+  postgemm           grid  188 prio=0:   179.69 us/layer  qkvz 15.99 out 6.97 tiny 0.8 touch [37.48, 50.56] clk (2325, 2325)
+  postgemm+persist   grid   32 prio=0:   173.59 us/layer  qkvz 15.9 out 6.99 tiny 0.8 touch [38.1, 51.54] clk (2325, 2340)
+  postgemm+persist   grid   64 prio=0:   168.17 us/layer  qkvz 15.91 out 6.97 tiny 0.8 touch [37.59, 51.59] clk (2325, 2325)
+  postgemm+persist   grid  188 prio=0:   180.69 us/layer  qkvz 15.96 out 6.98 tiny 0.8 touch [36.66, 51.66] clk (2325, 2325)
+  jit                grid   32 prio=0:   166.85 us/layer  qkvz 16.2 out 6.86 tiny 0.8 touch [11.5, 39.97] clk (2317, 2340)
+  jit                grid   64 prio=0:   168.44 us/layer  qkvz 16.07 out 6.94 tiny 0.8 touch [11.38, 39.18] clk (2317, 2325)
+  jit                grid  188 prio=0:   177.65 us/layer  qkvz 16.3 out 7.07 tiny 0.8 touch [11.1, 39.09] clk (2317, 2340)
+
+=== M=4 expert stream 190 MB/layer  (21:56:17)
+  none               grid    0 prio=0:   246.55 us/layer  qkvz 28.28 out 12.98 tiny 0.8 touch [123.57] clk (2310, 2317)
+  start              grid   32 prio=0:   260.32 us/layer  qkvz 36.62 out 12.75 tiny 0.83 touch [64.22, 123.67] clk (2302, 2325)
+  start              grid   64 prio=0:   272.46 us/layer  qkvz 39.9 out 12.71 tiny 0.8 touch [61.15, 123.59] clk (2302, 2310)
+  start              grid  188 prio=0:   277.93 us/layer  qkvz 28.32 out 12.84 tiny 0.8 touch [36.59, 123.61] clk (2302, 2317)
+  start+persist      grid   32 prio=0:   247.19 us/layer  qkvz 25.1 out 7.71 tiny 0.83 touch [51.18, 123.58] clk (2302, 2340)
+  start+persist      grid   64 prio=0:   259.96 us/layer  qkvz 34.32 out 7.81 tiny 0.8 touch [55.3, 123.47] clk (2295, 2317)
+  start+persist      grid  188 prio=0:   270.12 us/layer  qkvz 24.66 out 7.49 tiny 0.8 touch [36.62, 123.55] clk (2310, 2332)
+  postgemm           grid   32 prio=0:   246.24 us/layer  qkvz 15.91 out 6.94 tiny 0.8 touch [38.21, 123.63] clk (2310, 2332)
+  postgemm           grid   64 prio=0:   249.91 us/layer  qkvz 15.94 out 6.98 tiny 0.8 touch [37.74, 123.68] clk (2332, 2332)
+  postgemm           grid  188 prio=0:   262.39 us/layer  qkvz 15.94 out 6.94 tiny 0.8 touch [36.63, 123.62] clk (2332, 2340)
+  postgemm+persist   grid   32 prio=0:   257.34 us/layer  qkvz 15.91 out 6.98 tiny 0.8 touch [38.08, 123.5] clk (2332, 2340)
+  postgemm+persist   grid   64 prio=0:   253.40 us/layer  qkvz 15.9 out 6.94 tiny 0.8 touch [37.61, 123.55] clk (2332, 2340)
+  postgemm+persist   grid  188 prio=0:   260.10 us/layer  qkvz 15.94 out 6.98 tiny 0.8 touch [36.67, 123.52] clk (2332, 2332)
+  jit                grid   32 prio=0:   242.09 us/layer  qkvz 16.12 out 6.86 tiny 0.8 touch [11.46, 75.86] clk (2325, 2340)
+  jit                grid   64 prio=0:   243.18 us/layer  qkvz 15.84 out 6.94 tiny 0.8 touch [11.41, 75.62] clk (2325, 2332)
+  jit                grid  188 prio=0:   260.42 us/layer  qkvz 16.12 out 7.06 tiny 0.8 touch [11.06, 75.37] clk (2325, 2325)
+
+=== M=16 expert stream 77 MB/layer  (21:56:38)
+  none               grid    0 prio=0:   167.23 us/layer  qkvz 29.42 out 13.82 tiny 0.8 touch [50.49] clk (2302, 2340)
+  start              grid   32 prio=0:   184.96 us/layer  qkvz 38.08 out 12.94 tiny 0.82 touch [50.46, 65.25] clk (2295, 2317)
+  start              grid   64 prio=0:   198.98 us/layer  qkvz 41.69 out 13.14 tiny 0.8 touch [50.5, 61.68] clk (2302, 2340)
+  start              grid  188 prio=0:   202.60 us/layer  qkvz 28.78 out 13.03 tiny 0.8 touch [37.47, 50.57] clk (2302, 2317)
+  start+persist      grid   32 prio=0:   168.82 us/layer  qkvz 26.13 out 8.69 tiny 0.83 touch [50.75, 51.98] clk (2280, 2317)
+  start+persist      grid   64 prio=0:   184.46 us/layer  qkvz 35.12 out 8.86 tiny 0.8 touch [51.73, 55.39] clk (2295, 2340)
+  start+persist      grid  188 prio=0:   197.79 us/layer  qkvz 24.39 out 8.62 tiny 0.8 touch [36.62, 51.79] clk (2295, 2317)
+  postgemm           grid   32 prio=0:   174.59 us/layer  qkvz 16.34 out 8.5 tiny 0.8 touch [39.92, 50.46] clk (2325, 2340)
+  postgemm           grid   64 prio=0:   173.09 us/layer  qkvz 16.33 out 8.46 tiny 0.8 touch [38.9, 50.46] clk (2325, 2332)
+  postgemm           grid  188 prio=0:   181.03 us/layer  qkvz 16.35 out 8.5 tiny 0.8 touch [37.61, 50.51] clk (2325, 2340)
+  postgemm+persist   grid   32 prio=0:   175.04 us/layer  qkvz 16.29 out 8.43 tiny 0.8 touch [38.16, 51.7] clk (2325, 2325)
+  postgemm+persist   grid   64 prio=0:   176.88 us/layer  qkvz 16.33 out 8.45 tiny 0.8 touch [37.63, 51.75] clk (2325, 2325)
+  postgemm+persist   grid  188 prio=0:   186.20 us/layer  qkvz 16.35 out 8.46 tiny 0.8 touch [36.64, 51.82] clk (2325, 2340)
+  jit                grid   32 prio=0:   165.77 us/layer  qkvz 16.31 out 8.13 tiny 0.8 touch [11.67, 40.1] clk (2317, 2332)
+  jit                grid   64 prio=0:   164.14 us/layer  qkvz 16.34 out 8.3 tiny 0.8 touch [11.54, 39.42] clk (2325, 2332)
+  jit                grid  188 prio=0:   184.41 us/layer  qkvz 16.4 out 8.4 tiny 0.8 touch [11.16, 39.11] clk (2317, 2325)
+
+=== M=16 expert stream 190 MB/layer  (21:56:58)
+  none               grid    0 prio=0:   251.82 us/layer  qkvz 28.86 out 13.33 tiny 0.8 touch [123.89] clk (2310, 2317)
+  start              grid   32 prio=0:   262.91 us/layer  qkvz 37.34 out 13.14 tiny 0.83 touch [64.01, 124.02] clk (2302, 2340)
+  start              grid   64 prio=0:   271.51 us/layer  qkvz 40.27 out 13.3 tiny 0.8 touch [60.38, 123.94] clk (2295, 2317)
+  start              grid  188 prio=0:   289.42 us/layer  qkvz 28.9 out 13.28 tiny 0.8 touch [36.62, 123.92] clk (2317, 2340)
+  start+persist      grid   32 prio=0:   251.13 us/layer  qkvz 25.99 out 8.86 tiny 0.83 touch [51.14, 123.97] clk (2295, 2317)
+  start+persist      grid   64 prio=0:   269.47 us/layer  qkvz 34.92 out 9.06 tiny 0.8 touch [54.39, 124.0] clk (2302, 2340)
+  start+persist      grid  188 prio=0:   280.71 us/layer  qkvz 24.46 out 8.74 tiny 0.8 touch [36.63, 123.99] clk (2302, 2325)
+  postgemm           grid   32 prio=0:   252.40 us/layer  qkvz 16.37 out 8.45 tiny 0.8 touch [38.16, 123.99] clk (2310, 2332)
+  postgemm           grid   64 prio=0:   257.72 us/layer  qkvz 16.32 out 8.47 tiny 0.8 touch [37.72, 124.03] clk (2332, 2340)
+  postgemm           grid  188 prio=0:   261.43 us/layer  qkvz 16.3 out 8.46 tiny 0.8 touch [36.68, 124.11] clk (2332, 2332)
+  postgemm+persist   grid   32 prio=0:   254.66 us/layer  qkvz 16.34 out 8.5 tiny 0.8 touch [38.13, 123.97] clk (2332, 2340)
+  postgemm+persist   grid   64 prio=0:   248.20 us/layer  qkvz 16.28 out 8.47 tiny 0.8 touch [37.66, 123.96] clk (2332, 2332)
+  postgemm+persist   grid  188 prio=0:   262.64 us/layer  qkvz 16.32 out 8.47 tiny 0.8 touch [36.68, 124.0] clk (2332, 2340)
+  jit                grid   32 prio=0:   247.49 us/layer  qkvz 16.28 out 8.11 tiny 0.8 touch [11.47, 76.1] clk (2325, 2332)
+  jit                grid   64 prio=0:   245.79 us/layer  qkvz 16.32 out 8.31 tiny 0.8 touch [11.37, 75.77] clk (2325, 2332)
+  jit                grid  188 prio=0:   260.59 us/layer  qkvz 16.33 out 8.43 tiny 0.8 touch [10.98, 75.58] clk (2325, 2340)
+
+[wrote] bench/l2_prefetch/results/pipeline_v2.json
+=== done rc=0 2026-09-06T21:57:22+09:00 ===
+=== pipeline_v2_nojoin 2026-09-06T21:57:22+09:00 ===
+
+=== M=4 expert stream 77 MB/layer  (21:57:26)
+  none               grid    0 prio=0:   165.45 us/layer  qkvz 28.56 out 13.23 tiny 0.8 touch [50.46] clk (2287, 2302)
+  postgemm           grid   32 prio=0:   154.99 us/layer  qkvz 16.98 out 7.06 tiny 0.8 touch [41.8, 50.42] clk (2302, 2332)
+  postgemm           grid   64 prio=0:   163.52 us/layer  qkvz 15.94 out 6.98 tiny 0.8 touch [38.56, 50.46] clk (2310, 2325)
+  postgemm+persist   grid   32 prio=0:   155.50 us/layer  qkvz 16.62 out 7.04 tiny 0.8 touch [40.26, 51.54] clk (2310, 2340)
+  postgemm+persist   grid   64 prio=0:   173.55 us/layer  qkvz 15.98 out 6.99 tiny 0.8 touch [37.81, 51.51] clk (2310, 2332)
+  jit                grid   32 prio=0:   155.85 us/layer  qkvz 15.96 out 6.95 tiny 0.8 touch [11.62, 39.96] clk (2317, 2325)
+  jit                grid   64 prio=0:   168.25 us/layer  qkvz 16.14 out 6.96 tiny 0.8 touch [11.42, 39.26] clk (2317, 2340)
+
+=== M=4 expert stream 190 MB/layer  (21:57:35)
+  none               grid    0 prio=0:   244.08 us/layer  qkvz 28.31 out 12.85 tiny 0.8 touch [123.66] clk (2302, 2325)
+  postgemm           grid   32 prio=0:   234.09 us/layer  qkvz 16.58 out 7.06 tiny 0.8 touch [40.05, 123.61] clk (2317, 2332)
+  postgemm           grid   64 prio=0:   241.88 us/layer  qkvz 15.97 out 6.94 tiny 0.8 touch [37.65, 123.66] clk (2317, 2325)
+  postgemm+persist   grid   32 prio=0:   236.03 us/layer  qkvz 16.51 out 7.02 tiny 0.8 touch [40.16, 123.51] clk (2325, 2332)
+  postgemm+persist   grid   64 prio=0:   243.81 us/layer  qkvz 15.95 out 6.98 tiny 0.8 touch [37.62, 123.63] clk (2332, 2332)
+  jit                grid   32 prio=0:   234.14 us/layer  qkvz 15.86 out 6.89 tiny 0.8 touch [11.45, 75.91] clk (2325, 2332)
+  jit                grid   64 prio=0:   241.92 us/layer  qkvz 16.01 out 7.01 tiny 0.8 touch [11.37, 75.66] clk (2325, 2340)
+
+=== M=16 expert stream 77 MB/layer  (21:57:44)
+  none               grid    0 prio=0:   167.24 us/layer  qkvz 29.32 out 13.69 tiny 0.8 touch [50.53] clk (2302, 2332)
+  postgemm           grid   32 prio=0:   159.88 us/layer  qkvz 16.61 out 8.62 tiny 0.8 touch [41.94, 50.53] clk (2302, 2340)
+  postgemm           grid   64 prio=0:   167.59 us/layer  qkvz 16.14 out 8.48 tiny 0.8 touch [38.86, 50.44] clk (2302, 2332)
+  postgemm+persist   grid   32 prio=0:   159.14 us/layer  qkvz 15.98 out 8.58 tiny 0.8 touch [39.49, 51.81] clk (2310, 2332)
+  postgemm+persist   grid   64 prio=0:   173.18 us/layer  qkvz 16.22 out 8.48 tiny 0.8 touch [37.65, 51.73] clk (2325, 2340)
+  jit                grid   32 prio=0:   155.03 us/layer  qkvz 16.13 out 8.16 tiny 0.8 touch [11.73, 40.18] clk (2317, 2325)
+  jit                grid   64 prio=0:   165.83 us/layer  qkvz 16.34 out 8.32 tiny 0.8 touch [11.49, 39.37] clk (2317, 2340)
+
+=== M=16 expert stream 190 MB/layer  (21:57:53)
+  none               grid    0 prio=0:   248.17 us/layer  qkvz 28.92 out 13.37 tiny 0.8 touch [123.94] clk (2302, 2317)
+  postgemm           grid   32 prio=0:   243.63 us/layer  qkvz 15.91 out 8.57 tiny 0.8 touch [39.6, 123.95] clk (2317, 2340)
+  postgemm           grid   64 prio=0:   250.67 us/layer  qkvz 16.2 out 8.53 tiny 0.8 touch [37.66, 124.1] clk (2317, 2332)
+  postgemm+persist   grid   32 prio=0:   246.45 us/layer  qkvz 15.91 out 8.54 tiny 0.8 touch [39.55, 123.89] clk (2317, 2332)
+  postgemm+persist   grid   64 prio=0:   247.51 us/layer  qkvz 16.18 out 8.44 tiny 0.8 touch [37.6, 123.95] clk (2332, 2340)
+  jit                grid   32 prio=0:   240.21 us/layer  qkvz 16.11 out 8.17 tiny 0.8 touch [11.45, 76.08] clk (2332, 2332)
+  jit                grid   64 prio=0:   254.97 us/layer  qkvz 16.26 out 8.37 tiny 0.8 touch [11.4, 75.83] clk (2325, 2340)
+
+[wrote] bench/l2_prefetch/results/pipeline_v2_nojoin.json
+=== done rc=0 2026-09-06T21:58:05+09:00 ===
+=== hotcfg_v2 2026-09-06T21:58:05+09:00 ===
+
+=== qkvz N=16384 K=2560 M=4: production cfg (32, 128, 1, True, None, 4, 3)  (21:58:10)
+  production: cold   28.51 us ( 1471 GB/s)  hot   16.96 us ( 2473 GB/s)
+  (64, 256, 2, True, None, 8, 3): hot   13.22 us ( 3174 GB/s)  cold   29.82 us ( 1406 GB/s)  match=True
+  (128, 64, 4, True, None, 4, 3): hot   13.66 us ( 3069 GB/s)  cold   36.14 us ( 1160 GB/s)  match=True
+  (64, 128, 2, True, None, 4, 3): hot   13.78 us ( 3045 GB/s)  cold   29.84 us ( 1406 GB/s)  match=True
+  (64, 64, 2, True, None, 4, 3): hot   14.08 us ( 2979 GB/s)  cold   35.23 us ( 1190 GB/s)  match=True
+  (64, 128, 4, True, None, 8, 3): hot   14.10 us ( 2975 GB/s)  cold   30.53 us ( 1374 GB/s)  match=True
+
+=== qkvz N=16384 K=2560 M=16: production cfg (64, 128, 1, True, None, 4, 3)  (21:58:44)
+  production: cold   28.91 us ( 1451 GB/s)  hot   16.30 us ( 2573 GB/s)
+  (128, 64, 4, True, None, 4, 3): hot   13.84 us ( 3031 GB/s)  cold   36.03 us ( 1164 GB/s)  match=True
+  (128, 64, 4, True, None, 8, 3): hot   14.50 us ( 2893 GB/s)  cold   36.03 us ( 1164 GB/s)  match=True
+  (64, 256, 2, True, None, 8, 3): hot   14.53 us ( 2887 GB/s)  cold   30.11 us ( 1393 GB/s)  match=True
+  (128, 256, 1, True, None, 8, 3): hot   14.85 us ( 2825 GB/s)  cold   29.10 us ( 1441 GB/s)  match=True
+  (64, 128, 4, True, None, 8, 3): hot   15.01 us ( 2795 GB/s)  cold   30.32 us ( 1383 GB/s)  match=True
+
+=== out_proj N=2560 K=6144 M=4: production cfg (32, 128, 6, True, None, 4, 3)  (21:59:18)
+  production: cold   13.04 us ( 1206 GB/s)  hot    6.94 us ( 2265 GB/s)
+  (64, 256, 4, True, None, 8, 3): hot    6.69 us ( 2352 GB/s)  cold   13.02 us ( 1208 GB/s)  match=True
+  (32, 256, 4, True, None, 4, 3): hot    7.10 us ( 2214 GB/s)  cold   13.15 us ( 1196 GB/s)  match=True
+  (32, 128, 4, True, None, 4, 3): hot    7.12 us ( 2209 GB/s)  cold   12.96 us ( 1214 GB/s)  match=True
+  (32, 128, 8, True, None, 4, 3): hot    7.17 us ( 2194 GB/s)  cold   13.26 us ( 1186 GB/s)  match=True
+  (64, 128, 8, True, None, 4, 3): hot    7.26 us ( 2165 GB/s)  cold   14.37 us ( 1095 GB/s)  match=True
+
+=== out_proj N=2560 K=6144 M=16: production cfg (32, 128, 6, True, None, 4, 3)  (21:59:41)
+  production: cold   13.31 us ( 1182 GB/s)  hot    8.32 us ( 1891 GB/s)
+  (64, 256, 4, True, None, 8, 3): hot    7.55 us ( 2083 GB/s)  cold   13.26 us ( 1186 GB/s)  match=True
+  (64, 128, 8, True, None, 8, 3): hot    7.78 us ( 2023 GB/s)  cold   13.73 us ( 1146 GB/s)  match=True
+  (64, 128, 4, True, None, 8, 3): hot    7.94 us ( 1982 GB/s)  cold   13.18 us ( 1193 GB/s)  match=True
+  (32, 128, 8, True, None, 4, 3): hot    8.13 us ( 1935 GB/s)  cold   13.41 us ( 1173 GB/s)  match=True
+  (64, 64, 8, True, None, 8, 3): hot    8.16 us ( 1928 GB/s)  cold   13.66 us ( 1151 GB/s)  match=True
+
+=== attn_qkv N=13312 K=2560 M=4: production cfg (32, 128, 1, True, None, 4, 3)  (22:00:03)
+  production: cold   23.87 us ( 1428 GB/s)  hot   13.39 us ( 2545 GB/s)
+  (64, 128, 4, True, None, 8, 3): hot   11.89 us ( 2867 GB/s)  cold   28.53 us ( 1195 GB/s)  match=True
+  (32, 128, 4, True, None, 4, 3): hot   11.90 us ( 2863 GB/s)  cold   24.72 us ( 1379 GB/s)  match=True
+  (64, 64, 4, True, None, 4, 3): hot   11.98 us ( 2844 GB/s)  cold   28.29 us ( 1205 GB/s)  match=True
+  (64, 256, 4, True, None, 8, 3): hot   12.21 us ( 2791 GB/s)  cold   25.70 us ( 1326 GB/s)  match=True
+  (32, 64, 4, True, None, 4, 3): hot   12.29 us ( 2773 GB/s)  cold   26.54 us ( 1284 GB/s)  match=True
+
+=== attn_qkv N=13312 K=2560 M=16: production cfg (32, 128, 1, True, None, 4, 3)  (22:00:26)
+  production: cold   25.18 us ( 1353 GB/s)  hot   18.83 us ( 1810 GB/s)
+  (64, 128, 4, True, None, 8, 3): hot   13.34 us ( 2554 GB/s)  cold   28.94 us ( 1177 GB/s)  match=True
+  (64, 64, 4, True, None, 4, 3): hot   13.97 us ( 2440 GB/s)  cold   28.53 us ( 1195 GB/s)  match=True
+  (64, 128, 2, True, None, 4, 3): hot   14.05 us ( 2426 GB/s)  cold   24.98 us ( 1364 GB/s)  match=True
+  (64, 128, 4, True, None, 4, 3): hot   14.13 us ( 2412 GB/s)  cold   30.10 us ( 1132 GB/s)  match=True
+  (64, 256, 2, True, None, 8, 3): hot   14.34 us ( 2377 GB/s)  cold   28.61 us ( 1191 GB/s)  match=True
+
+[wrote] bench/l2_prefetch/results/hotcfg_v2.json
+=== done rc=0 2026-09-06T22:00:50+09:00 ===

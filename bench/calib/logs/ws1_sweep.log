@@ -1,0 +1,211 @@
+=== arm w4 (13:37:13) args: 
+[ws11337-w4/w4] server up (13:40:25)
+
+chunks=163 decode_tps~54.7
+
+chunks=236 decode_tps~70.3
+$HOME/tools/flash-next-bench/prof/traces/ws11337-w4-w4-code-edit/1788756026.9227624-TP-0.trace.json.gz
+  step wall= 10.51ms  gpu_busy= 10.42ms  gpu_idle_in_step= 0.09ms
+  draft                        occ= 20 kernels/step=    109 busy_ms=  0.57 raw_ms=  0.64 legacy_trimmed_ms=  0.53
+  step[TARGET_VERIFY bs=1]     occ= 20 kernels/step=   1317 busy_ms=  8.93 raw_ms= 10.82 legacy_trimmed_ms=  8.50
+  draft_extend                 occ= 20 kernels/step=     88 busy_ms=  0.42 raw_ms=  0.49 legacy_trimmed_ms=  0.44
+  TOTAL                        kernels/step=   1514 busy_ms=  9.91 wall_ms= 10.51 idle_ms= 0.09 legacy_trimmed_ms=  9.47
+  (check)                      sum(busy)+idle= 10.00ms vs wall= 10.51ms  residual= 0.51ms (86 unattributed kernels/step)
+$HOME/tools/flash-next-bench/prof/traces/ws11337-w4-w4-prose-en/1788756033.1065326-TP-0.trace.json.gz
+  step wall= 11.11ms  gpu_busy= 11.02ms  gpu_idle_in_step= 0.08ms
+  draft                        occ= 20 kernels/step=    109 busy_ms=  0.56 raw_ms=  0.64 legacy_trimmed_ms=  0.53
+  step[TARGET_VERIFY bs=1]     occ= 20 kernels/step=   1317 busy_ms=  9.33 raw_ms= 11.31 legacy_trimmed_ms=  8.20
+  draft_extend                 occ= 20 kernels/step=     88 busy_ms=  0.42 raw_ms=  0.49 legacy_trimmed_ms=  0.43
+  TOTAL                        kernels/step=   1514 busy_ms= 10.30 wall_ms= 11.11 idle_ms= 0.08 legacy_trimmed_ms=  9.16
+  (check)                      sum(busy)+idle= 10.38ms vs wall= 11.11ms  residual= 0.73ms (94 unattributed kernels/step)
+warming up code-edit ...
+measured code-edit 1/2: 359.69 t/s
+measured code-edit 2/2: 365.85 t/s
+warming up prose-en ...
+measured prose-en 1/2: 254.85 t/s
+measured prose-en 2/2: 272.48 t/s
+warming up prose-ja ...
+measured prose-ja 1/2: 237.24 t/s
+measured prose-ja 2/2: 246.07 t/s
+warming up agent-loop ...
+measured agent-loop 1/2: 304.95 t/s
+measured agent-loop 2/2: 318.30 t/s
+[ws11337-w4-w4] prompt_tokens=17307 completion=12 time=1.8s PASS=True out='AURORA-CEDAR-7319'
+./calib/ws1_validate.sh: 30 行: 3151082 強制終了            env ${SERVER_ENV:-} setsid ./serve-fast.sh $PROFILE ${SERVER_ARGS:-} > $LOG 2>&1 < /dev/null  (wd: ~/tools/sglang-rtxpro6000)
+[ws11337-w4/w4] done (13:41:57); gpu mem: 5888 MiB
+=== arm w6 (13:41:58) args: --speculative-num-steps 5 --speculative-num-draft-tokens 6
+[ws11337-w6/w4] server up (13:44:59)
+
+chunks=114 decode_tps~40.1
+
+chunks=198 decode_tps~54.0
+$HOME/tools/flash-next-bench/prof/traces/ws11337-w6-w4-code-edit/1788756300.9291565-TP-0.trace.json.gz
+  step wall= 12.70ms  gpu_busy= 12.45ms  gpu_idle_in_step= 0.10ms
+  draft                        occ= 20 kernels/step=    201 busy_ms=  1.25 raw_ms=  1.40 legacy_trimmed_ms=  1.04
+  step[TARGET_VERIFY bs=1]     occ= 20 kernels/step=   1497 busy_ms= 10.46 raw_ms= 12.37 legacy_trimmed_ms=  9.69
+  draft_extend                 occ= 20 kernels/step=     88 busy_ms=  0.44 raw_ms=  0.51 legacy_trimmed_ms=  0.45
+  TOTAL                        kernels/step=   1786 busy_ms= 12.14 wall_ms= 12.70 idle_ms= 0.10 legacy_trimmed_ms= 11.18
+  (check)                      sum(busy)+idle= 12.24ms vs wall= 12.70ms  residual= 0.46ms (86 unattributed kernels/step)
+$HOME/tools/flash-next-bench/prof/traces/ws11337-w6-w4-prose-en/1788756306.995849-TP-0.trace.json.gz
+  step wall= 12.41ms  gpu_busy= 12.26ms  gpu_idle_in_step= 0.10ms
+  draft                        occ= 20 kernels/step=    201 busy_ms=  1.13 raw_ms=  1.28 legacy_trimmed_ms=  1.03
+  step[TARGET_VERIFY bs=1]     occ= 20 kernels/step=   1497 busy_ms= 10.27 raw_ms= 12.05 legacy_trimmed_ms=  9.34
+  draft_extend                 occ= 20 kernels/step=     88 busy_ms=  0.43 raw_ms=  0.50 legacy_trimmed_ms=  0.44
+  TOTAL                        kernels/step=   1786 busy_ms= 11.83 wall_ms= 12.41 idle_ms= 0.10 legacy_trimmed_ms= 10.82
+  (check)                      sum(busy)+idle= 11.94ms vs wall= 12.41ms  residual= 0.48ms (88 unattributed kernels/step)
+warming up code-edit ...
+measured code-edit 1/2: 431.83 t/s
+measured code-edit 2/2: 448.62 t/s
+warming up prose-en ...
+measured prose-en 1/2: 267.62 t/s
+measured prose-en 2/2: 235.41 t/s
+warming up prose-ja ...
+measured prose-ja 1/2: 204.29 t/s
+measured prose-ja 2/2: 223.78 t/s
+warming up agent-loop ...
+measured agent-loop 1/2: 348.22 t/s
+measured agent-loop 2/2: 343.15 t/s
+[ws11337-w6-w4] prompt_tokens=17307 completion=12 time=1.6s PASS=True out='AURORA-CEDAR-7319'
+./calib/ws1_validate.sh: 28 行: 3153948 強制終了            env ${SERVER_ENV:-} setsid ./serve-fast.sh $PROFILE ${SERVER_ARGS:-} > $LOG 2>&1 < /dev/null  (wd: ~/tools/sglang-rtxpro6000)
+[ws11337-w6/w4] done (13:46:28); gpu mem: 5981 MiB
+=== arm w8 (13:46:28) args: --speculative-num-steps 7 --speculative-num-draft-tokens 8
+[ws11337-w8/w4] server up (13:49:21)
+
+chunks=94 decode_tps~39.1
+
+chunks=179 decode_tps~53.7
+$HOME/tools/flash-next-bench/prof/traces/ws11337-w8-w4-code-edit/1788756562.0359895-TP-0.trace.json.gz
+  step wall= 12.82ms  gpu_busy= 12.74ms  gpu_idle_in_step= 0.07ms
+  draft                        occ= 20 kernels/step=    293 busy_ms=  1.84 raw_ms=  2.08 legacy_trimmed_ms=  1.55
+  step[TARGET_VERIFY bs=1]     occ= 20 kernels/step=   1317 busy_ms= 10.32 raw_ms= 12.15 legacy_trimmed_ms=  9.99
+  draft_extend                 occ= 20 kernels/step=     88 busy_ms=  0.45 raw_ms=  0.53 legacy_trimmed_ms=  0.46
+  TOTAL                        kernels/step=   1698 busy_ms= 12.62 wall_ms= 12.82 idle_ms= 0.07 legacy_trimmed_ms= 12.01
+  (check)                      sum(busy)+idle= 12.69ms vs wall= 12.82ms  residual= 0.13ms (91 unattributed kernels/step)
+$HOME/tools/flash-next-bench/prof/traces/ws11337-w8-w4-prose-en/1788756567.598477-TP-0.trace.json.gz
+  step wall= 12.46ms  gpu_busy= 12.37ms  gpu_idle_in_step= 0.09ms
+  draft                        occ= 20 kernels/step=    293 busy_ms=  1.87 raw_ms=  2.11 legacy_trimmed_ms=  1.54
+  step[TARGET_VERIFY bs=1]     occ= 20 kernels/step=   1317 busy_ms=  9.85 raw_ms= 11.73 legacy_trimmed_ms=  9.50
+  draft_extend                 occ= 20 kernels/step=     88 busy_ms=  0.44 raw_ms=  0.51 legacy_trimmed_ms=  0.45
+  TOTAL                        kernels/step=   1698 busy_ms= 12.16 wall_ms= 12.46 idle_ms= 0.09 legacy_trimmed_ms= 11.49
+  (check)                      sum(busy)+idle= 12.24ms vs wall= 12.46ms  residual= 0.22ms (86 unattributed kernels/step)
+warming up code-edit ...
+measured code-edit 1/2: 543.59 t/s
+measured code-edit 2/2: 522.34 t/s
+warming up prose-en ...
+measured prose-en 1/2: 223.46 t/s
+measured prose-en 2/2: 238.22 t/s
+warming up prose-ja ...
+measured prose-ja 1/2: 212.26 t/s
+measured prose-ja 2/2: 207.39 t/s
+warming up agent-loop ...
+measured agent-loop 1/2: 337.72 t/s
+measured agent-loop 2/2: 392.76 t/s
+[ws11337-w8-w4] prompt_tokens=17307 completion=12 time=1.7s PASS=True out='AURORA-CEDAR-7319'
+./calib/ws1_validate.sh: 30 行: 3157575 強制終了            env ${SERVER_ENV:-} setsid ./serve-fast.sh $PROFILE ${SERVER_ARGS:-} > $LOG 2>&1 < /dev/null  (wd: ~/tools/sglang-rtxpro6000)
+[ws11337-w8/w4] done (13:50:49); gpu mem: 5781 MiB
+=== arm w12 (13:50:49) args: --speculative-num-steps 11 --speculative-num-draft-tokens 12
+[ws11337-w12/w4] server up (13:53:37)
+
+chunks=77 decode_tps~26.7
+
+chunks=174 decode_tps~41.8
+$HOME/tools/flash-next-bench/prof/traces/ws11337-w12-w4-code-edit/1788756818.792053-TP-0.trace.json.gz
+  step wall= 16.18ms  gpu_busy= 16.08ms  gpu_idle_in_step= 0.12ms
+  draft                        occ= 20 kernels/step=    477 busy_ms=  3.05 raw_ms=  3.63 legacy_trimmed_ms=  2.60
+  step[TARGET_VERIFY bs=1]     occ= 20 kernels/step=   1497 busy_ms= 12.10 raw_ms= 13.88 legacy_trimmed_ms= 11.54
+  draft_extend                 occ= 20 kernels/step=     88 busy_ms=  0.48 raw_ms=  0.56 legacy_trimmed_ms=  0.49
+  TOTAL                        kernels/step=   2062 busy_ms= 15.62 wall_ms= 16.18 idle_ms= 0.12 legacy_trimmed_ms= 14.63
+  (check)                      sum(busy)+idle= 15.74ms vs wall= 16.18ms  residual= 0.44ms (91 unattributed kernels/step)
+$HOME/tools/flash-next-bench/prof/traces/ws11337-w12-w4-prose-en/1788756824.8274658-TP-0.trace.json.gz
+  step wall= 15.54ms  gpu_busy= 15.21ms  gpu_idle_in_step= 0.13ms
+  draft                        occ= 20 kernels/step=    477 busy_ms=  3.00 raw_ms=  3.40 legacy_trimmed_ms=  2.56
+  step[TARGET_VERIFY bs=1]     occ= 20 kernels/step=   1497 busy_ms= 11.81 raw_ms= 13.54 legacy_trimmed_ms= 11.15
+  draft_extend                 occ= 20 kernels/step=     88 busy_ms=  0.44 raw_ms=  0.52 legacy_trimmed_ms=  0.46
+  TOTAL                        kernels/step=   2062 busy_ms= 15.25 wall_ms= 15.54 idle_ms= 0.13 legacy_trimmed_ms= 14.16
+  (check)                      sum(busy)+idle= 15.37ms vs wall= 15.54ms  residual= 0.17ms (86 unattributed kernels/step)
+warming up code-edit ...
+measured code-edit 1/2: 590.55 t/s
+measured code-edit 2/2: 590.77 t/s
+warming up prose-en ...
+measured prose-en 1/2: 200.81 t/s
+measured prose-en 2/2: 198.11 t/s
+warming up prose-ja ...
+measured prose-ja 1/2: 170.36 t/s
+measured prose-ja 2/2: 164.36 t/s
+warming up agent-loop ...
+measured agent-loop 1/2: 312.56 t/s
+measured agent-loop 2/2: 350.15 t/s
+[ws11337-w12-w4] prompt_tokens=17307 completion=12 time=1.8s PASS=True out='AURORA-CEDAR-7319'
+./calib/ws1_validate.sh: 28 行: 3162557 強制終了            env ${SERVER_ENV:-} setsid ./serve-fast.sh $PROFILE ${SERVER_ARGS:-} > $LOG 2>&1 < /dev/null  (wd: ~/tools/sglang-rtxpro6000)
+[ws11337-w12/w4] done (13:55:12); gpu mem: 5889 MiB
+=== arm w16 (13:55:12) args: 
+[ws11337-w16/w16] server up (13:58:28)
+
+chunks=75 decode_tps~27.1
+
+chunks=167 decode_tps~39.2
+$HOME/tools/flash-next-bench/prof/traces/ws11337-w16-w16-code-edit/1788757110.020579-TP-0.trace.json.gz
+  step wall= 17.43ms  gpu_busy= 17.35ms  gpu_idle_in_step= 0.09ms
+  draft                        occ= 20 kernels/step=    675 busy_ms=  4.36 raw_ms=  4.95 legacy_trimmed_ms=  3.65
+  step[TARGET_VERIFY bs=1]     occ= 20 kernels/step=   1365 busy_ms= 12.38 raw_ms= 14.44 legacy_trimmed_ms= 11.89
+  draft_extend                 occ= 20 kernels/step=     89 busy_ms=  0.51 raw_ms=  0.59 legacy_trimmed_ms=  0.52
+  TOTAL                        kernels/step=   2129 busy_ms= 17.26 wall_ms= 17.43 idle_ms= 0.09 legacy_trimmed_ms= 16.05
+  (check)                      sum(busy)+idle= 17.34ms vs wall= 17.43ms  residual= 0.09ms (91 unattributed kernels/step)
+$HOME/tools/flash-next-bench/prof/traces/ws11337-w16-w16-prose-en/1788757115.9167833-TP-0.trace.json.gz
+  step wall= 17.63ms  gpu_busy= 17.53ms  gpu_idle_in_step= 0.11ms
+  draft                        occ= 20 kernels/step=    675 busy_ms=  4.32 raw_ms=  4.96 legacy_trimmed_ms=  3.53
+  step[TARGET_VERIFY bs=1]     occ= 20 kernels/step=   1365 busy_ms= 12.62 raw_ms= 14.40 legacy_trimmed_ms= 12.00
+  draft_extend                 occ= 20 kernels/step=     89 busy_ms=  0.45 raw_ms=  0.53 legacy_trimmed_ms=  0.46
+  TOTAL                        kernels/step=   2129 busy_ms= 17.40 wall_ms= 17.63 idle_ms= 0.11 legacy_trimmed_ms= 16.00
+  (check)                      sum(busy)+idle= 17.51ms vs wall= 17.63ms  residual= 0.13ms (86 unattributed kernels/step)
+warming up code-edit ...
+measured code-edit 1/2: 643.41 t/s
+measured code-edit 2/2: 595.75 t/s
+warming up prose-en ...
+measured prose-en 1/2: 179.71 t/s
+measured prose-en 2/2: 184.93 t/s
+warming up prose-ja ...
+measured prose-ja 1/2: 153.50 t/s
+measured prose-ja 2/2: 153.19 t/s
+warming up agent-loop ...
+measured agent-loop 1/2: 275.44 t/s
+measured agent-loop 2/2: 319.91 t/s
+[ws11337-w16-w16] prompt_tokens=17307 completion=12 time=1.7s PASS=True out='AURORA-CEDAR-7319'
+./calib/ws1_validate.sh: 30 行: 3165162 強制終了            env ${SERVER_ENV:-} setsid ./serve-fast.sh $PROFILE ${SERVER_ARGS:-} > $LOG 2>&1 < /dev/null  (wd: ~/tools/sglang-rtxpro6000)
+[ws11337-w16/w16] done (14:00:09); gpu mem: 5966 MiB
+=== arm w4b (14:00:09) args: 
+[ws11337-w4b/w4] server up (14:02:29)
+
+chunks=164 decode_tps~58.5
+
+chunks=217 decode_tps~66.7
+$HOME/tools/flash-next-bench/prof/traces/ws11337-w4b-w4-code-edit/1788757350.3535745-TP-0.trace.json.gz
+  step wall= 10.36ms  gpu_busy= 10.18ms  gpu_idle_in_step= 0.08ms
+  draft                        occ= 20 kernels/step=    109 busy_ms=  0.57 raw_ms=  0.64 legacy_trimmed_ms=  0.53
+  step[TARGET_VERIFY bs=1]     occ= 20 kernels/step=   1317 busy_ms=  8.91 raw_ms= 10.66 legacy_trimmed_ms=  8.50
+  draft_extend                 occ= 20 kernels/step=     88 busy_ms=  0.42 raw_ms=  0.49 legacy_trimmed_ms=  0.44
+  TOTAL                        kernels/step=   1514 busy_ms=  9.90 wall_ms= 10.36 idle_ms= 0.08 legacy_trimmed_ms=  9.47
+  (check)                      sum(busy)+idle=  9.98ms vs wall= 10.36ms  residual= 0.38ms (86 unattributed kernels/step)
+$HOME/tools/flash-next-bench/prof/traces/ws11337-w4b-w4-prose-en/1788757356.426998-TP-0.trace.json.gz
+  step wall=  9.96ms  gpu_busy=  9.76ms  gpu_idle_in_step= 0.07ms
+  draft                        occ= 20 kernels/step=    109 busy_ms=  0.56 raw_ms=  0.64 legacy_trimmed_ms=  0.53
+  step[TARGET_VERIFY bs=1]     occ= 20 kernels/step=   1317 busy_ms=  8.58 raw_ms= 10.31 legacy_trimmed_ms=  8.28
+  draft_extend                 occ= 20 kernels/step=     88 busy_ms=  0.42 raw_ms=  0.50 legacy_trimmed_ms=  0.43
+  TOTAL                        kernels/step=   1514 busy_ms=  9.56 wall_ms=  9.96 idle_ms= 0.07 legacy_trimmed_ms=  9.24
+  (check)                      sum(busy)+idle=  9.63ms vs wall=  9.96ms  residual= 0.32ms (91 unattributed kernels/step)
+warming up code-edit ...
+measured code-edit 1/2: 359.41 t/s
+measured code-edit 2/2: 372.82 t/s
+warming up prose-en ...
+measured prose-en 1/2: 279.11 t/s
+measured prose-en 2/2: 249.72 t/s
+warming up prose-ja ...
+measured prose-ja 1/2: 235.52 t/s
+measured prose-ja 2/2: 236.91 t/s
+warming up agent-loop ...
+measured agent-loop 1/2: 339.34 t/s
+measured agent-loop 2/2: 308.96 t/s
+[ws11337-w4b-w4] prompt_tokens=17307 completion=12 time=1.6s PASS=True out='AURORA-CEDAR-7319'
+./calib/ws1_validate.sh: 28 行: 3168323 強制終了            env ${SERVER_ENV:-} setsid ./serve-fast.sh $PROFILE ${SERVER_ARGS:-} > $LOG 2>&1 < /dev/null  (wd: ~/tools/sglang-rtxpro6000)
+[ws11337-w4b/w4] done (14:04:00); gpu mem: 5951 MiB
+=== sweep done (14:04:00) label prefix ws11337

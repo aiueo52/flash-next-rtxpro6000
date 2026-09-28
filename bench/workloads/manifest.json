@@ -1,0 +1,56 @@
+{
+  "workloads": [
+    {
+      "name": "code-edit",
+      "prompt_file": "code-edit.txt",
+      "max_tokens": 2400,
+      "sampling": {
+        "temperature": 0.2,
+        "top_p": 0.95
+      },
+      "description": "Large mechanical code edit with high prompt/output overlap."
+    },
+    {
+      "name": "prose-ja",
+      "prompt_file": "prose-ja.txt",
+      "max_tokens": 1200,
+      "sampling": {
+        "temperature": 0.7,
+        "top_p": 0.9
+      },
+      "description": "Original Japanese prose with low repetition."
+    },
+    {
+      "name": "prose-en",
+      "prompt_file": "prose-en.txt",
+      "max_tokens": 1200,
+      "sampling": {
+        "temperature": 0.7,
+        "top_p": 0.9
+      },
+      "description": "Original English prose with low repetition."
+    },
+    {
+      "name": "agent-loop",
+      "prompt_file": "agent-loop.txt",
+      "max_tokens": 1200,
+      "sampling": {
+        "temperature": 0.3,
+        "top_p": 0.95
+      },
+      "description": "Tool-call transcript continuation with medium repetition."
+    },
+    {
+      "name": "long-ctx",
+      "prompt_file": "long-ctx.txt",
+      "repeat_prompt": 24,
+      "postamble": "Write a continuation of 700-900 words in the same precise maintenance-log voice. Introduce one new cabinet inspection and one apparent contradiction that can be resolved solely from the rules in the supplied context. Do not summarize these instructions, and do not use headings.",
+      "max_tokens": 900,
+      "sampling": {
+        "temperature": 0.3,
+        "top_p": 0.95
+      },
+      "description": "Deterministically expanded 10k–30k-token context plus continuation."
+    }
+  ]
+}

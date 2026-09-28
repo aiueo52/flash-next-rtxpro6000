@@ -1,0 +1,565 @@
+{
+ "gpu": {
+  "device": "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition",
+  "sms": 188,
+  "smi": "2287 MHz, 3090 MHz, 81.16 W, 64, 6994 MiB",
+  "torch": "2.13.0+cu130",
+  "time": "2026-09-06 21:05:21"
+ },
+ "limits": {
+  "l2_bytes": 134217728,
+  "max_persisting_bytes": 83886080,
+  "max_window_bytes": 134217728,
+  "sms": 188,
+  "prio_least": 0,
+  "prio_greatest": -5,
+  "persisting_limit_now": 25165824,
+  "l2_bytes_driver": 134217728
+ },
+ "persisting_limit_actual": 83886080,
+ "rows": [
+  {
+   "cond": "cold",
+   "y_mb": 0,
+   "hit_ratio": 1.0,
+   "limit_mb": 0,
+   "gemv_us": 28.528,
+   "gemv_gbs": 1470.0,
+   "touch_us": [
+    [
+     "touch_kernel<0>",
+     204.86
+    ]
+   ],
+   "nodes": [
+    [
+     "touch_kernelILi0EEvPKhyP",
+     0,
+     0,
+     0
+    ],
+    [
+     "_w8a16_gemv_kernel",
+     0,
+     0,
+     0
+    ]
+   ],
+   "shape": "qkvz",
+   "N": 16384,
+   "K": 2560,
+   "M": 4,
+   "w_mb": 40.0
+  },
+  {
+   "cond": "touched",
+   "y_mb": 0,
+   "hit_ratio": 1.0,
+   "limit_mb": 0,
+   "gemv_us": 19.296,
+   "gemv_gbs": 2174.0,
+   "touch_us": [
+    [
+     "touch_kernel<0>",
+     205.14
+    ],
+    [
+     "touch_kernel<0>",
+     27.14
+    ]
+   ],
+   "nodes": [
+    [
+     "touch_kernelILi0EEvPKhyP",
+     0,
+     0,
+     0
+    ],
+    [
+     "touch_kernelILi0EEvPKhyP",
+     0,
+     0,
+     0
+    ],
+    [
+     "_w8a16_gemv_kernel",
+     0,
+     0,
+     0
+    ]
+   ],
+   "shape": "qkvz",
+   "N": 16384,
+   "K": 2560,
+   "M": 4,
+   "w_mb": 40.0
+  },
+  {
+   "cond": "touched+stream",
+   "y_mb": 77,
+   "hit_ratio": 1.0,
+   "limit_mb": 0,
+   "gemv_us": 19.328,
+   "gemv_gbs": 2170.0,
+   "touch_us": [
+    [
+     "touch_kernel<0>",
+     205.1
+    ],
+    [
+     "touch_kernel<0>",
+     27.15
+    ],
+    [
+     "touch_kernel<0>",
+     50.61
+    ]
+   ],
+   "nodes": [
+    [
+     "touch_kernelILi0EEvPKhyP",
+     0,
+     0,
+     0
+    ],
+    [
+     "touch_kernelILi0EEvPKhyP",
+     0,
+     0,
+     0
+    ],
+    [
+     "touch_kernelILi0EEvPKhyP",
+     0,
+     0,
+     0
+    ],
+    [
+     "_w8a16_gemv_kernel",
+     0,
+     0,
+     0
+    ]
+   ],
+   "shape": "qkvz",
+   "N": 16384,
+   "K": 2560,
+   "M": 4,
+   "w_mb": 40.0
+  },
+  {
+   "cond": "elast+stream",
+   "y_mb": 77,
+   "hit_ratio": 1.0,
+   "limit_mb": 0,
+   "gemv_us": 19.297,
+   "gemv_gbs": 2174.0,
+   "touch_us": [
+    [
+     "touch_kernel<0>",
+     205.03
+    ],
+    [
+     "touch_kernel<2>",
+     27.12
+    ],
+    [
+     "touch_kernel<0>",
+     50.58
+    ]
+   ],
+   "nodes": [
+    [
+     "touch_kernelILi0EEvPKhyP",
+     0,
+     0,
+     0
+    ],
+    [
+     "touch_kernelILi2EEvPKhyP",
+     0,
+     0,
+     0
+    ],
+    [
+     "touch_kernelILi0EEvPKhyP",
+     0,
+     0,
+     0
+    ],
+    [
+     "_w8a16_gemv_kernel",
+     0,
+     0,
+     0
+    ]
+   ],
+   "shape": "qkvz",
+   "N": 16384,
+   "K": 2560,
+   "M": 4,
+   "w_mb": 40.0
+  },
+  {
+   "cond": "elast+cs",
+   "y_mb": 77,
+   "hit_ratio": 1.0,
+   "limit_mb": 0,
+   "gemv_us": 19.328,
+   "gemv_gbs": 2170.0,
+   "touch_us": [
+    [
+     "touch_kernel<0>",
+     205.12
+    ],
+    [
+     "touch_kernel<2>",
+     27.14
+    ],
+    [
+     "touch_kernel<1>",
+     50.59
+    ]
+   ],
+   "nodes": [
+    [
+     "touch_kernelILi0EEvPKhyP",
+     0,
+     0,
+     0
+    ],
+    [
+     "touch_kernelILi2EEvPKhyP",
+     0,
+     0,
+     0
+    ],
+    [
+     "touch_kernelILi1EEvPKhyP",
+     0,
+     0,
+     0
+    ],
+    [
+     "_w8a16_gemv_kernel",
+     0,
+     0,
+     0
+    ]
+   ],
+   "shape": "qkvz",
+   "N": 16384,
+   "K": 2560,
+   "M": 4,
+   "w_mb": 40.0
+  },
+  {
+   "cond": "touched",
+   "y_mb": 0,
+   "hit_ratio": 1.0,
+   "limit_mb": 80,
+   "gemv_us": 19.296,
+   "gemv_gbs": 2174.0,
+   "touch_us": [
+    [
+     "touch_kernel<0>",
+     205.1
+    ],
+    [
+     "touch_kernel<0>",
+     27.1
+    ]
+   ],
+   "nodes": [
+    [
+     "touch_kernelILi0EEvPKhyP",
+     0,
+     0,
+     0
+    ],
+    [
+     "touch_kernelILi0EEvPKhyP",
+     0,
+     0,
+     0
+    ],
+    [
+     "_w8a16_gemv_kernel",
+     0,
+     0,
+     0
+    ]
+   ],
+   "shape": "qkvz",
+   "N": 16384,
+   "K": 2560,
+   "M": 4,
+   "w_mb": 40.0
+  },
+  {
+   "cond": "touched+stream",
+   "y_mb": 77,
+   "hit_ratio": 1.0,
+   "limit_mb": 80,
+   "gemv_us": 19.312,
+   "gemv_gbs": 2172.0,
+   "touch_us": [
+    [
+     "touch_kernel<0>",
+     205.15
+    ],
+    [
+     "touch_kernel<0>",
+     27.1
+    ],
+    [
+     "touch_kernel<0>",
+     50.51
+    ]
+   ],
+   "nodes": [
+    [
+     "touch_kernelILi0EEvPKhyP",
+     0,
+     0,
+     0
+    ],
+    [
+     "touch_kernelILi0EEvPKhyP",
+     0,
+     0,
+     0
+    ],
+    [
+     "touch_kernelILi0EEvPKhyP",
+     0,
+     0,
+     0
+    ],
+    [
+     "_w8a16_gemv_kernel",
+     0,
+     0,
+     0
+    ]
+   ],
+   "shape": "qkvz",
+   "N": 16384,
+   "K": 2560,
+   "M": 4,
+   "w_mb": 40.0
+  },
+  {
+   "cond": "persist+stream",
+   "y_mb": 77,
+   "hit_ratio": 1.0,
+   "limit_mb": 80,
+   "gemv_us": 19.296,
+   "gemv_gbs": 2174.0,
+   "touch_us": [
+    [
+     "touch_kernel<0>",
+     205.03
+    ],
+    [
+     "touch_kernel<0>",
+     7.26
+    ],
+    [
+     "touch_kernel<0>",
+     50.5
+    ]
+   ],
+   "nodes": [
+    [
+     "touch_kernelILi0EEvPKhyP",
+     0,
+     0,
+     0
+    ],
+    [
+     "touch_kernelILi0EEvPKhyP",
+     40,
+     2,
+     1
+    ],
+    [
+     "touch_kernelILi0EEvPKhyP",
+     0,
+     0,
+     0
+    ],
+    [
+     "_w8a16_gemv_kernel",
+     0,
+     0,
+     0
+    ]
+   ],
+   "shape": "qkvz",
+   "N": 16384,
+   "K": 2560,
+   "M": 4,
+   "w_mb": 40.0
+  },
+  {
+   "cond": "persist+cs",
+   "y_mb": 77,
+   "hit_ratio": 1.0,
+   "limit_mb": 80,
+   "gemv_us": 19.312,
+   "gemv_gbs": 2172.0,
+   "touch_us": [
+    [
+     "touch_kernel<0>",
+     205.04
+    ],
+    [
+     "touch_kernel<0>",
+     7.23
+    ],
+    [
+     "touch_kernel<1>",
+     50.53
+    ]
+   ],
+   "nodes": [
+    [
+     "touch_kernelILi0EEvPKhyP",
+     0,
+     0,
+     0
+    ],
+    [
+     "touch_kernelILi0EEvPKhyP",
+     40,
+     2,
+     1
+    ],
+    [
+     "touch_kernelILi1EEvPKhyP",
+     0,
+     0,
+     0
+    ],
+    [
+     "_w8a16_gemv_kernel",
+     0,
+     0,
+     0
+    ]
+   ],
+   "shape": "qkvz",
+   "N": 16384,
+   "K": 2560,
+   "M": 4,
+   "w_mb": 40.0
+  },
+  {
+   "cond": "persist+swin",
+   "y_mb": 77,
+   "hit_ratio": 1.0,
+   "limit_mb": 80,
+   "gemv_us": 19.328,
+   "gemv_gbs": 2170.0,
+   "touch_us": [
+    [
+     "touch_kernel<0>",
+     205.19
+    ],
+    [
+     "touch_kernel<0>",
+     7.25
+    ],
+    [
+     "touch_kernel<0>",
+     50.58
+    ]
+   ],
+   "nodes": [
+    [
+     "touch_kernelILi0EEvPKhyP",
+     0,
+     0,
+     0
+    ],
+    [
+     "touch_kernelILi0EEvPKhyP",
+     40,
+     2,
+     1
+    ],
+    [
+     "touch_kernelILi0EEvPKhyP",
+     77,
+     1,
+     1
+    ],
+    [
+     "_w8a16_gemv_kernel",
+     0,
+     0,
+     0
+    ]
+   ],
+   "shape": "qkvz",
+   "N": 16384,
+   "K": 2560,
+   "M": 4,
+   "w_mb": 40.0
+  },
+  {
+   "cond": "swin-consumer",
+   "y_mb": 77,
+   "hit_ratio": 1.0,
+   "limit_mb": 80,
+   "gemv_us": 19.328,
+   "gemv_gbs": 2170.0,
+   "touch_us": [
+    [
+     "touch_kernel<0>",
+     205.12
+    ],
+    [
+     "touch_kernel<0>",
+     7.23
+    ],
+    [
+     "touch_kernel<0>",
+     50.53
+    ]
+   ],
+   "nodes": [
+    [
+     "touch_kernelILi0EEvPKhyP",
+     40,
+     2,
+     1
+    ],
+    [
+     "touch_kernelILi0EEvPKhyP",
+     40,
+     2,
+     1
+    ],
+    [
+     "touch_kernelILi0EEvPKhyP",
+     40,
+     2,
+     1
+    ],
+    [
+     "_w8a16_gemv_kernel",
+     40,
+     2,
+     1
+    ]
+   ],
+   "shape": "qkvz",
+   "N": 16384,
+   "K": 2560,
+   "M": 4,
+   "w_mb": 40.0
+  }
+ ]
+}

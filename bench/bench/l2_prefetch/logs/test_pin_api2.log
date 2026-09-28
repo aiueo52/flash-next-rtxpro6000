@@ -1,0 +1,14 @@
+l2_pin enabled: True file: $HOME/tools/sglang-l2/python/sglang/srt/layers/l2_pin.py
+
+=== draft head 49152x2560 M=1 after 190 MB streaming  (22:52:36)
+  T0 no window                                         gemv [78.51]  touches [205.26, 122.53]  nodes [('_Z12touch_kernelILi0EE', 0, 0), ('_Z12touch_kernelILi0EE', 0, 0), ('_w8a16_gemv_kernel', 0, 0)]
+l2_pin: bench draft head 120.0 MiB window at 0x7eb4ee000000 (hitRatio 1.0), persisting L2 carve-out 80.0 MiB (device max 80.0 MiB)
+  T1 window on stream, GEMV only (server 1f9c256)      gemv [78.4]  touches [205.01, 122.48]  nodes [('_Z12touch_kernelILi0EE', 120, 2), ('_Z12touch_kernelILi0EE', 120, 2), ('_w8a16_gemv_kernel', 120, 2)]
+  T2 after ONE out-of-graph touch under the window     gemv [78.4]  touches [205.07, 122.43]  nodes [('_Z12touch_kernelILi0EE', 120, 2), ('_Z12touch_kernelILi0EE', 120, 2), ('_w8a16_gemv_kernel', 120, 2)]
+  T2b same again (steady state, no re-touch)           gemv [78.45]  touches [204.96, 122.4]  nodes [('_Z12touch_kernelILi0EE', 120, 2), ('_Z12touch_kernelILi0EE', 120, 2), ('_w8a16_gemv_kernel', 120, 2)]
+  T3 ctl touch of head inside graph (inherits window)  gemv [46.4]  touches [205.17, 47.36, 122.53]  nodes [('_Z12touch_kernelILi0EE', 120, 2), ('_Z12touch_kernelILi0EE', 120, 2), ('_Z12touch_kernelILi0EE', 120, 2), ('_w8a16_gemv_kernel', 120, 2)]
+  T4 Triton touch of head inside graph (inherits window) gemv [46.34]  touches [204.96, 121.09, 122.61]  nodes [('_Z12touch_kernelILi0EE', 120, 2), ('_touch_kernel', 120, 2), ('_Z12touch_kernelILi0EE', 120, 2), ('_w8a16_gemv_kernel', 120, 2)]
+  T5 GEMV twice: [GEMV][stream][GEMV]                  gemv [78.27, 78.4]  touches [205.04, 122.64]  nodes [('_Z12touch_kernelILi0EE', 120, 2), ('_w8a16_gemv_kernel', 120, 2), ('_Z12touch_kernelILi0EE', 120, 2), ('_w8a16_gemv_kernel', 120, 2)]
+  T6 Triton touch, fresh stream without window (control) gemv [78.5]  touches [205.12, 120.61, 122.72]  nodes [('_Z12touch_kernelILi0EE', 0, 0), ('_touch_kernel', 0, 0), ('_Z12touch_kernelILi0EE', 0, 0), ('_w8a16_gemv_kernel', 0, 0)]
+
+RESULT: T0 78.51 T1 78.4 T2 78.4/78.45 T3 46.4 T4 46.34 T5 78.4 T6 78.5

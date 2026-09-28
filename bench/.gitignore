@@ -1,0 +1,37 @@
+!runs/routes-*.json
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.venv-review/
+.venv/
+__pycache__/
+bench/megakernel/logs/
+prof/logs/
+prof/traces/
+prof/w16-code
+quality/*.json
+runs/*
+specs/x3/
+specs/wa2/
+specs/wa4/
+specs/wa6/
+specs/bn1/
+specs/e0/
+specs/dh5/
+specs/dh6/
+specs/wj1/
+specs/ql1/
+specs/dh7/
+specs/p4/
+specs/s1/
+workloads/longctx/runtime-cache/
+# Run-generated output that tools write inside this tree by default (never commit it; the published
+# measurements live under ../results/ and in the per-directory allow-lists noted below).
+/specs/
+bench/quality/runs/
+bench/quality/data/
+bench/hc1/quality/runs/
+bench/hc1/quality/data
+bench/fp8coding/results/
+# n1/runs, n1/qual, calib/logs, bench/l2_prefetch/{logs,results} and bench/megakernel/results hold
+# published measurements: each has its own .gitignore that ignores new files and lists the tracked ones.

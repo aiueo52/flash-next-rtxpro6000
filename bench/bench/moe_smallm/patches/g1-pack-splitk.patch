@@ -1,0 +1,841 @@
+--- a/flashinfer/data/csrc/nv_internal/tensorrt_llm/kernels/cutlass_kernels/include/moe_kernels.h
++++ b/flashinfer/data/csrc/nv_internal/tensorrt_llm/kernels/cutlass_kernels/include/moe_kernels.h
+@@ -447,7 +447,25 @@
+ // A3: request for fusing the routing prologue into computeStridesTmaWarpSpecialized.
+ // Deliberately free of the runner's template parameters so it can cross the (declared in this
+ // header, defined in cutlass_fused_moe_kernels.cuh) boundary without new instantiations.
++// G1: how the grouped-GEMM problem list is laid out (active-expert packing / GEMM1 split-K).
++// Filled by setupTmaWarpSpecializedInputs, consumed by the fused routing+strides prologue.
++// All-zero == upstream behaviour.
++struct G1SplitKParams {
++  int pack_groups = 0;             // pack the D active experts into groups [0, D)
++  int splitk_max = 1;              // max GEMM1 K slices (1 = no split-K)
++  int splitk_ramp_pct = 25;        // per-wave ramp as % of a full-K tile's streaming time
++  int sm_count = 0;                // persistent grid width the tile scheduler will launch
++  int gemm1_tiles_per_group = 0;   // CTA tiles one expert's GEMM1 produces
++  int k_align = 0;                 // K slices are whole multiples of this many elements
++  void* gemm1_partials = nullptr;  // (s-1) extra GEMM1 output buffers, UnfusedGemmOutputType
++  int64_t gemm1_partial_stride = 0;
++  int* k_slices_out = nullptr;  // device scalar: the s the prologue chose, read by doActivation
++  int num_groups_gemm1 = 0;     // shortened CUTLASS group-list lengths (0 = unchanged)
++  int num_groups_gemm2 = 0;
++};
++
+ struct FusedPrologueRequest {
++  G1SplitKParams g1{};
+   int const* token_selected_experts = nullptr;
+   int* permuted_row_to_unpermuted_row = nullptr;
+   int* unpermuted_row_to_permuted_row = nullptr;
+@@ -720,7 +738,11 @@
+                     ActivationParams fc1_activation_type, float const** alpha_scale_ptr_array,
+                     bool bias_is_broadcast, cudaStream_t stream,
+                     cutlass_extensions::CutlassGemmConfig config, bool min_latency_mode,
+-                    int* num_active_experts_per, int* active_expert_global_ids, bool enable_pdl);
++                    int* num_active_experts_per, int* active_expert_global_ids, bool enable_pdl,
++                    // G1: extra GEMM1 output buffers written by the K slices, and the device
++                    // scalar holding how many slices the prologue actually used.  Null = off.
++                    void* splitk_partials = nullptr, int64_t splitk_partial_stride = 0,
++                    int const* splitk_k_slices = nullptr);
+ 
+   static void gemm2(
+       MoeGemmRunner<T, WeightType, OutputType, ScaleBiasType, IsMXFPX>& gemm_runner,
+@@ -1009,6 +1031,11 @@
+   void* glu_inter_result_{};
+   void* fc2_result_{};
+   T* fc1_result_{};
++  // G1: (G1_MAX_K_SLICES-1) extra GEMM1 output buffers for the K-split partials, and the device
++  // scalar the prologue writes the chosen slice count into.  Both null unless split-K is enabled.
++  void* splitk_partials_{};
++  int* splitk_k_slices_{};
++  int64_t g1_splitk_partial_stride_{0};
+   // TODO If we fuse the quantization for GEMM2 into GEMM1 we will need two pointers
+   TmaWarpSpecializedGroupedGemmInput::ElementSF* fc1_fp4_act_scale_;
+   TmaWarpSpecializedGroupedGemmInput::ElementSF* fc2_fp4_act_scale_;
+--- a/flashinfer/data/csrc/fused_moe/cutlass_backend/cutlass_fused_moe_kernels.cuh
++++ b/flashinfer/data/csrc/fused_moe/cutlass_backend/cutlass_fused_moe_kernels.cuh
+@@ -1182,12 +1182,139 @@
+   return alpha_scale_ptr_array;
+ }
+ 
++// ===================== G1: active-group packing and GEMM1 split-K =====================
++//
++// Two independent, env-gated changes to how the grouped-GEMM *problem list* is built.  Neither
++// touches CUTLASS: the sm120 array kernel already re-derives every TMA descriptor's dims and
++// strides per group from `dA[g]` / `dB[g]` / `layout_SFA[g]` / `problem_shapes[g]`
++// (`sm120_blockscaled_mma_array_tma.hpp: tensormaps_replace_global_tensor_properties`), so a
++// K-slice with a full-K stride, and a permuted group order, are both legal inputs.
++//
++//  * FLASHINFER_MOE_PACK_GROUPS=1 -- write the D active experts into groups [0, D) instead of
++//    leaving them scattered over all `num_experts_per_node` slots.  The persistent tile
++//    scheduler walks the group list 32 at a time looking for its tile
++//    (`sm90_tile_scheduler_group.hpp: get_work_idx_m_and_n`), so at E=512 / D~28 it reads ~16x
++//    more problem shapes than it needs to.
++//  * FLASHINFER_MOE_SPLITK_GEMM1=1 -- additionally split GEMM1's K into `s` slices, emitted as
++//    `s` extra groups per active expert with FP32-accumulated BF16 partials summed by
++//    doActivationKernel.  `s` is chosen on the device from the measured active-expert count so
++//    that D*tiles*s is close to a whole number of 188-CTA waves.  Requires packing (the slices
++//    have to go somewhere) and `D*s <= num_experts_per_node`.
++//
++// Both fall back to the exact upstream layout when off, when the fused prologue declines, or
++// when any gate below fails.
++inline int moePackGroupsEnabled() {
++  static int const v = [] {
++    char const* s = std::getenv("FLASHINFER_MOE_PACK_GROUPS");
++    return (s && s[0] != '0') ? 1 : 0;
++  }();
++  return v;
++}
++
++// Packing pays for itself only when it actually shortens the group list a lot: the win is the
++// tile scheduler's 32-groups-per-iteration scan, and the cost is a fixed ~0.6 us of extra
++// prologue.  Measured on this box: at W4 (list 512 -> 40, 12.8x) it is -2.47 us/call; at W16
++// (512 -> 160, 3.2x) it is +0.14 us/call, i.e. a wash.  Require a 4x shortening by default.
++// FLASHINFER_MOE_PACK_MIN_RATIO=1 forces it on wherever it is legal.
++inline int moePackMinRatio() {
++  static int const v = [] {
++    char const* s = std::getenv("FLASHINFER_MOE_PACK_MIN_RATIO");
++    int n = s ? std::atoi(s) : 4;
++    return n < 1 ? 1 : n;
++  }();
++  return v;
++}
++
++// 0 = off.  1 = on with an automatic slice count (capped at 4).  n>1 = on, capped at n.
++inline int moeSplitKGemm1Max() {
++  static int const v = [] {
++    char const* s = std::getenv("FLASHINFER_MOE_SPLITK_GEMM1");
++    if (!s) return 0;
++    int n = std::atoi(s);
++    if (n <= 0) return 0;
++    return n == 1 ? 4 : (n > 8 ? 8 : n);
++  }();
++  return v;
++}
++
++// Per-wave ramp as a percentage of a full-K tile's streaming time.  Splitting K by `s` turns
++// `w` waves of (ramp + stream) into `w'` waves of (ramp + stream/s); this is the only knob that
++// decides whether that trade is worth taking.  Measured on this box, see specs/G1_LOG.md.
++inline int moeSplitKRampPct() {
++  static int const v = [] {
++    char const* s = std::getenv("FLASHINFER_MOE_SPLITK_RAMP_PCT");
++    int n = s ? std::atoi(s) : 25;
++    return (n < 0) ? 0 : (n > 400 ? 400 : n);
++  }();
++  return v;
++}
++
++// CTA tile M of an sm120 grouped-GEMM tactic.  Every sm120 FP4 tile is 128 or 256 rows
++// (`cutlass_heuristic.cpp: get_candidate_configs_sm120`); anything else disables the G1 paths.
++inline int g1CtaTileM(cutlass_extensions::CutlassGemmConfig const& cfg) {
++  if (!cfg.is_tma_warp_specialized) return 0;
++  switch (cfg.tile_config_sm120) {
++    case cutlass_extensions::CutlassTileConfigSM120::CtaShape128x128x128B:
++    case cutlass_extensions::CutlassTileConfigSM120::CtaShape128x128x64B:
++    case cutlass_extensions::CutlassTileConfigSM120::CtaShape128x256x64B:
++    case cutlass_extensions::CutlassTileConfigSM120::CtaShape128x128x256B:
++    case cutlass_extensions::CutlassTileConfigSM120::CtaShape128x32x128B:
++    case cutlass_extensions::CutlassTileConfigSM120::CtaShape128x32x64B:
++    case cutlass_extensions::CutlassTileConfigSM120::CtaShape128x64x128B:
++    case cutlass_extensions::CutlassTileConfigSM120::CtaShape128x64x64B:
++      return 128;
++    case cutlass_extensions::CutlassTileConfigSM120::CtaShape256x128x64B:
++    case cutlass_extensions::CutlassTileConfigSM120::CtaShape256x128x128B:
++      return 256;
++    default:
++      return 0;
++  }
++}
++
++inline int64_t gemm1_n_for_g1(int64_t fc1_out_size) { return fc1_out_size; }
++
++__host__ __device__ inline int chooseKSplits(int d_active, int tiles_per_group, int sm_count,
++                                             int max_slices, int max_groups, int max_k_units,
++                                             int ramp_pct) {
++  if (max_slices <= 1 || d_active <= 0 || tiles_per_group <= 0 || sm_count <= 0) return 1;
++  float const r = (float)ramp_pct * 0.01f;
++  int best_s = 1;
++  int waves1 = (d_active * tiles_per_group + sm_count - 1) / sm_count;
++  float best = (float)waves1 * (r + 1.0f);
++  for (int s = 2; s <= max_slices; ++s) {
++    if (d_active * s > max_groups) break;
++    if (s > max_k_units) break;
++    int waves = (d_active * tiles_per_group * s + sm_count - 1) / sm_count;
++    float cost = (float)waves * (r + 1.0f / (float)s);
++    if (cost < best - 1e-4f) {
++      best = cost;
++      best_s = s;
++    }
++  }
++  return best_s;
++}
++
++// Slice `j` of `s` over `units` K units, as [begin, end) in units.
++__host__ __device__ inline void kSliceUnits(int units, int s, int j, int* begin, int* end) {
++  int const base = units / s;
++  int const extra = units % s;
++  int b = j * base + (j < extra ? j : extra);
++  int e = b + base + (j < extra ? 1 : 0);
++  *begin = b;
++  *end = e;
++}
++
+ template <class BSConfig>
+ __device__ void setupFP4BlockScalingFactors(
+     TmaWarpSpecializedGroupedGemmInput& layout_info, int expert, int gemm_m, int gemm_n, int gemm_k,
+     TmaWarpSpecializedGroupedGemmInput::ElementSF const* fp4_act_flat,
+     TmaWarpSpecializedGroupedGemmInput::ElementSF const* weight_block_scale,
+-    int64_t num_tokens_before_expert) {
++    int64_t num_tokens_before_expert, int out_idx = -1, int gemm_k_full = 0,
++    int64_t k_offset = 0) {
++  // G1: `out_idx` is the CUTLASS group index, which is no longer always the expert id; `gemm_k`
++  // is this group's K slice while `gemm_k_full` is the K the *buffers* are laid out with.
++  if (out_idx < 0) out_idx = expert;
++  if (gemm_k_full <= 0) gemm_k_full = gemm_k;
+   assert(layout_info.fpX_block_scaling_factors_stride_act);
+   assert(layout_info.fpX_block_scaling_factors_stride_weight);
+ 
+@@ -1197,17 +1324,37 @@
+       layout_info.fpX_block_scaling_factors_stride_weight);
+   if (layout_info.swap_ab) {
+     // M & N swapped for transpose
+-    stride_act_ptr[expert] = BSConfig::tile_atom_to_shape_SFB(
++    stride_act_ptr[out_idx] = BSConfig::tile_atom_to_shape_SFB(
+         cute::make_shape((int)gemm_n, (int)gemm_m, (int)gemm_k, (int)1));
+-    stride_weight_ptr[expert] = BSConfig::tile_atom_to_shape_SFA(
++    stride_weight_ptr[out_idx] = BSConfig::tile_atom_to_shape_SFA(
+         cute::make_shape((int)gemm_n, (int)gemm_m, (int)gemm_k, (int)1));
+   } else {
+-    stride_act_ptr[expert] = BSConfig::tile_atom_to_shape_SFA(
++    stride_act_ptr[out_idx] = BSConfig::tile_atom_to_shape_SFA(
+         cute::make_shape((int)gemm_m, (int)gemm_n, (int)gemm_k, (int)1));
+-    stride_weight_ptr[expert] = BSConfig::tile_atom_to_shape_SFB(
++    stride_weight_ptr[out_idx] = BSConfig::tile_atom_to_shape_SFB(
+         cute::make_shape((int)gemm_m, (int)gemm_n, (int)gemm_k, (int)1));
+   }
+ 
++  // G1 split-K: the SF layout is `tile_to_shape(SfAtom(Blk_MN x SFVecSize*4), (MN, K, L),
++  // Step<_2,_1,_3>)`, i.e. K-tile-fastest, so a K range is not a contiguous sub-buffer -- the
++  // MN-tile stride still has to step over the *full* K.  Taking the packed layout for the slice
++  // and overwriting that one stride reproduces the full layout exactly under a constant byte
++  // offset (verified exhaustively for both SFA and SFB, see specs/G1_LOG.md section 1).
++  if (gemm_k_full != gemm_k) {
++    auto full_act = layout_info.swap_ab
++                        ? BSConfig::tile_atom_to_shape_SFB(
++                              cute::make_shape((int)gemm_n, (int)gemm_m, (int)gemm_k_full, (int)1))
++                        : BSConfig::tile_atom_to_shape_SFA(cute::make_shape(
++                              (int)gemm_m, (int)gemm_n, (int)gemm_k_full, (int)1));
++    auto full_weight = layout_info.swap_ab
++                           ? BSConfig::tile_atom_to_shape_SFA(cute::make_shape(
++                                 (int)gemm_n, (int)gemm_m, (int)gemm_k_full, (int)1))
++                           : BSConfig::tile_atom_to_shape_SFB(cute::make_shape(
++                                 (int)gemm_m, (int)gemm_n, (int)gemm_k_full, (int)1));
++    cute::get<0, 1>(stride_act_ptr[out_idx].stride()) = cute::get<0, 1>(full_act.stride());
++    cute::get<0, 1>(stride_weight_ptr[out_idx].stride()) = cute::get<0, 1>(full_weight.stride());
++  }
++
+   // This assert validates our current assumption that A&B can be safely transposed without needing
+   // to modify
+   assert(
+@@ -1219,34 +1366,47 @@
+       std::is_same_v<BSConfig, TmaWarpSpecializedGroupedGemmInput::NVFP4BlockScaledConfig>
+           ? TmaWarpSpecializedGroupedGemmInput::FpXBlockScalingType::NVFP4
+           : TmaWarpSpecializedGroupedGemmInput::FpXBlockScalingType::MXFPX;
+-  layout_info.fpX_block_scaling_factors_act[expert] =
+-      fp4_act_flat + getOffsetActivationSF(expert, num_tokens_before_expert, gemm_k, scaling_type);
+-
+-  layout_info.fpX_block_scaling_factors_weight[expert] =
+-      weight_block_scale + getOffsetWeightSF(expert, gemm_n, gemm_k, scaling_type);
++  // One SF atom covers Blk_MN rows x (SFVecSize * Blk_SF) K elements and holds Blk_MN * Blk_SF
++  // bytes, and K tiles are the fastest mode, so skipping `k_offset` K elements is
++  // `Blk_MN * k_offset / SFVecSize` bytes.
++  int64_t const sf_k_offset =
++      (k_offset / (int64_t)BSConfig::SFVecSize) * (int64_t)cute::size(typename BSConfig::Blk_MN{});
++
++  layout_info.fpX_block_scaling_factors_act[out_idx] =
++      fp4_act_flat +
++      getOffsetActivationSF(expert, num_tokens_before_expert, gemm_k_full, scaling_type) +
++      sf_k_offset;
++
++  layout_info.fpX_block_scaling_factors_weight[out_idx] =
++      weight_block_scale + getOffsetWeightSF(expert, gemm_n, gemm_k_full, scaling_type) +
++      sf_k_offset;
+ }
+ 
+ __device__ void computeTmaWarpSpecializedInputStrides(
+     TmaWarpSpecializedGroupedGemmInput& layout_info, int gemm_m, int gemm_n, int gemm_k,
+-    int64_t out_idx) {
++    int64_t out_idx, int gemm_k_stride = 0) {
++  // G1: `gemm_k` is this group's (possibly sliced) K; `gemm_k_stride` is the K the underlying
++  // buffers are laid out with.  A/B are both K-major (TN), so a K slice is a sub-tensor of the
++  // full one with the *full* row stride and a shorter extent.
++  if (gemm_k_stride <= 0) gemm_k_stride = gemm_k;
+   if (layout_info.swap_ab) {
+     reinterpret_cast<TmaWarpSpecializedGroupedGemmInput::StrideB*>(
+         layout_info.stride_act)[out_idx] =
+         cutlass::make_cute_packed_stride(TmaWarpSpecializedGroupedGemmInput::StrideB{},
+-                                         cute::make_shape(gemm_m, gemm_k, 1));
++                                         cute::make_shape(gemm_m, gemm_k_stride, 1));
+     reinterpret_cast<TmaWarpSpecializedGroupedGemmInput::StrideA*>(
+         layout_info.stride_weight)[out_idx] =
+         cutlass::make_cute_packed_stride(TmaWarpSpecializedGroupedGemmInput::StrideA{},
+-                                         cute::make_shape(gemm_n, gemm_k, 1));
++                                         cute::make_shape(gemm_n, gemm_k_stride, 1));
+   } else {
+     reinterpret_cast<TmaWarpSpecializedGroupedGemmInput::StrideA*>(
+         layout_info.stride_act)[out_idx] =
+         cutlass::make_cute_packed_stride(TmaWarpSpecializedGroupedGemmInput::StrideA{},
+-                                         cute::make_shape(gemm_m, gemm_k, 1));
++                                         cute::make_shape(gemm_m, gemm_k_stride, 1));
+     reinterpret_cast<TmaWarpSpecializedGroupedGemmInput::StrideB*>(
+         layout_info.stride_weight)[out_idx] =
+         cutlass::make_cute_packed_stride(TmaWarpSpecializedGroupedGemmInput::StrideB{},
+-                                         cute::make_shape(gemm_n, gemm_k, 1));
++                                         cute::make_shape(gemm_n, gemm_k_stride, 1));
+   }
+   if (layout_info.stride_c) {
+     // TODO Enable 1xN bias matrix as C
+@@ -1284,12 +1444,19 @@
+     int num_tokens_before_expert, int64_t expert, T const* in, WeightType const* weights,
+     TmaWarpSpecializedGroupedGemmInput::INT4GroupwiseParams::SFA const* w4a8_weight_scale,
+     ScaleBiasType const* bias, OutputType* output, float const* router_scales,
+-    int const* permuted_row_to_unpermuted_row, int64_t const out_idx) {
++    int const* permuted_row_to_unpermuted_row, int64_t const out_idx, int64_t gemm_k_stride = 0,
++    int64_t k_offset = 0) {
++  // G1: `gemm_k` is this group's K slice, `gemm_k_stride` the K the buffers use, `k_offset` the
++  // element offset of the slice along K.  All the per-group arrays are indexed by the CUTLASS
++  // group index `out_idx`, which packing/split-K decouple from the expert id.
++  if (gemm_k_stride <= 0) gemm_k_stride = gemm_k;
+   // The input prior to this contains K elements per token, with `num_tokens_before_expert` tokens
+-  layout_info.ptr_act[out_idx] = safe_inc_ptr(in, num_tokens_before_expert * gemm_k);
++  layout_info.ptr_act[out_idx] =
++      safe_inc_ptr(in, num_tokens_before_expert * gemm_k_stride + k_offset);
+ 
+   // Each expert's weight matrix is a constant size NxK, get the matrix at index `expert`
+-  layout_info.ptr_weight[out_idx] = safe_inc_ptr(weights, expert * (gemm_n * gemm_k));
++  layout_info.ptr_weight[out_idx] =
++      safe_inc_ptr(weights, expert * (gemm_n * gemm_k_stride) + k_offset);
+ 
+   if (layout_info.fusion == TmaWarpSpecializedGroupedGemmInput::EpilogueFusion::NONE) {
+     // The output prior to this contains N elements per token, with `num_tokens_before_expert`
+@@ -1297,12 +1464,12 @@
+     layout_info.ptr_d[out_idx] = safe_inc_ptr(output, num_tokens_before_expert * gemm_n);
+   }
+   if (layout_info.fusion == TmaWarpSpecializedGroupedGemmInput::EpilogueFusion::FINALIZE) {
+-    layout_info.fused_finalize_epilogue.ptr_source_token_index[expert] =
++    layout_info.fused_finalize_epilogue.ptr_source_token_index[out_idx] =
+         permuted_row_to_unpermuted_row + num_tokens_before_expert;
+-    layout_info.fused_finalize_epilogue.ptr_router_scales[expert] =
++    layout_info.fused_finalize_epilogue.ptr_router_scales[out_idx] =
+         router_scales + num_tokens_before_expert;
+     if (layout_info.fused_finalize_epilogue.ptr_bias != nullptr) {
+-      layout_info.fused_finalize_epilogue.ptr_bias[expert] = bias + gemm_n * expert;
++      layout_info.fused_finalize_epilogue.ptr_bias[out_idx] = bias + gemm_n * expert;
+     }
+   }
+   if (layout_info.int4_groupwise_params.enabled) {
+@@ -1334,29 +1501,47 @@
+     TmaWarpSpecializedGroupedGemmInput::ElementSF const* fp4_act_flat2, QuantParams quant_params,
+     ScaleBiasType const* bias1, ScaleBiasType const* bias2, OutputType* gemm1_output,
+     OutputType* gemm2_output, float const* router_scales,
+-    int const* permuted_row_to_unpermuted_row) {
++    int const* permuted_row_to_unpermuted_row,
++    // ---- G1 ----
++    // `out_idx1`/`out_idx2` are the CUTLASS group indices (== expert upstream).  `k_slices` > 1
++    // emits GEMM1 as that many extra groups, slice j at group `out_idx1 + j`, each covering a
++    // contiguous K range of `k_align`-element units; slice 0 keeps writing `gemm1_output` and
++    // slices 1.. write `gemm1_partials + (j-1)*gemm1_partial_stride`.
++    int out_idx1 = -1, int out_idx2 = -1, int k_slices = 1, int k_align = 0,
++    OutputType* gemm1_partials = nullptr, int64_t gemm1_partial_stride = 0) {
+   auto const num_tokens_to_expert = num_tokens_including_expert - num_tokens_before_expert;
+   auto const gemm_m = num_tokens_to_expert;
++  if (out_idx1 < 0) out_idx1 = expert;
++  if (out_idx2 < 0) out_idx2 = expert;
++  if (k_slices < 1) k_slices = 1;
++  if (k_align <= 0) k_align = (int)gemm1_k;
++  int const k_units = (int)(gemm1_k / k_align);
++  if (k_slices > k_units) k_slices = k_units < 1 ? 1 : k_units;
+ 
+   // M and N transposed since we are using the #tokens as the N dimension
+-  layout_info1.shape_info.problem_shapes[expert] =
+-      TmaWarpSpecializedGroupedGemmInput::ProblemShape::UnderlyingProblemShape(
+-          layout_info1.swap_ab ? gemm1_n : gemm_m, layout_info1.swap_ab ? gemm_m : gemm1_n,
+-          gemm1_k);
+-  layout_info2.shape_info.problem_shapes[expert] =
++  for (int j = 0; j < k_slices; ++j) {
++    int ub, ue;
++    kSliceUnits(k_units, k_slices, j, &ub, &ue);
++    int64_t const slice_k = (k_slices == 1) ? gemm1_k : (int64_t)(ue - ub) * k_align;
++    layout_info1.shape_info.problem_shapes[out_idx1 + j] =
++        TmaWarpSpecializedGroupedGemmInput::ProblemShape::UnderlyingProblemShape(
++            layout_info1.swap_ab ? gemm1_n : gemm_m, layout_info1.swap_ab ? gemm_m : gemm1_n,
++            slice_k);
++  }
++  layout_info2.shape_info.problem_shapes[out_idx2] =
+       TmaWarpSpecializedGroupedGemmInput::ProblemShape::UnderlyingProblemShape(
+           layout_info2.swap_ab ? gemm2_n : gemm_m, layout_info2.swap_ab ? gemm_m : gemm2_n,
+           gemm2_k);
+ 
+   if (layout_info1.int4_groupwise_params.enabled) {
+-    layout_info1.int4_groupwise_params.shape.problem_shapes[expert] =
++    layout_info1.int4_groupwise_params.shape.problem_shapes[out_idx1] =
+         TmaWarpSpecializedGroupedGemmInput::INT4GroupwiseParams::ProblemShapeInt::
+             UnderlyingProblemShape(layout_info1.swap_ab ? gemm1_n : gemm_m,
+                                    layout_info1.swap_ab ? gemm_m : gemm1_n, gemm1_k);
+   }
+ 
+   if (layout_info2.int4_groupwise_params.enabled) {
+-    layout_info2.int4_groupwise_params.shape.problem_shapes[expert] =
++    layout_info2.int4_groupwise_params.shape.problem_shapes[out_idx2] =
+         TmaWarpSpecializedGroupedGemmInput::INT4GroupwiseParams::ProblemShapeInt::
+             UnderlyingProblemShape(layout_info2.swap_ab ? gemm2_n : gemm_m,
+                                    layout_info2.swap_ab ? gemm_m : gemm2_n, gemm2_k);
+@@ -1372,20 +1557,28 @@
+   }
+ 
+   if (alpha_scale_flat1 && alpha_scale_flat2) {
+-    layout_info1.alpha_scale_ptr_array[expert] = alpha_scale_flat1 + expert;
+-    layout_info2.alpha_scale_ptr_array[expert] = alpha_scale_flat2 + expert;
++    for (int j = 0; j < k_slices; ++j) {
++      layout_info1.alpha_scale_ptr_array[out_idx1 + j] = alpha_scale_flat1 + expert;
++    }
++    layout_info2.alpha_scale_ptr_array[out_idx2] = alpha_scale_flat2 + expert;
+   }
+ 
+   auto setupIfSelected = [&](auto bs_config, auto quant_type) {
+     if (quant_type.fc1.weight_block_scale) {
+-      setupFP4BlockScalingFactors<decltype(bs_config)>(
+-          layout_info1, expert, gemm_m, gemm1_n, gemm1_k, fp4_act_flat1,
+-          quant_type.fc1.weight_block_scale, num_tokens_before_expert);
++      for (int j = 0; j < k_slices; ++j) {
++        int ub, ue;
++        kSliceUnits(k_units, k_slices, j, &ub, &ue);
++        int64_t const slice_k = (k_slices == 1) ? gemm1_k : (int64_t)(ue - ub) * k_align;
++        setupFP4BlockScalingFactors<decltype(bs_config)>(
++            layout_info1, expert, gemm_m, gemm1_n, (int)slice_k, fp4_act_flat1,
++            quant_type.fc1.weight_block_scale, num_tokens_before_expert, out_idx1 + j,
++            (int)gemm1_k, (int64_t)ub * k_align);
++      }
+     }
+     if (quant_type.fc2.weight_block_scale) {
+       setupFP4BlockScalingFactors<decltype(bs_config)>(
+           layout_info2, expert, gemm_m, gemm2_n, gemm2_k, fp4_act_flat2,
+-          quant_type.fc2.weight_block_scale, num_tokens_before_expert);
++          quant_type.fc2.weight_block_scale, num_tokens_before_expert, out_idx2);
+     }
+   };
+ 
+@@ -1402,19 +1595,37 @@
+   assert(gemm1_k > 0 && gemm1_k <= INT32_MAX);
+   assert(gemm2_n > 0 && gemm2_n <= INT32_MAX);
+   assert(gemm2_k > 0 && gemm2_k <= INT32_MAX);
+-  computeTmaWarpSpecializedInputStrides(layout_info1, gemm_m, gemm1_n, gemm1_k, expert);
+-  computeTmaWarpSpecializedInputStrides(layout_info2, gemm_m, gemm2_n, gemm2_k, expert);
+-
+-  computeTmaWarpSpecializedInputPointers(
+-      layout_info1, gemm_m, gemm1_n, gemm1_k, num_tokens_before_expert, expert, gemm1_in, weights1,
+-      reinterpret_cast<TmaWarpSpecializedGroupedGemmInput::INT4GroupwiseParams::SFA const*>(
+-          quant_params.groupwise.fc1.weight_scales),
+-      bias1, gemm1_output, nullptr, nullptr, expert);
++  for (int j = 0; j < k_slices; ++j) {
++    int ub, ue;
++    kSliceUnits(k_units, k_slices, j, &ub, &ue);
++    int64_t const slice_k = (k_slices == 1) ? gemm1_k : (int64_t)(ue - ub) * k_align;
++    int64_t const k_off = (k_slices == 1) ? 0 : (int64_t)ub * k_align;
++    OutputType* out_j =
++        (j == 0) ? gemm1_output : (gemm1_partials + (int64_t)(j - 1) * gemm1_partial_stride);
++    computeTmaWarpSpecializedInputStrides(layout_info1, gemm_m, gemm1_n, (int)slice_k, out_idx1 + j,
++                                          (int)gemm1_k);
++    computeTmaWarpSpecializedInputPointers(
++        layout_info1, gemm_m, gemm1_n, slice_k, num_tokens_before_expert, expert, gemm1_in,
++        weights1,
++        reinterpret_cast<TmaWarpSpecializedGroupedGemmInput::INT4GroupwiseParams::SFA const*>(
++            quant_params.groupwise.fc1.weight_scales),
++        bias1, out_j, nullptr, nullptr, out_idx1 + j, gemm1_k, k_off);
++  }
++  computeTmaWarpSpecializedInputStrides(layout_info2, gemm_m, gemm2_n, gemm2_k, out_idx2);
+   computeTmaWarpSpecializedInputPointers(
+       layout_info2, gemm_m, gemm2_n, gemm2_k, num_tokens_before_expert, expert, gemm2_in, weights2,
+       reinterpret_cast<TmaWarpSpecializedGroupedGemmInput::INT4GroupwiseParams::SFA const*>(
+           quant_params.groupwise.fc2.weight_scales),
+-      bias2, gemm2_output, router_scales, permuted_row_to_unpermuted_row, expert);
++      bias2, gemm2_output, router_scales, permuted_row_to_unpermuted_row, out_idx2);
++}
++
++// G1: write an empty (zero-token) problem shape so CUTLASS produces no tiles for this group.
++// Used for the group slots left over after the active experts are packed to the front.
++__device__ inline void writeEmptyProblemShape(TmaWarpSpecializedGroupedGemmInput& layout_info,
++                                              int out_idx, int64_t gemm_n, int64_t gemm_k) {
++  layout_info.shape_info.problem_shapes[out_idx] =
++      TmaWarpSpecializedGroupedGemmInput::ProblemShape::UnderlyingProblemShape(
++          layout_info.swap_ab ? gemm_n : 0, layout_info.swap_ab ? 0 : gemm_n, gemm_k);
+ }
+ 
+ // TODO Some of this setup could be cached
+@@ -1480,7 +1691,7 @@
+     TmaWarpSpecializedGroupedGemmInput::ElementSF const* fp4_act_flat1,
+     TmaWarpSpecializedGroupedGemmInput::ElementSF const* fp4_act_flat2, QuantParams quant_params,
+     ScaleBiasType const* bias1, ScaleBiasType const* bias2, OutputType* gemm1_output,
+-    OutputType* gemm2_output, float const* router_scales) {
++    OutputType* gemm2_output, float const* router_scales, G1SplitKParams g1) {
+   using BlockRadixRank = FusedPrologueRadixRank<BLOCK_SIZE, LOG2_NUM_EXPERTS>;
+   static_assert(BlockRadixRank::BINS_TRACKED_PER_THREAD * BLOCK_SIZE >= (1 << LOG2_NUM_EXPERTS));
+   assert(num_experts_per_node < (1 << LOG2_NUM_EXPERTS));
+@@ -1540,12 +1751,65 @@
+   __syncthreads();
+ 
+   int const expert = blockIdx.x * BLOCK_SIZE + threadIdx.x;
+-  if (expert < num_experts_per_node) {
++
++  // ---------------- G1: pack the active experts, and pick the GEMM1 K split ----------------
++  // Every block re-derives the same numbers from `shared_offsets`, which it already has in full,
++  // so no grid-wide communication is needed (the same trick A3 uses for the offsets themselves).
++  int out_idx1 = expert;
++  int out_idx2 = expert;
++  int k_slices = 1;
++  int d_active = 0;
++  bool expert_is_active = false;
++  if (g1.pack_groups) {
++    int const lane = threadIdx.x;  // BLOCK_SIZE == 32, one warp, all lanes live here
++    int const block_base = (int)blockIdx.x * BLOCK_SIZE;
++    int cnt_all = 0, cnt_before = 0;
++    for (int e = lane; e < num_experts_per_node; e += BLOCK_SIZE) {
++      int const a = (shared_offsets[e + 1] > shared_offsets[e]) ? 1 : 0;
++      cnt_all += a;
++      cnt_before += (e < block_base) ? a : 0;
++    }
++#pragma unroll
++    for (int off = BLOCK_SIZE / 2; off > 0; off >>= 1) {
++      cnt_all += __shfl_xor_sync(0xffffffff, cnt_all, off);
++      cnt_before += __shfl_xor_sync(0xffffffff, cnt_before, off);
++    }
++    d_active = cnt_all;
++    expert_is_active =
++        (expert < num_experts_per_node) && (shared_offsets[expert + 1] > shared_offsets[expert]);
++    unsigned const active_mask = __ballot_sync(0xffffffff, expert_is_active ? 1 : 0);
++    int const rank = cnt_before + __popc(active_mask & ((1u << lane) - 1u));
++
++    int const k_units = (g1.k_align > 0) ? (int)(gemm1_k / g1.k_align) : 1;
++    int const max_groups =
++        g1.num_groups_gemm1 > 0 ? g1.num_groups_gemm1 : num_experts_per_node;
++    k_slices = chooseKSplits(d_active, g1.gemm1_tiles_per_group, g1.sm_count, g1.splitk_max,
++                             max_groups, k_units, g1.splitk_ramp_pct);
++    out_idx1 = rank * k_slices;
++    out_idx2 = rank;
++    if (g1.k_slices_out && blockIdx.x == 0 && lane == 0) {
++      *g1.k_slices_out = k_slices;
++    }
++  }
++
++  if (expert < num_experts_per_node && (!g1.pack_groups || expert_is_active)) {
+     computeStridesTmaWarpSpecializedForExpert<T, WeightType, OutputType, ScaleBiasType>(
+         expert, shared_offsets[expert], shared_offsets[expert + 1], layout_info1, layout_info2,
+         gemm1_n, gemm1_k, gemm2_n, gemm2_k, gemm1_in, gemm2_in, weights1, weights2,
+         alpha_scale_flat1, alpha_scale_flat2, fp4_act_flat1, fp4_act_flat2, quant_params, bias1,
+-        bias2, gemm1_output, gemm2_output, router_scales, permuted_row_to_unpermuted_row);
++        bias2, gemm1_output, gemm2_output, router_scales, permuted_row_to_unpermuted_row, out_idx1,
++        out_idx2, k_slices, g1.k_align, static_cast<OutputType*>(g1.gemm1_partials),
++        g1.gemm1_partial_stride);
++  }
++  if (g1.pack_groups && expert < num_experts_per_node) {
++    // Slots past the packed range must produce no tiles.  Thread `expert` owns group index
++    // `expert`, so every leftover slot is covered exactly once and never races an active writer.
++    if (expert >= d_active * k_slices && expert < g1.num_groups_gemm1) {
++      writeEmptyProblemShape(layout_info1, expert, gemm1_n, gemm1_k);
++    }
++    if (expert >= d_active && expert < g1.num_groups_gemm2) {
++      writeEmptyProblemShape(layout_info2, expert, gemm2_n, gemm2_k);
++    }
+   }
+ 
+ #if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
+@@ -1572,7 +1836,8 @@
+     TmaWarpSpecializedGroupedGemmInput::ElementSF const* fp4_act_flat1,
+     TmaWarpSpecializedGroupedGemmInput::ElementSF const* fp4_act_flat2, QuantParams quant_params,
+     ScaleBiasType const* bias1, ScaleBiasType const* bias2, OutputType* gemm1_output,
+-    OutputType* gemm2_output, float const* router_scales, bool enable_pdl, cudaStream_t stream) {
++    OutputType* gemm2_output, float const* router_scales, bool enable_pdl, cudaStream_t stream,
++    G1SplitKParams g1) {
+   constexpr int BLOCK_SIZE = 32;
+   constexpr int LOG2_NUM_EXPERTS = 10;
+   using BlockRadixRank = FusedPrologueRadixRank<BLOCK_SIZE, LOG2_NUM_EXPERTS>;
+@@ -1611,7 +1876,7 @@
+       req.start_expert, req.end_expert, num_experts_per_node, layout_info1, layout_info2, gemm1_n,
+       gemm1_k, gemm2_n, gemm2_k, gemm1_in, gemm2_in, weights1, weights2, alpha_scale_flat1,
+       alpha_scale_flat2, fp4_act_flat1, fp4_act_flat2, quant_params, bias1, bias2, gemm1_output,
+-      gemm2_output, router_scales));
++      gemm2_output, router_scales, g1));
+   return true;
+ }
+ 
+@@ -1625,7 +1890,8 @@
+     TmaWarpSpecializedGroupedGemmInput::ElementSF const* fp4_act_flat1,
+     TmaWarpSpecializedGroupedGemmInput::ElementSF const* fp4_act_flat2, QuantParams quant_params,
+     ScaleBiasType const* bias1, ScaleBiasType const* bias2, OutputType* gemm1_output,
+-    OutputType* gemm2_output, float const* router_scales, bool enable_pdl, cudaStream_t stream) {
++    OutputType* gemm2_output, float const* router_scales, bool enable_pdl, cudaStream_t stream,
++    G1SplitKParams g1) {
+   if (!fusedPrologueEnabled() || !fusedStridesEnabled()) {
+     return false;
+   }
+@@ -1639,7 +1905,7 @@
+         req, layout_info1, layout_info2, num_experts_per_node, gemm1_n, gemm1_k, gemm2_n, gemm2_k,
+         gemm1_in, gemm2_in, weights1, weights2, alpha_scale_flat1, alpha_scale_flat2, fp4_act_flat1,
+         fp4_act_flat2, quant_params, bias1, bias2, gemm1_output, gemm2_output, router_scales,
+-        enable_pdl, stream);
++        enable_pdl, stream, g1);
+   };
+   switch (req.experts_per_token) {
+     case 1:
+@@ -2394,6 +2660,9 @@
+                                      num_experts_per_node, activation_type);
+ }
+ 
++// G1: compile-time cap on the GEMM1 K-slice count doActivationKernel can reduce.
++constexpr int G1_MAX_K_SLICES = 8;
++
+ // ============================== Activation =================================
+ 
+ template <class T, class GemmOutputType, class ScaleBiasType, class ActFn,
+@@ -2404,7 +2673,8 @@
+     ScaleBiasType const* bias_ptr, bool bias_is_broadcast, int64_t const* expert_first_token_offset,
+     int num_experts_per_node, int64_t inter_size, float const* fc2_act_global_scale,
+     bool use_per_expert_act_scale, TmaWarpSpecializedGroupedGemmInput::ElementSF* fc2_act_sf_flat,
+-    ActivationParams activation_params) {
++    ActivationParams activation_params, GemmOutputType const* splitk_partials = nullptr,
++    int64_t splitk_partial_stride = 0, int const* splitk_k_slices = nullptr) {
+ #ifdef ENABLE_FP4
+   constexpr bool IsNVFP4 =
+       std::is_same_v<T, __nv_fp4_e2m1> &&
+@@ -2442,6 +2712,11 @@
+ 
+   int64_t const num_valid_tokens = expert_first_token_offset[num_experts_per_node];
+ 
++  // G1 split-K reduction.  The prologue (which ran before GEMM1) published how many K slices it
++  // chose; load that *before* the grid dependency sync so the latency hides behind GEMM1's drain
++  // -- this kernel is pure dependent-latency (see specs/A8_FEASIBILITY.md section 3).
++  int const num_k_slices = (splitk_partials && splitk_k_slices) ? *splitk_k_slices : 1;
++
+ #if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
+   cudaGridDependencySynchronize();
+ #endif
+@@ -2488,6 +2763,17 @@
+     // Aliases gemm_result for non-gated, non-fp8 cases
+     auto gemm_result_vec =
+         reinterpret_cast<GemmResultElem const*>(gemm_result + gemm_result_offset);
++    // Slices 1..s-1 live in `splitk_partials`, one full GEMM1 output buffer apart.
++    GemmResultElem const* partial_vec[G1_MAX_K_SLICES - 1] = {};
++    for (int j = 1; j < num_k_slices && j < G1_MAX_K_SLICES; ++j) {
++      partial_vec[j - 1] = reinterpret_cast<GemmResultElem const*>(
++          splitk_partials + (int64_t)(j - 1) * splitk_partial_stride + gemm_result_offset);
++    }
++    auto load_partials = [&](int64_t idx, ComputeElem& acc) {
++      for (int j = 1; j < num_k_slices && j < G1_MAX_K_SLICES; ++j) {
++        acc = acc + arrayConvert<GemmResultElem, ComputeElem>(partial_vec[j - 1][idx]);
++      }
++    };
+     auto output_vec = reinterpret_cast<OutputElem*>(safe_inc_ptr(output, output_offset));
+     auto bias_ptr_vec = reinterpret_cast<BiasElem const*>(bias_ptr + bias_offset);
+     int64_t const start_offset = tid;
+@@ -2508,6 +2794,9 @@
+     for (int64_t elem_index = start_offset; elem_index < num_elems_in_col; elem_index += stride) {
+       auto fc1_value =
+           arrayConvert<GemmResultElem, ComputeElem>(gemm_result_vec[elem_index + gated_off_vec]);
++      if (num_k_slices > 1) {
++        load_partials(elem_index + gated_off_vec, fc1_value);
++      }
+       if (bias_ptr) {
+         fc1_value = fc1_value +
+                     arrayConvert<BiasElem, ComputeElem>(bias_ptr_vec[elem_index + gated_off_vec]);
+@@ -2517,6 +2806,9 @@
+         if constexpr (IsGated) {
+           auto linear_value =
+               arrayConvert<GemmResultElem, ComputeElem>(gemm_result_vec[elem_index]);
++          if (num_k_slices > 1) {
++            load_partials(elem_index, linear_value);
++          }
+           if (bias_ptr_vec) {
+             linear_value =
+                 linear_value + arrayConvert<BiasElem, ComputeElem>(bias_ptr_vec[elem_index]);
+@@ -2581,7 +2873,8 @@
+                   int64_t inter_size, int64_t expanded_num_tokens, ActivationParams activation_type,
+                   QuantParams const& quant_params, bool use_per_expert_act_scale,
+                   TmaWarpSpecializedGroupedGemmInput::ElementSF* fc2_act_sf_flat, bool enable_pdl,
+-                  cudaStream_t stream) {
++                  cudaStream_t stream, GemmOutputType const* splitk_partials = nullptr,
++                  int64_t splitk_partial_stride = 0, int const* splitk_k_slices = nullptr) {
+   static int64_t const smCount = tensorrt_llm::common::getMultiProcessorCount();
+   // Note: Launching 8 blocks per SM can fully leverage the memory bandwidth (tested on B200).
+   // N-dim SF padding has been removed (CUTLASS grouped GEMM never reads beyond
+@@ -2681,7 +2974,8 @@
+   cudaLaunchKernelEx(&config, fn, output, gemm_result, fp8_quant, bias, bias_is_broadcast,
+                      expert_first_token_offset, num_experts_per_node, inter_size,
+                      quant_params.fp4.fc2.act_global_scale, use_per_expert_act_scale,
+-                     fc2_act_sf_flat, activation_type);
++                     fc2_act_sf_flat, activation_type, splitk_partials, splitk_partial_stride,
++                     splitk_k_slices);
+ }
+ 
+ // ============================== Lora Add Bias =================================
+@@ -2948,6 +3242,18 @@
+                                                 num_experts_per_node, getScalingType())
+                                           : 0;
+ 
++  // G1 split-K: (s-1) extra GEMM1 output buffers plus one device scalar for the chosen s.
++  // Only ever used in the decode/verify regime the fused prologue is gated to (num_tokens <= 32),
++  // so the buffer is sized for that many rows rather than the full prefill batch.
++  size_t const splitk_rows_cap =
++      std::min<size_t>(num_moe_inputs, (size_t)32 * (size_t)experts_per_token);
++  size_t const splitk_partials_size =
++      (moeSplitKGemm1Max() > 1 && using_tma_ws)
++          ? (size_t)(G1_MAX_K_SLICES - 1) * splitk_rows_cap *
++                (size_t)(is_gated_activation ? 2 * inter_size : inter_size) * gemm_output_dtype
++          : 0;
++  size_t const splitk_k_slices_size = (moeSplitKGemm1Max() > 1 && using_tma_ws) ? sizeof(int) : 0;
++
+   size_t const gemm_workspace_size = moe_gemm_runner_.getMaxWorkspaceSize(num_experts_per_node);
+ 
+   // lora related
+@@ -3026,6 +3332,8 @@
+   ADD_NAME(alpha_scale_ptr_array_fc1, alpha_scale_ptr_array_size);
+   ADD_NAME(alpha_scale_ptr_array_fc2, alpha_scale_ptr_array_size);
+   ADD(fp4_act_scale);
++  ADD(splitk_partials);
++  ADD(splitk_k_slices);
+   ADD_NAME(tma_ws_gemm1_workspace, tma_ws_size);
+   ADD_NAME(tma_ws_gemm2_workspace, tma_ws_size);
+   ADD(gemm_workspace);
+@@ -3153,6 +3461,13 @@
+     TLLM_CHECK(fc2_fp4_act_scale_ != nullptr);
+   }
+ 
++  // G1 split-K scratch (zero-sized, hence nullptr, unless FLASHINFER_MOE_SPLITK_GEMM1 is set)
++  splitk_partials_ = workspaces.at("splitk_partials").first
++                         ? static_cast<void*>(getWsPtr(UnfusedGemmOutputType{}, "splitk_partials"))
++                         : nullptr;
++  splitk_k_slices_ =
++      workspaces.at("splitk_k_slices").first ? getWsPtr(int{}, "splitk_k_slices") : nullptr;
++
+   tma_ws_grouped_gemm1_input_ = {};
+   tma_ws_grouped_gemm2_input_ = {};
+   if (moe_gemm_runner_.supportsTmaWarpSpecialized()) {
+@@ -3318,7 +3633,8 @@
+     int64_t const inter_size, int const num_experts_per_node, ActivationParams fc1_activation_type,
+     float const** alpha_scale_ptr_array, bool bias_is_broadcast, cudaStream_t stream,
+     cutlass_extensions::CutlassGemmConfig config, bool min_latency_mode,
+-    int* num_active_experts_per, int* active_expert_global_ids, bool enable_pdl) {
++    int* num_active_experts_per, int* active_expert_global_ids, bool enable_pdl,
++    void* splitk_partials, int64_t splitk_partial_stride, int const* splitk_k_slices) {
+   if (fp8_blockscale_gemm_runner) {
+     TLLM_CHECK(!min_latency_mode);
+     Self::BlockScaleFC1(*fp8_blockscale_gemm_runner, input, output, intermediate_result,
+@@ -3403,7 +3719,9 @@
+         static_cast<UnfusedGemmOutputType const*>(gemm_output), fc2_fp8_quant, fc1_expert_biases,
+         bias_is_broadcast, expert_first_token_offset, num_experts_per_node, inter_size,
+         expanded_num_rows, fc1_activation_type, quant_params, use_per_expert_act_scale,
+-        fc2_fp4_act_flat, enable_pdl, stream);
++        fc2_fp4_act_flat, enable_pdl, stream,
++        static_cast<UnfusedGemmOutputType const*>(splitk_partials), splitk_partial_stride,
++        splitk_k_slices);
+ 
+     sync_check_cuda_error(stream);
+   } else if (use_fp8) {
+@@ -3634,7 +3952,8 @@
+                       static_cast<ScaleBiasType const*>(fc2_lora), false, expert_first_token_offset,
+                       num_experts_per_node, hidden_size, expanded_num_rows,
+                       ActivationParams(ActivationType::Identity), {}, false, nullptr, enable_pdl,
+-                      stream);
++                      stream, /*splitk_partials*/ nullptr, /*splitk_partial_stride*/ 0,
++                      /*splitk_k_slices*/ nullptr);
+     sync_check_cuda_error(stream);
+   }
+ 
+@@ -4236,7 +4555,10 @@
+                 fc1_fp4_act_scale_, fc2_fp4_act_scale_, quant_params, num_rows, expanded_num_rows,
+                 hidden_size, inter_size, num_experts_per_node, fc1_activation_type,
+                 alpha_scale_ptr_array_fc1_, !use_lora, stream, *gemm1_config_, false, nullptr,
+-                nullptr, enable_pdl);
++                nullptr, enable_pdl,
++                (strides_fused && g1_splitk_partial_stride_) ? splitk_partials_ : nullptr,
++                (strides_fused && g1_splitk_partial_stride_) ? g1_splitk_partial_stride_ : 0,
++                (strides_fused && g1_splitk_partial_stride_) ? splitk_k_slices_ : nullptr);
+     sync_check_cuda_error(stream);
+ 
+     if (use_lora) {
+@@ -4326,7 +4648,7 @@
+             *fused_prologue, layout_info1, layout_info2, num_experts_per_node, gemm1_n, gemm1_k,
+             gemm2_n, gemm2_k, gemm1_in, gemm2_in, weights1, weights2, alpha_scale_flat1,
+             alpha_scale_flat2, fp4_act_flat1, fp4_act_flat2, quant_params, bias1, bias2,
+-            gemm1_output, gemm2_output, router_scales, enable_pdl, stream);
++            gemm1_output, gemm2_output, router_scales, enable_pdl, stream, fused_prologue->g1);
+     return std::make_pair(layout_info1, layout_info2);
+   }
+ 
+@@ -4391,6 +4713,7 @@
+                                   FusedPrologueRequest* fused_prologue) {
+   auto gemm1_tma_ws_input = tma_ws_grouped_gemm1_input_;
+   auto gemm2_tma_ws_input = tma_ws_grouped_gemm2_input_;
++  g1_splitk_partial_stride_ = 0;  // G1: cleared on every call; set only if split-K engages
+ 
+   // Set enable_pdl for both GEMM inputs
+   gemm1_tma_ws_input.enable_pdl = enable_pdl;
+@@ -4490,6 +4813,60 @@
+     }
+ 
+     TLLM_CHECK_WITH_INFO(gemm1_input != gemm1_output, "Input and output buffers are overlapping");
++
++    // ---------------------------------- G1 ----------------------------------
++    // Decide here (host side, config in hand) whether the prologue may pack the active experts
++    // into the front of the group list and split GEMM1's K.  The prologue makes the final call
++    // on *how many* slices, from the expert count only it can see.
++    if (fused_prologue) {
++      G1SplitKParams g1{};
++      static int const sm_count = tensorrt_llm::common::getMultiProcessorCount();
++      int const cta_tile_m = g1CtaTileM(*gemm1_config_);
++      bool const shape_ok = gemm1_tma_ws_input.swap_ab && cta_tile_m > 0 &&
++                            gemm1_n_for_g1(fc1_out_size) % cta_tile_m == 0 &&
++                            num_rows <= 32;  // one N tile per expert, as the wave model assumes
++      // The group list only shrinks to `expanded_num_rows`; below a 4x shortening the fixed
++      // prologue cost eats the scheduler saving (see moePackMinRatio).
++      bool const ratio_ok =
++          expanded_num_rows * (int64_t)moePackMinRatio() <= (int64_t)num_experts_per_node;
++      g1.pack_groups =
++          (moePackGroupsEnabled() || moeSplitKGemm1Max() > 1) && shape_ok && ratio_ok ? 1 : 0;
++      g1.sm_count = sm_count;
++      g1.gemm1_tiles_per_group = cta_tile_m > 0 ? (int)(fc1_out_size / cta_tile_m) : 0;
++      g1.splitk_ramp_pct = moeSplitKRampPct();
++      // K slices must be whole SF atoms (MinKDimAlignment) and, so the mainloop keeps full
++      // K tiles, whole CTA K tiles where that divides evenly.
++      int const k_align_sf = (int)TmaWarpSpecializedGroupedGemmInput::MinKDimAlignmentNVFP4;
++      int const k_align_cta = 256;
++      g1.k_align = (hidden_size % k_align_cta == 0) ? k_align_cta : k_align_sf;
++      bool const splitk_ok =
++          g1.pack_groups && moeSplitKGemm1Max() > 1 && splitk_partials_ != nullptr &&
++          splitk_k_slices_ != nullptr && quant_params.fp4.fc1.weight_block_scale != nullptr &&
++          (hidden_size % g1.k_align == 0);
++      if (splitk_ok) {
++        g1.splitk_max = moeSplitKGemm1Max();
++        g1.gemm1_partials = splitk_partials_;
++        g1.gemm1_partial_stride = expanded_num_rows * fc1_out_size;
++        g1.k_slices_out = splitk_k_slices_;
++        g1_splitk_partial_stride_ = g1.gemm1_partial_stride;
++      }
++      // With the active experts packed at the front, the *number of groups* can also come down:
++      // D is at most `expanded_num_rows` (an active expert owns at least one permuted row), so
++      // `expanded_num_rows * s` is a host-side upper bound.  This is what actually shortens the
++      // tile scheduler's linear group scan -- it walks `problem_shapes.groups()` entries, and at
++      // E=512 with 40 (W4) or 160 (W16) rows that list is 3-13x longer than it needs to be.
++      if (g1.pack_groups) {
++        int64_t const g1_groups =
++            std::min<int64_t>(num_experts_per_node, expanded_num_rows * std::max(g1.splitk_max, 1));
++        int64_t const g2_groups = std::min<int64_t>(num_experts_per_node, expanded_num_rows);
++        gemm1_tma_ws_input.shape_info.num_groups = (int)g1_groups;
++        gemm2_tma_ws_input.shape_info.num_groups = (int)g2_groups;
++        g1.num_groups_gemm1 = (int)g1_groups;
++        g1.num_groups_gemm2 = (int)g2_groups;
++      }
++      fused_prologue->g1 = g1;
++    }
++
+     return Self::computeStridesTmaWarpSpecialized(
+         expert_first_token_offset_, gemm1_tma_ws_input, gemm2_tma_ws_input, num_rows,
+         expanded_num_rows, fc1_out_size, hidden_size, hidden_size, inter_size, num_experts_per_node,

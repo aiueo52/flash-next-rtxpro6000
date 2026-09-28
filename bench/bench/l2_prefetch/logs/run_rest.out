@@ -1,0 +1,305 @@
+=== bench_overlap 2026-09-06T21:13:15+09:00 ===
+
+=== side-only prefetch rate  (21:13:20)
+  grid    8:    64.24 us / 32 MB =    522 GB/s
+  grid   16:    32.81 us / 32 MB =   1023 GB/s
+  grid   32:    18.12 us / 32 MB =   1852 GB/s
+  grid   64:    10.93 us / 32 MB =   3069 GB/s
+  grid  128:     7.97 us / 32 MB =   4212 GB/s
+  grid  188:     8.17 us / 32 MB =   4105 GB/s
+  grid  376:     7.56 us / 32 MB =   4438 GB/s
+
+=== chain tiny20  (21:13:24)
+  main-only:    34.08 us/round   kernels [('_tiny_kernel', 0.8)]
+  grid    8 prio=None : both    64.07 (+ 30.00 vs main; side alone   64.24) hidden  0.53  touch   59.95 us  chain x{'_tiny_kernel': 1.04}
+  grid    8 prio=prio : both    64.72 (+ 30.65 vs main; side alone   64.24) hidden  0.52  touch   59.81 us  chain x{'_tiny_kernel': 1.04}
+     node prios: [('touch_kernelILi0EEvPKhyP', 0), ('_tiny_kernel', -3), ('_tiny_kernel', -3), ('_tiny_kernel', -3), ('_tiny_kernel', -3), ('_tiny_kernel', -3)]
+  grid    8 prio=attr : both    65.02 (+ 30.94 vs main; side alone   64.24) hidden  0.52  touch   59.92 us  chain x{'_tiny_kernel': 1.06}
+     node prios: [('touch_kernelILi0EEvPKhyP', 0), ('_tiny_kernel', -3), ('_tiny_kernel', -3), ('_tiny_kernel', -3), ('_tiny_kernel', -3), ('_tiny_kernel', -3)]
+  grid   16 prio=None : both    39.16 (+  5.08 vs main; side alone   32.81) hidden  0.84  touch   30.90 us  chain x{'_tiny_kernel': 1.04}
+  grid   16 prio=prio : both    38.18 (+  4.11 vs main; side alone   32.81) hidden  0.88  touch   30.86 us  chain x{'_tiny_kernel': 1.04}
+  grid   16 prio=attr : both    38.89 (+  4.82 vs main; side alone   32.81) hidden  0.85  touch   30.82 us  chain x{'_tiny_kernel': 1.04}
+  grid   32 prio=None : both    37.57 (+  3.49 vs main; side alone   18.12) hidden  0.81  touch   16.97 us  chain x{'_tiny_kernel': 1.0}
+  grid   32 prio=prio : both    38.08 (+  4.00 vs main; side alone   18.12) hidden  0.78  touch   16.96 us  chain x{'_tiny_kernel': 1.0}
+  grid   32 prio=attr : both    37.12 (+  3.05 vs main; side alone   18.12) hidden  0.83  touch   16.87 us  chain x{'_tiny_kernel': 1.0}
+  grid   64 prio=None : both    37.64 (+  3.56 vs main; side alone   10.93) hidden  0.67  touch   10.01 us  chain x{'_tiny_kernel': 1.0}
+  grid   64 prio=prio : both    38.15 (+  4.08 vs main; side alone   10.93) hidden  0.63  touch    9.89 us  chain x{'_tiny_kernel': 1.0}
+  grid   64 prio=attr : both    37.78 (+  3.70 vs main; side alone   10.93) hidden  0.66  touch   10.01 us  chain x{'_tiny_kernel': 1.0}
+  grid  128 prio=None : both    38.11 (+  4.03 vs main; side alone    7.97) hidden  0.49  touch    7.42 us  chain x{'_tiny_kernel': 1.0}
+  grid  128 prio=prio : both    38.16 (+  4.08 vs main; side alone    7.97) hidden  0.49  touch    7.50 us  chain x{'_tiny_kernel': 1.0}
+  grid  128 prio=attr : both    37.98 (+  3.90 vs main; side alone    7.97) hidden  0.51  touch    7.50 us  chain x{'_tiny_kernel': 1.0}
+  grid  188 prio=None : both    39.02 (+  4.95 vs main; side alone    8.17) hidden  0.40  touch    7.54 us  chain x{'_tiny_kernel': 1.0}
+  grid  188 prio=prio : both    38.24 (+  4.16 vs main; side alone    8.17) hidden  0.49  touch    7.54 us  chain x{'_tiny_kernel': 1.0}
+  grid  188 prio=attr : both    38.53 (+  4.45 vs main; side alone    8.17) hidden  0.46  touch    7.60 us  chain x{'_tiny_kernel': 1.0}
+  grid  376 prio=None : both    39.35 (+  5.28 vs main; side alone    7.56) hidden  0.30  touch    7.23 us  chain x{'_tiny_kernel': 1.0}
+  grid  376 prio=prio : both    39.91 (+  5.83 vs main; side alone    7.56) hidden  0.23  touch    7.22 us  chain x{'_tiny_kernel': 1.0}
+  grid  376 prio=attr : both    39.62 (+  5.54 vs main; side alone    7.56) hidden  0.27  touch    7.35 us  chain x{'_tiny_kernel': 1.0}
+
+=== chain tiny160  (21:13:42)
+  main-only:    34.22 us/round   kernels [('_tiny_kernel', 0.8)]
+  grid    8 prio=None : both    65.29 (+ 31.06 vs main; side alone   64.24) hidden  0.52  touch   60.06 us  chain x{'_tiny_kernel': 1.05}
+  grid    8 prio=prio : both    64.17 (+ 29.95 vs main; side alone   64.24) hidden  0.53  touch   59.90 us  chain x{'_tiny_kernel': 1.08}
+     node prios: [('touch_kernelILi0EEvPKhyP', 0), ('_tiny_kernel', -3), ('_tiny_kernel', -3), ('_tiny_kernel', -3), ('_tiny_kernel', -3), ('_tiny_kernel', -3)]
+  grid   16 prio=None : both    39.11 (+  4.89 vs main; side alone   32.81) hidden  0.85  touch   31.21 us  chain x{'_tiny_kernel': 1.04}
+  grid   16 prio=prio : both    40.21 (+  5.99 vs main; side alone   32.81) hidden  0.82  touch   30.98 us  chain x{'_tiny_kernel': 1.04}
+  grid   32 prio=None : both    38.24 (+  4.02 vs main; side alone   18.12) hidden  0.78  touch   17.06 us  chain x{'_tiny_kernel': 1.0}
+  grid   32 prio=prio : both    38.29 (+  4.07 vs main; side alone   18.12) hidden  0.78  touch   17.06 us  chain x{'_tiny_kernel': 1.0}
+  grid   64 prio=None : both    38.43 (+  4.20 vs main; side alone   10.93) hidden  0.62  touch   10.04 us  chain x{'_tiny_kernel': 1.0}
+  grid   64 prio=prio : both    38.10 (+  3.88 vs main; side alone   10.93) hidden  0.65  touch   10.16 us  chain x{'_tiny_kernel': 1.0}
+  grid  128 prio=None : both    39.18 (+  4.96 vs main; side alone    7.97) hidden  0.38  touch    7.78 us  chain x{'_tiny_kernel': 1.0}
+  grid  128 prio=prio : both    38.14 (+  3.91 vs main; side alone    7.97) hidden  0.51  touch    7.90 us  chain x{'_tiny_kernel': 1.0}
+  grid  188 prio=None : both    39.05 (+  4.83 vs main; side alone    8.17) hidden  0.41  touch    7.79 us  chain x{'_tiny_kernel': 1.0}
+  grid  188 prio=prio : both    39.33 (+  5.10 vs main; side alone    8.17) hidden  0.38  touch    8.06 us  chain x{'_tiny_kernel': 1.0}
+  grid  376 prio=None : both    40.23 (+  6.01 vs main; side alone    7.56) hidden  0.21  touch    7.54 us  chain x{'_tiny_kernel': 1.0}
+  grid  376 prio=prio : both    39.46 (+  5.23 vs main; side alone    7.56) hidden  0.31  touch    7.50 us  chain x{'_tiny_kernel': 1.0}
+
+=== chain gemv4  (21:13:54)
+  main-only:   122.52 us/round   kernels [('_w8a16_gemv_kernel', 28.88)]
+  grid    8 prio=None : both   156.93 (+ 34.41 vs main; side alone   64.24) hidden  0.46  touch  148.43 us  chain x{'_w8a16_gemv_kernel': 1.073}
+  grid    8 prio=prio : both   155.72 (+ 33.20 vs main; side alone   64.24) hidden  0.48  touch  147.69 us  chain x{'_w8a16_gemv_kernel': 1.077}
+     node prios: [('touch_kernelILi0EEvPKhyP', 0), ('_w8a16_gemv_kernel', -3), ('_w8a16_gemv_kernel', -3), ('_w8a16_gemv_kernel', -3), ('_w8a16_gemv_kernel', -3), ('touch_kernelILi0EEvPKhyP', 0)]
+  grid   16 prio=None : both   140.79 (+ 18.27 vs main; side alone   32.81) hidden  0.44  touch  103.50 us  chain x{'_w8a16_gemv_kernel': 1.181}
+  grid   16 prio=prio : both   140.89 (+ 18.37 vs main; side alone   32.81) hidden  0.44  touch  102.70 us  chain x{'_w8a16_gemv_kernel': 1.183}
+  grid   32 prio=None : both   141.83 (+ 19.31 vs main; side alone   18.12) hidden -0.07  touch   65.60 us  chain x{'_w8a16_gemv_kernel': 1.106}
+  grid   32 prio=prio : both   139.21 (+ 16.69 vs main; side alone   18.12) hidden  0.08  touch   65.71 us  chain x{'_w8a16_gemv_kernel': 1.11}
+  grid   64 prio=None : both   155.79 (+ 33.27 vs main; side alone   10.93) hidden -2.04  touch   49.87 us  chain x{'_w8a16_gemv_kernel': 0.993}
+  grid   64 prio=prio : both   154.10 (+ 31.58 vs main; side alone   10.93) hidden -1.89  touch   52.39 us  chain x{'_w8a16_gemv_kernel': 0.996}
+  grid  128 prio=None : both   153.68 (+ 31.16 vs main; side alone    7.97) hidden -2.91  touch   35.29 us  chain x{'_w8a16_gemv_kernel': 0.997}
+  grid  128 prio=prio : both   148.12 (+ 25.60 vs main; side alone    7.97) hidden -2.21  touch   40.55 us  chain x{'_w8a16_gemv_kernel': 0.998}
+  grid  188 prio=None : both   150.40 (+ 27.88 vs main; side alone    8.17) hidden -2.41  touch   28.25 us  chain x{'_w8a16_gemv_kernel': 0.994}
+  grid  188 prio=prio : both   144.72 (+ 22.20 vs main; side alone    8.17) hidden -1.72  touch   34.01 us  chain x{'_w8a16_gemv_kernel': 0.997}
+  grid  376 prio=None : both   147.13 (+ 24.61 vs main; side alone    7.56) hidden -2.25  touch   26.70 us  chain x{'_w8a16_gemv_kernel': 0.997}
+  grid  376 prio=prio : both   144.94 (+ 22.42 vs main; side alone    7.56) hidden -1.97  touch   31.32 us  chain x{'_w8a16_gemv_kernel': 1.002}
+
+=== chain gemm77  (21:14:06)
+  main-only:    53.67 us/round   kernels [('touch_kernel<0>', 50.61)]
+  grid    8 prio=None : both   123.77 (+ 70.10 vs main; side alone   64.24) hidden -0.09  touch   81.69 us  chain x{'touch_kernel<0>': 1.614}
+  grid    8 prio=prio : both   123.89 (+ 70.22 vs main; side alone   64.24) hidden -0.09  touch   84.37 us  chain x{'touch_kernel<0>': 1.667}
+     node prios: [('touch_kernelILi0EEvPKhyP', 0), ('touch_kernelILi0EEvPKhyP', -3), ('touch_kernelILi0EEvPKhyP', 0), ('touch_kernelILi0EEvPKhyP', -3), ('touch_kernelILi0EEvPKhyP', 0), ('touch_kernelILi0EEvPKhyP', -3)]
+  grid   16 prio=None : both    89.56 (+ 35.89 vs main; side alone   32.81) hidden -0.09  touch   68.82 us  chain x{'touch_kernel<0>': 1.36}
+  grid   16 prio=prio : both    89.62 (+ 35.95 vs main; side alone   32.81) hidden -0.10  touch   69.11 us  chain x{'touch_kernel<0>': 1.366}
+  grid   32 prio=None : both    75.36 (+ 21.69 vs main; side alone   18.12) hidden -0.20  touch   63.58 us  chain x{'touch_kernel<0>': 1.256}
+  grid   32 prio=prio : both    76.51 (+ 22.84 vs main; side alone   18.12) hidden -0.26  touch   63.87 us  chain x{'touch_kernel<0>': 1.262}
+  grid   64 prio=None : both    75.79 (+ 22.12 vs main; side alone   10.93) hidden -1.02  touch   66.56 us  chain x{'touch_kernel<0>': 1.315}
+  grid   64 prio=prio : both    75.81 (+ 22.14 vs main; side alone   10.93) hidden -1.02  touch   65.33 us  chain x{'touch_kernel<0>': 1.291}
+  grid  128 prio=None : both    74.37 (+ 20.70 vs main; side alone    7.97) hidden -1.60  touch   70.79 us  chain x{'touch_kernel<0>': 1.399}
+  grid  128 prio=prio : both    75.43 (+ 21.76 vs main; side alone    7.97) hidden -1.73  touch   70.46 us  chain x{'touch_kernel<0>': 1.392}
+  grid  188 prio=None : both    75.48 (+ 21.81 vs main; side alone    8.17) hidden -1.67  touch   69.79 us  chain x{'touch_kernel<0>': 1.379}
+  grid  188 prio=prio : both    76.12 (+ 22.45 vs main; side alone    8.17) hidden -1.75  touch   70.14 us  chain x{'touch_kernel<0>': 1.386}
+  grid  376 prio=None : both    76.33 (+ 22.66 vs main; side alone    7.56) hidden -2.00  touch   67.35 us  chain x{'touch_kernel<0>': 1.331}
+  grid  376 prio=prio : both    75.78 (+ 22.11 vs main; side alone    7.56) hidden -1.92  touch   68.61 us  chain x{'touch_kernel<0>': 1.356}
+
+[wrote] $HOME/tools/flash-next-bench/bench/l2_prefetch/results/overlap.json
+=== bench_overlap done rc=0 2026-09-06T21:14:20+09:00 ===
+=== bench_pipeline 2026-09-06T21:14:20+09:00 ===
+
+=== M=4 expert stream 77 MB/layer  (21:14:25)
+  none               grid    0 prio=0:   162.52 us/layer  qkvz 50.39 out 28.52 tiny 0.8 touch []
+  start              grid   32 prio=0:   177.35 us/layer  qkvz 52.64 out 38.75 tiny 0.8 touch []
+  start              grid   32 prio=1:   178.80 us/layer  qkvz 52.6 out 38.98 tiny 0.8 touch []
+  start              grid   64 prio=0:   204.90 us/layer  qkvz 64.3 out 49.94 tiny 0.8 touch []
+  start              grid   64 prio=1:   205.47 us/layer  qkvz 64.06 out 49.96 tiny 0.8 touch []
+  start              grid  188 prio=0:   203.25 us/layer  qkvz 49.98 out 37.2 tiny 0.8 touch []
+  start              grid  188 prio=1:   203.39 us/layer  qkvz 50.05 out 37.26 tiny 0.8 touch []
+  start+persist      grid   32 prio=0:   160.34 us/layer  qkvz 50.61 out 23.42 tiny 0.8 touch []
+  start+persist      grid   32 prio=1:   159.43 us/layer  qkvz 50.33 out 23.3 tiny 0.8 touch []
+  start+persist      grid   64 prio=0:   186.81 us/layer  qkvz 52.34 out 45.63 tiny 0.8 touch []
+  start+persist      grid   64 prio=1:   187.89 us/layer  qkvz 50.7 out 45.65 tiny 0.8 touch []
+  start+persist      grid  188 prio=0:   199.14 us/layer  qkvz 46.56 out 37.14 tiny 0.8 touch []
+  start+persist      grid  188 prio=1:   199.40 us/layer  qkvz 46.4 out 37.08 tiny 0.8 touch []
+  postgemm           grid   32 prio=0:   178.16 us/layer  qkvz 43.55 out 19.19 tiny 0.8 touch []
+  postgemm           grid   32 prio=1:   179.32 us/layer  qkvz 43.54 out 19.16 tiny 0.8 touch []
+  postgemm           grid   64 prio=0:   178.36 us/layer  qkvz 43.47 out 19.22 tiny 0.8 touch []
+  postgemm           grid   64 prio=1:   176.93 us/layer  qkvz 43.57 out 19.2 tiny 0.8 touch []
+  postgemm           grid  188 prio=0:   179.42 us/layer  qkvz 43.5 out 19.22 tiny 0.8 touch []
+  postgemm           grid  188 prio=1:   177.42 us/layer  qkvz 43.46 out 19.2 tiny 0.8 touch []
+  postgemm+persist   grid   32 prio=0:   179.77 us/layer  qkvz 43.57 out 19.2 tiny 0.8 touch []
+  postgemm+persist   grid   32 prio=1:   179.10 us/layer  qkvz 43.45 out 19.17 tiny 0.8 touch []
+  postgemm+persist   grid   64 prio=0:   176.29 us/layer  qkvz 43.55 out 19.19 tiny 0.8 touch []
+  postgemm+persist   grid   64 prio=1:   178.45 us/layer  qkvz 43.58 out 19.2 tiny 0.8 touch []
+  postgemm+persist   grid  188 prio=0:   177.74 us/layer  qkvz 43.61 out 19.25 tiny 0.8 touch []
+  postgemm+persist   grid  188 prio=1:   178.21 us/layer  qkvz 43.48 out 19.23 tiny 0.8 touch []
+  jit                grid   32 prio=0:   170.22 us/layer  qkvz 43.66 out 19.26 tiny 0.8 touch []
+  jit                grid   32 prio=1:   169.96 us/layer  qkvz 43.68 out 19.3 tiny 0.8 touch []
+  jit                grid   64 prio=0:   173.23 us/layer  qkvz 44.4 out 19.3 tiny 0.8 touch []
+  jit                grid   64 prio=1:   173.49 us/layer  qkvz 44.16 out 19.3 tiny 0.82 touch []
+  jit                grid  188 prio=0:   174.35 us/layer  qkvz 43.66 out 19.29 tiny 0.8 touch []
+  jit                grid  188 prio=1:   175.77 us/layer  qkvz 43.47 out 19.29 tiny 0.8 touch []
+
+=== M=4 expert stream 190 MB/layer  (21:15:01)
+  none               grid    0 prio=0:   239.91 us/layer  qkvz 50.63 out 28.32 tiny 0.8 touch []
+  start              grid   32 prio=0:   256.07 us/layer  qkvz 53.14 out 38.82 tiny 0.8 touch []
+  start              grid   32 prio=1:   255.81 us/layer  qkvz 53.14 out 38.77 tiny 0.8 touch []
+  start              grid   64 prio=0:   281.32 us/layer  qkvz 64.27 out 50.22 tiny 0.8 touch []
+  start              grid   64 prio=1:   282.85 us/layer  qkvz 64.29 out 50.0 tiny 0.8 touch []
+  start              grid  188 prio=0:   280.29 us/layer  qkvz 50.24 out 37.47 tiny 0.8 touch []
+  start              grid  188 prio=1:   281.03 us/layer  qkvz 50.15 out 37.43 tiny 0.8 touch []
+  start+persist      grid   32 prio=0:   238.08 us/layer  qkvz 51.06 out 23.46 tiny 0.8 touch []
+  start+persist      grid   32 prio=1:   237.17 us/layer  qkvz 50.98 out 23.78 tiny 0.8 touch []
+  start+persist      grid   64 prio=0:   263.08 us/layer  qkvz 52.46 out 45.97 tiny 0.8 touch []
+  start+persist      grid   64 prio=1:   264.29 us/layer  qkvz 51.37 out 45.78 tiny 0.8 touch []
+  start+persist      grid  188 prio=0:   275.32 us/layer  qkvz 46.41 out 37.34 tiny 0.8 touch []
+  start+persist      grid  188 prio=1:   275.60 us/layer  qkvz 46.44 out 37.46 tiny 0.8 touch []
+  postgemm           grid   32 prio=0:   255.91 us/layer  qkvz 43.44 out 19.11 tiny 0.8 touch []
+  postgemm           grid   32 prio=1:   255.53 us/layer  qkvz 43.46 out 19.14 tiny 0.8 touch []
+  postgemm           grid   64 prio=0:   255.16 us/layer  qkvz 43.43 out 19.12 tiny 0.8 touch []
+  postgemm           grid   64 prio=1:   254.57 us/layer  qkvz 43.46 out 19.12 tiny 0.8 touch []
+  postgemm           grid  188 prio=0:   254.71 us/layer  qkvz 43.54 out 19.16 tiny 0.8 touch []
+  postgemm           grid  188 prio=1:   253.97 us/layer  qkvz 43.48 out 19.13 tiny 0.8 touch []
+  postgemm+persist   grid   32 prio=0:   255.40 us/layer  qkvz 43.46 out 19.13 tiny 0.8 touch []
+  postgemm+persist   grid   32 prio=1:   254.05 us/layer  qkvz 43.43 out 19.09 tiny 0.8 touch []
+  postgemm+persist   grid   64 prio=0:   251.35 us/layer  qkvz 43.46 out 19.14 tiny 0.8 touch []
+  postgemm+persist   grid   64 prio=1:   254.85 us/layer  qkvz 43.52 out 19.15 tiny 0.8 touch []
+  postgemm+persist   grid  188 prio=0:   254.72 us/layer  qkvz 43.42 out 19.1 tiny 0.8 touch []
+  postgemm+persist   grid  188 prio=1:   254.82 us/layer  qkvz 43.44 out 19.14 tiny 0.8 touch []
+  jit                grid   32 prio=0:   247.40 us/layer  qkvz 43.58 out 19.14 tiny 0.8 touch []
+  jit                grid   32 prio=1:   242.19 us/layer  qkvz 43.68 out 19.1 tiny 0.8 touch []
+  jit                grid   64 prio=0:   247.63 us/layer  qkvz 44.44 out 19.14 tiny 0.8 touch []
+  jit                grid   64 prio=1:   249.46 us/layer  qkvz 44.16 out 19.18 tiny 0.8 touch []
+  jit                grid  188 prio=0:   251.81 us/layer  qkvz 43.53 out 19.14 tiny 0.8 touch []
+  jit                grid  188 prio=1:   252.88 us/layer  qkvz 43.52 out 19.16 tiny 0.8 touch []
+
+=== M=16 expert stream 77 MB/layer  (21:15:37)
+  none               grid    0 prio=0:   162.13 us/layer  qkvz 50.53 out 29.12 tiny 0.8 touch []
+  start              grid   32 prio=0:   179.27 us/layer  qkvz 52.79 out 40.34 tiny 0.8 touch []
+  start              grid   32 prio=1:   180.62 us/layer  qkvz 52.66 out 40.3 tiny 0.8 touch []
+  start              grid   64 prio=0:   205.39 us/layer  qkvz 64.88 out 50.02 tiny 0.8 touch []
+  start              grid   64 prio=1:   206.42 us/layer  qkvz 64.43 out 50.05 tiny 0.8 touch []
+  start              grid  188 prio=0:   204.25 us/layer  qkvz 50.2 out 37.48 tiny 0.8 touch []
+  start              grid  188 prio=1:   203.23 us/layer  qkvz 50.18 out 37.41 tiny 0.8 touch []
+  start+persist      grid   32 prio=0:   161.37 us/layer  qkvz 51.06 out 24.1 tiny 0.8 touch []
+  start+persist      grid   32 prio=1:   160.86 us/layer  qkvz 50.53 out 23.9 tiny 0.8 touch []
+  start+persist      grid   64 prio=0:   189.42 us/layer  qkvz 53.56 out 46.19 tiny 0.8 touch []
+  start+persist      grid   64 prio=1:   189.56 us/layer  qkvz 50.4 out 46.14 tiny 0.8 touch []
+  start+persist      grid  188 prio=0:   199.42 us/layer  qkvz 46.62 out 37.33 tiny 0.8 touch []
+  start+persist      grid  188 prio=1:   200.13 us/layer  qkvz 46.54 out 37.3 tiny 0.8 touch []
+  postgemm           grid   32 prio=0:   178.71 us/layer  qkvz 43.69 out 19.43 tiny 0.8 touch []
+  postgemm           grid   32 prio=1:   180.14 us/layer  qkvz 43.73 out 19.43 tiny 0.8 touch []
+  postgemm           grid   64 prio=0:   178.67 us/layer  qkvz 43.83 out 19.46 tiny 0.8 touch []
+  postgemm           grid   64 prio=1:   177.53 us/layer  qkvz 43.76 out 19.47 tiny 0.8 touch []
+  postgemm           grid  188 prio=0:   178.80 us/layer  qkvz 43.86 out 19.48 tiny 0.8 touch []
+  postgemm           grid  188 prio=1:   177.76 us/layer  qkvz 43.77 out 19.46 tiny 0.8 touch []
+  postgemm+persist   grid   32 prio=0:   180.08 us/layer  qkvz 43.69 out 19.43 tiny 0.8 touch []
+  postgemm+persist   grid   32 prio=1:   179.95 us/layer  qkvz 43.74 out 19.41 tiny 0.8 touch []
+  postgemm+persist   grid   64 prio=0:   177.06 us/layer  qkvz 43.66 out 19.46 tiny 0.8 touch []
+  postgemm+persist   grid   64 prio=1:   179.82 us/layer  qkvz 43.76 out 19.43 tiny 0.8 touch []
+  postgemm+persist   grid  188 prio=0:   178.93 us/layer  qkvz 43.69 out 19.49 tiny 0.8 touch []
+  postgemm+persist   grid  188 prio=1:   179.10 us/layer  qkvz 43.69 out 19.46 tiny 0.8 touch []
+  jit                grid   32 prio=0:   171.27 us/layer  qkvz 43.97 out 19.52 tiny 0.8 touch []
+  jit                grid   32 prio=1:   170.67 us/layer  qkvz 44.05 out 19.52 tiny 0.8 touch []
+  jit                grid   64 prio=0:   173.60 us/layer  qkvz 44.81 out 19.57 tiny 0.8 touch []
+  jit                grid   64 prio=1:   174.38 us/layer  qkvz 44.32 out 19.57 tiny 0.8 touch []
+  jit                grid  188 prio=0:   176.52 us/layer  qkvz 43.65 out 19.56 tiny 0.8 touch []
+  jit                grid  188 prio=1:   177.16 us/layer  qkvz 43.9 out 19.47 tiny 0.8 touch []
+
+=== M=16 expert stream 190 MB/layer  (21:16:13)
+  none               grid    0 prio=0:   241.18 us/layer  qkvz 50.85 out 29.09 tiny 0.8 touch []
+  start              grid   32 prio=0:   257.29 us/layer  qkvz 53.3 out 40.19 tiny 0.8 touch []
+  start              grid   32 prio=1:   256.71 us/layer  qkvz 53.17 out 39.29 tiny 0.8 touch []
+  start              grid   64 prio=0:   282.77 us/layer  qkvz 64.53 out 50.36 tiny 0.8 touch []
+  start              grid   64 prio=1:   283.60 us/layer  qkvz 64.29 out 50.22 tiny 0.8 touch []
+  start              grid  188 prio=0:   280.74 us/layer  qkvz 50.4 out 37.52 tiny 0.8 touch []
+  start              grid  188 prio=1:   280.97 us/layer  qkvz 50.42 out 37.7 tiny 0.8 touch []
+  start+persist      grid   32 prio=0:   237.55 us/layer  qkvz 51.33 out 24.96 tiny 0.8 touch []
+  start+persist      grid   32 prio=1:   237.18 us/layer  qkvz 51.52 out 24.11 tiny 0.8 touch []
+  start+persist      grid   64 prio=0:   266.28 us/layer  qkvz 54.02 out 46.61 tiny 0.8 touch []
+  start+persist      grid   64 prio=1:   266.21 us/layer  qkvz 51.48 out 46.18 tiny 0.8 touch []
+  start+persist      grid  188 prio=0:   275.64 us/layer  qkvz 46.79 out 37.57 tiny 0.8 touch []
+  start+persist      grid  188 prio=1:   276.01 us/layer  qkvz 46.77 out 37.62 tiny 0.8 touch []
+  postgemm           grid   32 prio=0:   253.98 us/layer  qkvz 43.83 out 19.38 tiny 0.8 touch []
+  postgemm           grid   32 prio=1:   256.66 us/layer  qkvz 43.64 out 19.31 tiny 0.8 touch []
+  postgemm           grid   64 prio=0:   256.45 us/layer  qkvz 43.66 out 19.35 tiny 0.8 touch []
+  postgemm           grid   64 prio=1:   256.52 us/layer  qkvz 43.73 out 19.39 tiny 0.8 touch []
+  postgemm           grid  188 prio=0:   255.07 us/layer  qkvz 43.74 out 19.36 tiny 0.8 touch []
+  postgemm           grid  188 prio=1:   253.62 us/layer  qkvz 43.75 out 19.38 tiny 0.8 touch []
+  postgemm+persist   grid   32 prio=0:   255.30 us/layer  qkvz 43.66 out 19.35 tiny 0.8 touch []
+  postgemm+persist   grid   32 prio=1:   257.14 us/layer  qkvz 43.68 out 19.36 tiny 0.8 touch []
+  postgemm+persist   grid   64 prio=0:   256.33 us/layer  qkvz 43.76 out 19.36 tiny 0.8 touch []
+  postgemm+persist   grid   64 prio=1:   256.57 us/layer  qkvz 43.74 out 19.36 tiny 0.8 touch []
+  postgemm+persist   grid  188 prio=0:   254.60 us/layer  qkvz 43.83 out 19.38 tiny 0.8 touch []
+  postgemm+persist   grid  188 prio=1:   253.71 us/layer  qkvz 43.71 out 19.36 tiny 0.8 touch []
+  jit                grid   32 prio=0:   246.15 us/layer  qkvz 43.97 out 19.39 tiny 0.8 touch []
+  jit                grid   32 prio=1:   246.90 us/layer  qkvz 44.09 out 19.36 tiny 0.8 touch []
+  jit                grid   64 prio=0:   250.32 us/layer  qkvz 44.74 out 19.36 tiny 0.8 touch []
+  jit                grid   64 prio=1:   250.12 us/layer  qkvz 44.46 out 19.4 tiny 0.8 touch []
+  jit                grid  188 prio=0:   251.73 us/layer  qkvz 43.76 out 19.37 tiny 0.8 touch []
+  jit                grid  188 prio=1:   251.41 us/layer  qkvz 43.77 out 19.38 tiny 0.8 touch []
+
+[wrote] $HOME/tools/flash-next-bench/bench/l2_prefetch/results/pipeline.json
+=== bench_pipeline done rc=0 2026-09-06T21:16:52+09:00 ===
+=== bench_hotcfg 2026-09-06T21:16:52+09:00 ===
+
+=== qkvz N=16384 K=2560 M=4: production cfg (32, 128, 1, True, None, 4, 3)  (21:16:56)
+  production: cold   32.45 us ( 1293 GB/s)  hot   22.83 us ( 1837 GB/s)
+  skip (128, 256, 1, True, None, 8, 4): out of resource: shared memory, Required: 122880, Hardware l
+  skip (128, 256, 2, True, None, 8, 4): out of resource: shared memory, Required: 122880, Hardware l
+  skip (128, 256, 4, True, None, 8, 4): out of resource: shared memory, Required: 122880, Hardware l
+  skip (128, 256, 8, True, None, 8, 4): out of resource: shared memory, Required: 122880, Hardware l
+  (128, 128, 4, True, None, 4, 2): hot   16.90 us ( 2482 GB/s)  cold   31.50 us ( 1331 GB/s)  match=True
+  (128, 128, 4, True, None, 4, 3): hot   17.02 us ( 2464 GB/s)  cold   31.39 us ( 1336 GB/s)  match=True
+  (128, 64, 4, True, None, 4, 3): hot   17.17 us ( 2443 GB/s)  cold   30.82 us ( 1361 GB/s)  match=True
+  (128, 64, 4, True, None, 4, 2): hot   17.18 us ( 2441 GB/s)  cold   31.63 us ( 1326 GB/s)  match=True
+  (64, 64, 2, True, None, 4, 3): hot   17.57 us ( 2387 GB/s)  cold   29.47 us ( 1423 GB/s)  match=True
+
+=== qkvz N=16384 K=2560 M=16: production cfg (64, 128, 1, True, None, 4, 3)  (21:18:39)
+  production: cold   31.78 us ( 1320 GB/s)  hot   20.83 us ( 2013 GB/s)
+  skip (128, 256, 1, True, None, 8, 4): out of resource: shared memory, Required: 122880, Hardware l
+  skip (128, 256, 2, True, None, 8, 4): out of resource: shared memory, Required: 122880, Hardware l
+  skip (128, 256, 4, True, None, 8, 4): out of resource: shared memory, Required: 122880, Hardware l
+  skip (128, 256, 8, True, None, 8, 4): out of resource: shared memory, Required: 122880, Hardware l
+  (128, 128, 4, True, None, 4, 3): hot   17.15 us ( 2445 GB/s)  cold   31.22 us ( 1344 GB/s)  match=True
+  (128, 64, 4, True, None, 4, 3): hot   17.38 us ( 2414 GB/s)  cold   30.86 us ( 1359 GB/s)  match=True
+  (128, 128, 4, True, None, 4, 2): hot   17.47 us ( 2401 GB/s)  cold   31.54 us ( 1330 GB/s)  match=True
+  (128, 128, 4, True, None, 8, 3): hot   17.78 us ( 2360 GB/s)  cold   30.99 us ( 1353 GB/s)  match=True
+  (128, 64, 4, True, None, 4, 2): hot   17.86 us ( 2349 GB/s)  cold   32.51 us ( 1290 GB/s)  match=True
+
+=== out_proj N=2560 K=6144 M=4: production cfg (32, 128, 6, True, None, 4, 3)  (21:20:21)
+  production: cold   19.14 us (  822 GB/s)  hot   11.92 us ( 1320 GB/s)
+  skip (128, 256, 1, True, None, 8, 4): out of resource: shared memory, Required: 122880, Hardware l
+  skip (128, 256, 2, True, None, 8, 4): out of resource: shared memory, Required: 122880, Hardware l
+  skip (128, 256, 4, True, None, 8, 4): out of resource: shared memory, Required: 122880, Hardware l
+  skip (128, 256, 8, True, None, 8, 4): out of resource: shared memory, Required: 122880, Hardware l
+  (64, 256, 4, True, None, 8, 3): hot    9.73 us ( 1617 GB/s)  cold   14.90 us ( 1056 GB/s)  match=True
+  (64, 256, 8, True, None, 8, 2): hot    9.76 us ( 1612 GB/s)  cold   15.44 us ( 1019 GB/s)  match=True
+  (64, 256, 8, True, None, 4, 2): hot    9.79 us ( 1606 GB/s)  cold   16.32 us (  964 GB/s)  match=True
+  (64, 64, 8, True, None, 4, 3): hot    9.79 us ( 1606 GB/s)  cold   15.71 us ( 1001 GB/s)  match=True
+  (64, 128, 4, True, None, 8, 3): hot    9.84 us ( 1599 GB/s)  cold   14.50 us ( 1085 GB/s)  match=True
+
+=== out_proj N=2560 K=6144 M=16: production cfg (32, 128, 6, True, None, 4, 3)  (21:21:23)
+  production: cold   19.63 us (  801 GB/s)  hot   12.91 us ( 1218 GB/s)
+  skip (128, 256, 1, True, None, 8, 4): out of resource: shared memory, Required: 122880, Hardware l
+  skip (128, 256, 2, True, None, 8, 4): out of resource: shared memory, Required: 122880, Hardware l
+  skip (128, 256, 4, True, None, 8, 4): out of resource: shared memory, Required: 122880, Hardware l
+  skip (128, 256, 8, True, None, 8, 4): out of resource: shared memory, Required: 122880, Hardware l
+  (64, 128, 4, True, None, 8, 3): hot   10.18 us ( 1546 GB/s)  cold   14.59 us ( 1078 GB/s)  match=True
+  (128, 128, 8, True, None, 4, 3): hot   10.18 us ( 1546 GB/s)  cold   15.90 us (  989 GB/s)  match=True
+  (64, 64, 4, True, None, 8, 4): hot   10.22 us ( 1538 GB/s)  cold   14.05 us ( 1120 GB/s)  match=True
+  (64, 256, 4, True, None, 8, 3): hot   10.22 us ( 1538 GB/s)  cold   14.98 us ( 1050 GB/s)  match=True
+  (64, 128, 8, True, None, 8, 3): hot   10.27 us ( 1531 GB/s)  cold   15.30 us ( 1028 GB/s)  match=True
+
+=== attn_qkv N=13312 K=2560 M=4: production cfg (32, 128, 1, True, None, 4, 3)  (21:22:26)
+  production: cold   33.28 us ( 1024 GB/s)  hot   21.28 us ( 1601 GB/s)
+  skip (128, 256, 1, True, None, 8, 4): out of resource: shared memory, Required: 122880, Hardware l
+  skip (128, 256, 2, True, None, 8, 4): out of resource: shared memory, Required: 122880, Hardware l
+  skip (128, 256, 4, True, None, 8, 4): out of resource: shared memory, Required: 122880, Hardware l
+  skip (128, 256, 8, True, None, 8, 4): out of resource: shared memory, Required: 122880, Hardware l
+  (64, 128, 4, True, None, 4, 2): hot   15.84 us ( 2151 GB/s)  cold   27.04 us ( 1260 GB/s)  match=True
+  (64, 128, 4, True, None, 4, 3): hot   16.19 us ( 2105 GB/s)  cold   26.58 us ( 1282 GB/s)  match=True
+  (64, 128, 8, True, None, 4, 2): hot   16.19 us ( 2105 GB/s)  cold   27.26 us ( 1250 GB/s)  match=True
+  (64, 64, 4, True, None, 4, 2): hot   16.27 us ( 2094 GB/s)  cold   27.18 us ( 1254 GB/s)  match=True
+  (64, 256, 4, True, None, 4, 2): hot   16.45 us ( 2072 GB/s)  cold   28.72 us ( 1187 GB/s)  match=True
+
+=== attn_qkv N=13312 K=2560 M=16: production cfg (32, 128, 1, True, None, 4, 3)  (21:23:27)
+  production: cold   34.93 us (  976 GB/s)  hot   25.79 us ( 1321 GB/s)
+  skip (128, 256, 1, True, None, 8, 4): out of resource: shared memory, Required: 122880, Hardware l
+  skip (128, 256, 2, True, None, 8, 4): out of resource: shared memory, Required: 122880, Hardware l
+  skip (128, 256, 4, True, None, 8, 4): out of resource: shared memory, Required: 122880, Hardware l
+  skip (128, 256, 8, True, None, 8, 4): out of resource: shared memory, Required: 122880, Hardware l
+  (64, 128, 4, True, None, 4, 3): hot   17.36 us ( 1963 GB/s)  cold   26.61 us ( 1281 GB/s)  match=True
+  (64, 128, 4, True, None, 4, 2): hot   17.49 us ( 1949 GB/s)  cold   27.42 us ( 1243 GB/s)  match=True
+  (64, 128, 4, True, None, 8, 3): hot   17.52 us ( 1945 GB/s)  cold   25.98 us ( 1312 GB/s)  match=True
+  (64, 64, 8, True, None, 4, 3): hot   17.62 us ( 1935 GB/s)  cold   26.82 us ( 1271 GB/s)  match=True
+  (128, 128, 4, True, None, 4, 3): hot   17.70 us ( 1926 GB/s)  cold   28.54 us ( 1194 GB/s)  match=True
+
+[wrote] $HOME/tools/flash-next-bench/bench/l2_prefetch/results/hotcfg.json
+=== bench_hotcfg done rc=0 2026-09-06T21:24:31+09:00 ===

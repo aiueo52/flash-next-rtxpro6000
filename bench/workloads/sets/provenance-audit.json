@@ -1,0 +1,7 @@
+{
+  "prompts": 32,
+  "sources": [],
+  "method": "normalized exact and containment checks plus 50-character shingle overlap of every BN1 prompt against the author's private MTP-training prompt files; review threshold 20 % overlap",
+  "scope": "Original authorship plus normalized prompt containment and character-shingle overlap against the listed frozen sources. Not a proof against unavailable corpora or later training additions. All BN1 parents reserved for evaluation; never train on them.",
+  "note": "Published copy: this audit was run against the author's private prompt files; its result is not published (evaluation on private data). The per-prompt overlap figures and all details of the private source files are omitted. bench/bench/stats/audit_sets.py regenerates the full report locally against your own corpora."
+}

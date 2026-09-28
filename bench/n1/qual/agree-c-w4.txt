@@ -1,0 +1,21 @@
+# NOISE FLOOR first (256 tokens): $HOME/tools/flash-next-bench/n1/qual/n1cq-off-w4.agree.json repeat0 vs repeat1 -- read this first
+workload        agree  first_div
+agent-loop      0.684        110
+code-edit       1.000          -
+prose-en        0.090         15
+prose-ja        0.102         24
+  !! self-agreement below 0.95 on ['agent-loop', 'prose-en', 'prose-ja']: a build-to-build token agreement number is NOT interpretable on those workloads.
+
+# agreement over the first 256 tokens: $HOME/tools/flash-next-bench/n1/qual/n1cq-off-w4.agree.json  vs  $HOME/tools/flash-next-bench/n1/qual/n1cq-on-w4.agree.json
+workload     rep    agree  first_div   lenA   lenB
+agent-loop     0    0.070         18    256    256
+agent-loop     1    0.074         18    256    256
+code-edit      0    1.000          -    256    256
+code-edit      1    1.000          -    256    256
+prose-en       0    0.020          1    256    256
+prose-en       1    0.020          1    256    256
+prose-ja       0    0.020          0    256    256
+prose-ja       1    0.023          0    256    256
+MEAN                0.278
+
+# restricted to workloads whose noise floor is >= 0.95 ['code-edit']: mean agreement 1.000

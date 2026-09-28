@@ -1,0 +1,9 @@
+=== test_pin_api3 2026-09-06T23:05:12+09:00 ===
+
+=== consumer without window; touch carries the persisting window  (23:05:16)
+  T7 touch(win) then 3x [stream190][GEMV]                    gemv [28.06, 28.14, 28.3]  touches [19.33, 122.5, 122.77, 122.72]  nodes [('_Z12touch_kernel', 120), ('_Z12touch_kernel', 0), ('_w8a16_gemv_kern', 0), ('_Z12touch_kernel', 0), ('_w8a16_gemv_kern', 0), ('_Z12touch_kernel', 0), ('_w8a16_gemv_kern', 0)]
+  T8 one out-of-graph touch(win); graph [flush][stream190][GEMV] gemv [78.4]  touches [205.2, 122.56]  nodes [('_Z12touch_kernel', 0), ('_Z12touch_kernel', 0), ('_w8a16_gemv_kern', 0)]
+  T9 [flush][stream-window around Triton touch][stream190][GEMV] gemv [28.3]  touches [205.15, 121.68, 122.7]  nodes [('_Z12touch_kernel', 0), ('_touch_kernel', 120), ('_Z12touch_kernel', 0), ('_w8a16_gemv_kern', 0)]
+  T10 [flush][CUDA touch(win attr)][stream190][GEMV] (reference) gemv [28.32]  touches [205.1, 65.14, 122.5]  nodes [('_Z12touch_kernel', 0), ('_Z12touch_kernel', 120), ('_Z12touch_kernel', 0), ('_w8a16_gemv_kern', 0)]
+  T11 [flush][touch(win)] 3x[stream190][GEMV] [flush][GEMV]  gemv [28.11, 28.18, 28.1, 28.38]  touches [205.34, 65.07, 122.42, 122.72, 122.77, 205.2]  nodes [('_Z12touch_kernel', 0), ('_Z12touch_kernel', 120), ('_Z12touch_kernel', 0), ('_w8a16_gemv_kern', 0), ('_Z12touch_kernel', 0), ('_w8a16_gemv_kern', 0), ('_Z12touch_kernel', 0), ('_w8a16_gemv_kern', 0), ('_Z12touch_kernel', 0), ('_w8a16_gemv_kern', 0)]
+=== done rc=0 2026-09-06T23:05:19+09:00 ===

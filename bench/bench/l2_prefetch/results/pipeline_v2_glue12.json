@@ -1,0 +1,245 @@
+{
+ "gpu": {
+  "device": "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition",
+  "sms": 188,
+  "smi": "2287 MHz, 3090 MHz, 95.31 W, 72, 7144 MiB",
+  "torch": "2.13.0+cu130",
+  "time": "2026-09-06 22:22:37"
+ },
+ "limits": {
+  "l2_bytes": 134217728,
+  "max_persisting_bytes": 83886080,
+  "max_window_bytes": 134217728,
+  "sms": 188,
+  "prio_least": 0,
+  "prio_greatest": -5,
+  "persisting_limit_now": 25165824,
+  "l2_bytes_driver": 134217728
+ },
+ "rows": [
+  {
+   "variant": "none",
+   "e_mb": 77,
+   "grid": 0,
+   "prio": false,
+   "us_per_layer": 127.71,
+   "sm_clk": [
+    2287,
+    2310
+   ],
+   "gemv_qkvz_med": 28.58,
+   "gemv_out_med": 13.06,
+   "tiny_med": 0.8,
+   "touch_meds": [
+    50.42
+   ],
+   "M": 4
+  },
+  {
+   "variant": "postgemm",
+   "e_mb": 77,
+   "grid": 32,
+   "prio": false,
+   "us_per_layer": 119.41,
+   "sm_clk": [
+    2272,
+    2340
+   ],
+   "gemv_qkvz_med": 18.6,
+   "gemv_out_med": 7.18,
+   "tiny_med": 0.83,
+   "touch_meds": [
+    42.71,
+    50.42
+   ],
+   "M": 4
+  },
+  {
+   "variant": "jit",
+   "e_mb": 77,
+   "grid": 32,
+   "prio": false,
+   "us_per_layer": 119.64,
+   "sm_clk": [
+    2272,
+    2287
+   ],
+   "gemv_qkvz_med": 18.17,
+   "gemv_out_med": 9.08,
+   "tiny_med": 0.83,
+   "touch_meds": [
+    12.94,
+    41.41
+   ],
+   "M": 4
+  },
+  {
+   "variant": "none",
+   "e_mb": 190,
+   "grid": 0,
+   "prio": false,
+   "us_per_layer": 205.48,
+   "sm_clk": [
+    2272,
+    2317
+   ],
+   "gemv_qkvz_med": 28.26,
+   "gemv_out_med": 12.71,
+   "tiny_med": 0.8,
+   "touch_meds": [
+    123.53
+   ],
+   "M": 4
+  },
+  {
+   "variant": "postgemm",
+   "e_mb": 190,
+   "grid": 32,
+   "prio": false,
+   "us_per_layer": 195.77,
+   "sm_clk": [
+    2302,
+    2317
+   ],
+   "gemv_qkvz_med": 18.14,
+   "gemv_out_med": 7.02,
+   "tiny_med": 0.83,
+   "touch_meds": [
+    41.4,
+    123.54
+   ],
+   "M": 4
+  },
+  {
+   "variant": "jit",
+   "e_mb": 190,
+   "grid": 32,
+   "prio": false,
+   "us_per_layer": 196.29,
+   "sm_clk": [
+    2302,
+    2302
+   ],
+   "gemv_qkvz_med": 17.94,
+   "gemv_out_med": 8.78,
+   "tiny_med": 0.83,
+   "touch_meds": [
+    12.72,
+    77.62
+   ],
+   "M": 4
+  },
+  {
+   "variant": "none",
+   "e_mb": 77,
+   "grid": 0,
+   "prio": false,
+   "us_per_layer": 129.83,
+   "sm_clk": [
+    2302,
+    2347
+   ],
+   "gemv_qkvz_med": 29.31,
+   "gemv_out_med": 13.61,
+   "tiny_med": 0.8,
+   "touch_meds": [
+    50.42
+   ],
+   "M": 16
+  },
+  {
+   "variant": "postgemm",
+   "e_mb": 77,
+   "grid": 32,
+   "prio": false,
+   "us_per_layer": 121.19,
+   "sm_clk": [
+    2272,
+    2302
+   ],
+   "gemv_qkvz_med": 19.1,
+   "gemv_out_med": 8.3,
+   "tiny_med": 0.83,
+   "touch_meds": [
+    43.94,
+    50.46
+   ],
+   "M": 16
+  },
+  {
+   "variant": "jit",
+   "e_mb": 77,
+   "grid": 32,
+   "prio": false,
+   "us_per_layer": 120.92,
+   "sm_clk": [
+    2265,
+    2272
+   ],
+   "gemv_qkvz_med": 18.56,
+   "gemv_out_med": 10.18,
+   "tiny_med": 0.83,
+   "touch_meds": [
+    14.1,
+    41.6
+   ],
+   "M": 16
+  },
+  {
+   "variant": "none",
+   "e_mb": 190,
+   "grid": 0,
+   "prio": false,
+   "us_per_layer": 206.12,
+   "sm_clk": [
+    2272,
+    2317
+   ],
+   "gemv_qkvz_med": 28.83,
+   "gemv_out_med": 13.15,
+   "tiny_med": 0.8,
+   "touch_meds": [
+    123.91
+   ],
+   "M": 16
+  },
+  {
+   "variant": "postgemm",
+   "e_mb": 190,
+   "grid": 32,
+   "prio": false,
+   "us_per_layer": 196.99,
+   "sm_clk": [
+    2302,
+    2317
+   ],
+   "gemv_qkvz_med": 18.65,
+   "gemv_out_med": 8.3,
+   "tiny_med": 0.83,
+   "touch_meds": [
+    41.42,
+    123.9
+   ],
+   "M": 16
+  },
+  {
+   "variant": "jit",
+   "e_mb": 190,
+   "grid": 32,
+   "prio": false,
+   "us_per_layer": 198.17,
+   "sm_clk": [
+    2302,
+    2340
+   ],
+   "gemv_qkvz_med": 17.93,
+   "gemv_out_med": 9.9,
+   "tiny_med": 0.83,
+   "touch_meds": [
+    13.82,
+    77.77
+   ],
+   "M": 16
+  }
+ ]
+}

@@ -1,0 +1,21 @@
+[n1a-onr1/w16] server up (17:55:54)
+
+chunks=72 decode_tps~26.8
+
+chunks=187 decode_tps~40.2
+$HOME/tools/flash-next-bench/prof/traces/n1a-onr1-w16-code-edit/1788684955.608035-TP-0.trace.json.gz
+  step wall= 17.46ms  gpu_busy= 17.36ms  gpu_idle_in_step= 0.10ms
+  draft                        occ= 20 kernels/step=    675 busy_ms=  3.59 raw_ms=  4.17 legacy_trimmed_ms=  3.87
+  step[TARGET_VERIFY bs=1]     occ= 20 kernels/step=   1365 busy_ms= 12.99 raw_ms= 14.81 legacy_trimmed_ms= 12.91
+  draft_extend                 occ= 20 kernels/step=     89 busy_ms=  0.48 raw_ms=  0.57 legacy_trimmed_ms=  0.55
+  TOTAL                        kernels/step=   2129 busy_ms= 17.06 wall_ms= 17.46 idle_ms= 0.10 legacy_trimmed_ms= 17.32
+  (check)                      sum(busy)+idle= 17.17ms vs wall= 17.46ms  residual= 0.30ms (91 unattributed kernels/step)
+$HOME/tools/flash-next-bench/prof/traces/n1a-onr1-w16-prose-en/1788684961.4290757-TP-0.trace.json.gz
+  step wall= 17.16ms  gpu_busy= 16.96ms  gpu_idle_in_step= 0.12ms
+  draft                        occ= 20 kernels/step=    675 busy_ms=  3.85 raw_ms=  4.42 legacy_trimmed_ms=  3.84
+  step[TARGET_VERIFY bs=1]     occ= 20 kernels/step=   1365 busy_ms= 12.64 raw_ms= 14.46 legacy_trimmed_ms= 12.94
+  draft_extend                 occ= 20 kernels/step=     89 busy_ms=  0.43 raw_ms=  0.51 legacy_trimmed_ms=  0.50
+  TOTAL                        kernels/step=   2129 busy_ms= 16.92 wall_ms= 17.16 idle_ms= 0.12 legacy_trimmed_ms= 17.28
+  (check)                      sum(busy)+idle= 17.04ms vs wall= 17.16ms  residual= 0.11ms (86 unattributed kernels/step)
+$HOME/tools/flash-next-bench/prof/validate.sh: 29 行: 2646926 強制終了            env ${SERVER_ENV:-} setsid ./serve-fast.sh $PROFILE ${SERVER_ARGS:-} > $LOG 2>&1 < /dev/null
+[n1a-onr1/w16] done (17:56:17); gpu mem: 5586 MiB
