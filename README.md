@@ -251,7 +251,7 @@ build its venv, `patches/flashinfer/apply.sh`, download the NVFP4 checkpoint, us
 - **Greedy is not bit-reproducible:** the MoE finalize epilogue and the HC split-K kernels use atomic
   adds, so outputs and acceptance vary run to run (typically ±4–6 % acceptance, more on long W16 chains).
 - **The pruning changes the model.** The quality audit found no statistically significant difference
-  from the unpruned build (McNemar, smallest p = 0.266), with rough detection limits of ±1.5 pp
+  from the unpruned build (McNemar, smallest p = 0.362), with rough detection limits of ±1.5 pp
   (GSM8K/MMLU) and ±3 pp (HumanEval). "No significant difference" is not non-inferiority: at a 0.5 pp
   margin, non-inferiority was **not established** for GSM8K or HumanEval (INCONCLUSIVE; one-sided 95 %
   Tango score lower bounds −1.80 pp and −1.02 pp vs the unpruned build, where HumanEval's 164 problems
