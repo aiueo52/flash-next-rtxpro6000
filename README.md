@@ -19,10 +19,14 @@ below, and the engineering notes.
 > that fork is the SM120 integration and qualification: running it on this GPU, recovery CUDA
 > graphs, HiCache/NIXL persistence and the validation behind it (see the fork's `CHANGES.md` and
 > `PROVENANCE.md`). Our work is a
-> 105-commit patch series on top of its `pennyroyal-main-sm120-final` branch (commit `16e5682aad`)
-> plus seven patches to FlashInfer 0.6.17. Please credit and read that project first.
+> 121-commit patch series on top of its `pennyroyal-main-sm120-final` branch (commit `16e5682aad`)
+> plus ten patches to FlashInfer 0.6.17 (105 and seven of them for the September results below, the
+> rest for the 2026-10-02 build). Please credit and read that project first.
 
 ## Results
+
+The tables in this section are the 2026-09 state. The 2026-10-02 production build and what changed are in
+[*2026-10 update*](#2026-10-update) below.
 
 > **Private components in these numbers.** The `w4`, `w16` and `wa` rows of both tables below were
 > measured with a **fine-tuned MTP draft head** (v3 in the headline table, v5 in the final table) and a
@@ -30,7 +34,8 @@ below, and the engineering notes.
 > private data (their own chat and agent-session logs and MTP-training prompts) and are **not
 > published**, so these rows cannot be reproduced exactly with the public checkpoint alone. With the
 > checkpoint's original MTP head and your own token map expect lower acceptance and t/s (see
-> *Limitations*).
+> *Limitations*). Since 2026-10 a token map built only from public data is published
+> (`tokenmaps/public/`); it is not the map these rows were measured with.
 
 ### Headline (2026-09-06, all three launch profiles in one session)
 
@@ -94,6 +99,52 @@ Our numbers are higher than those, but prompts, output lengths, sampling, thinki
 variants differ, so this is not a like-for-like comparison — and it would not exist without the base
 fork. We do not claim to be the fastest.
 
+## 2026-10 update
+
+On 2026-10-01/02 we cut fixed per-step costs, fixed two correctness problems (one in the sampling verify, one in the draft), and
+added rejection sampling. The production build changed on 2026-10-02 (SGLang patches 0106–0121,
+FlashInfer patches 08–10). Every piece has its own flag in `launch/serve-fast.sh`, on by default. Details
+and evidence: [`docs/optimizations.md`](docs/optimizations.md) §H; what did not ship:
+[`docs/rejected.md`](docs/rejected.md) §7; how it was measured: [`docs/measurement.md`](docs/measurement.md) §9.
+
+What changed:
+
+- **Fixed-cost cuts** (RT1 router top-k, SV1/SV2 sparse sampling verify, FG1 GDN stream overlap, DG1
+  draft MoE GEMV, RQ2 MoE routing prologue).
+- **Sampling fidelity.** The speculative verify ignored `min_p`, so with LM Studio's `min_p 0.05` it could
+  emit tokens the normal sampler excludes. Fixed (no measurable speed cost). A second fix (ST1) lets the
+  draft's attention see its newest positions. It brought no measurable speed-up and ships with XA1, a
+  Triton decode-attention kernel (12.2 vs 16.3 µs per call).
+- **Rejection sampling** for sampling requests: sparse, with a sharpened 16-token draft support and block
+  verification.
+- **524,288-token context** on `wa` (factor-2 YaRN, opt-in): needles up to 480k tokens pass.
+- **A public-data draft token map**, `tokenmaps/public/public_49152.pt` (CC BY-SA 4.0, sources in
+  `tokenmaps/README.md`).
+
+Measured so far: A/Bs against the previous production build on `wa`, with the same private MTP head and
+token map as the tables above. These are 8 server starts each, in both greedy and LM Studio's default
+sampling (temperature 0.8, top_p 0.95, top_k 40, min_p 0.05). 95 % CIs treat each server start as the
+unit:
+
+| change | LM Studio sampling | greedy |
+|---|---|---|
+| fixed-cost cuts (all five + RQ2), ms per output token | **−9.6 %** [−13.6, −5.3] | **−4.6 %** [−8.9, −0.1] |
+| XA1 on top of ST1, t/s | +2.8 % (arm-level CI [−0.9, +6.7]) | +1.2 %, unresolved |
+| rejection-sampling package, t/s | **+6.5 %** [+1.4, +12.0]; code-edit +1.6 %, unresolved | step time −2.2 %, unresolved |
+
+The rejection-sampling package did **not** pass the adoption rule we set before measuring it: code-edit
+stayed unresolved. We shipped it anyway for the prose and agent gains (+6 to +10 %). Turn it off with
+`SGLANG_OPT_SPEC_SPARSE_RS=0`. `w4` and `w16` have run the new build only in single-prompt smokes.
+
+Absolute throughput of the shipped build has **not been measured yet** with the protocol above:
+
+<!-- TODO-GPU: shipped production build (2026-10-02), greedy and LM Studio sampling, w4 and wa, 4 workloads (code-edit / prose-en / prose-ja / agent-loop), BN1 held-out prompts, several server starts; private MTP head v5 + private token map, as in the tables above -->
+
+<!-- TODO-GPU: "public components only" row: the same build with the checkpoint's original MTP head + tokenmaps/public/public_49152.pt, same workloads and modes -->
+
+Until those rows exist, the September tables above are the latest absolute numbers. With only public
+components, expect lower acceptance than with the private head and map. How much lower is not measured.
+
 ## How it works (short version)
 
 At batch size 1 every decode step is a chain of ~1,500–2,500 small GPU kernels that mostly stream
@@ -146,14 +197,16 @@ Rejected experiments are as useful as the adopted ones; each has numbers in
 | persistent "megakernel" with grid barriers | a grid barrier costs more than the kernel launch it replaces |
 | L2-cache prefetch / persisting pins for the next layer's weights | slower: the desktop's GPU context evicts persisting lines; HC kernels lose bandwidth |
 | raising the pruning threshold to 0.10 | quality gate inconclusive and unexplained behaviour changes: not shipped |
+| dense rejection sampling over the draft vocabulary (2026-10) | acceptance +5–8 % under sampling, but code-edit t/s −3.6 % to −7.7 %: the per-step cost ate the gain |
+| fixing the draft's attention prefix as a speed-up (2026-10) | no measurable change in acceptance over 8 server starts; ships only as a correctness fix |
 | draft-head candidate shortlists, sparse FP4 experts, lossless FP8 weight coding, narrower experts / HC bottleneck without retraining | all no-go (quality loss or no net speed-up) |
 | retraining the MTP head on more data (several rounds) | in-server acceptance on the benchmark workloads mostly did not improve |
 
 ## Reproduce
 
 See [`docs/reproduce.md`](docs/reproduce.md). In short: clone the base fork, `patches/sglang/apply.sh`,
-build its venv, `patches/flashinfer/apply.sh`, download the NVFP4 checkpoint, build a draft token map
-(`tokenmaps/`), then `SGLANG_DIR=… TOKEN_MAP=… launch/serve-fast.sh wa` and measure with `bench/`
+build its venv, `patches/flashinfer/apply.sh`, download the NVFP4 checkpoint, use the public token map
+`tokenmaps/public/public_49152.pt` or build your own (`tokenmaps/`), then `SGLANG_DIR=… TOKEN_MAP=… launch/serve-fast.sh wa` and measure with `bench/`
 (`fnbench`).
 
 ## Limitations and measurement noise
@@ -161,7 +214,8 @@ build its venv, `patches/flashinfer/apply.sh`, download the NVFP4 checkpoint, bu
 - **Not published, so not exactly reproducible:** the fine-tuned MTP draft heads and the token maps
   were derived from the author's private conversations and agent transcripts. With the public
   checkpoint's original MTP head expect lower acceptance on prose/agent text (the fine-tuned heads
-  added roughly 5–10 % there). Build your own token map from text you may use (`tokenmaps/README.md`),
+  added roughly 5–10 % there). The published public-data token map shares 72.0 % of its ids with the private
+  one; its speed is not measured yet. Or build your own token map from text you may use (`tokenmaps/README.md`),
   and train your own head on your own data with [`docs/train-your-own-mtp-head.md`](docs/train-your-own-mtp-head.md)
   (code in [`mtp-train/`](mtp-train/)).
 - **Workloads are narrow.** The headline table uses one prompt per workload; code-edit is an extremely
@@ -194,14 +248,14 @@ build its venv, `patches/flashinfer/apply.sh`, download the NVFP4 checkpoint, bu
 
 | path | contents |
 |---|---|
-| `patches/sglang/` | 105-patch series against the base fork + squashed core diff + `apply.sh` + `SERIES.md` + `MODIFICATIONS.md`; `mtp-dump/` = the 9-patch training-data dump hook |
-| `patches/flashinfer/` | 7 production patches to flashinfer-python 0.6.17 + `apply.sh`; rejected ones in `experimental/` |
+| `patches/sglang/` | 121-patch series (0001–0105 = September, 0106–0121 = 2026-10-02) against the base fork + squashed core diff + `apply.sh` + `SERIES.md` + `MODIFICATIONS.md`; `mtp-dump/` = the 9-patch training-data dump hook |
+| `patches/flashinfer/` | 10 production patches to flashinfer-python 0.6.17 (01–07 September, 08–10 2026-10-02) + `apply.sh`; rejected ones in `experimental/` |
 | `launch/` | `serve-fast.sh` / `serve-local.sh` (portable), `as-measured/` = the scripts used (commands unchanged; paths genericised and comments edited for publication) |
-| `results/` | stripped result files (timings, token counts, acceptance; no generated text), `make_tables.py`, `TABLES.md`, per-item quality-audit results |
+| `results/` | stripped result files (timings, token counts, acceptance; no generated text), `make_tables.py`, `TABLES.md`, per-item quality-audit results; `runs-1002/` = the 2026-10 round |
 | `bench/` | the benchmark / profiling harness (`fnbench`), synthetic workloads, analysis and experiment scripts |
 | `kernels/` | readable snapshots of our Triton kernels + micro-benchmarks |
 | `sim/` | offline n-gram acceptance simulator (no corpora) |
-| `tokenmaps/` | how to build a reduced draft vocabulary; the scripts actually used |
+| `tokenmaps/` | how to build a reduced draft vocabulary; the scripts actually used; `public/` = a 49,152-token map built only from public data, with its sources and build scripts (CC BY-SA 4.0) |
 | `mtp-train/` | MTP draft-head fine-tuning pipeline: dump client, corpus readers, self-generation, trainer, renewal evaluator, write-back (no data or weights) |
 | `docs/` | optimisations, rejected experiments, roofline, measurement method, timeline, reproduction; `lab-notes/` = the original engineering logs |
 
@@ -210,6 +264,8 @@ build its venv, `patches/flashinfer/apply.sh`, download the NVFP4 checkpoint, bu
 Apache License 2.0 (`LICENSE`), matching SGLang and FlashInfer; see `NOTICE` for the upstream
 projects whose code the patches modify. A few patch hunks touch files derived from
 flash-linear-attention (MIT) and causal-conv1d (BSD-3-Clause); those keep their own licences
-(texts in `licenses/`, file list in `NOTICE`). No model weights are included. Qwen3.8-Flash-Next is under the Qwen Community License 1.0 (https://huggingface.co/Qwen/Qwen3.8-Flash-Next/raw/main/LICENSE), not Apache-2.0; this repo contains no model files. Much of the implementation
+(texts in `licenses/`, file list in `NOTICE`). The public token map (`tokenmaps/public/public_49152.pt` and
+its sources file) is derived from public datasets including Wikipedia and is offered under CC BY-SA 4.0
+with the attributions in `NOTICE`. No model weights are included. Qwen3.8-Flash-Next is under the Qwen Community License 1.0 (https://huggingface.co/Qwen/Qwen3.8-Flash-Next/raw/main/LICENSE), not Apache-2.0; this repo contains no model files. Much of the implementation
 and measurement work was done with AI coding assistants under the author's direction; all numbers
 come from the author's machine.
