@@ -256,3 +256,69 @@ non-inferiority was not established in the other comparisons. A later gate
   reasoning tokens. The needle test and the quality audit (GSM8K, MMLU,
   HumanEval, JCommonsenseQA) run with thinking off, because a thinking response
   can hit the output limit and come back empty.
+
+## 9. The 2026-10 protocol
+
+The 2026-10 round (`optimizations.md` §H, `rejected.md` §7) changed three things. Result files:
+`../results/runs-1002/`.
+
+**Both sampling modes.** Until September every A/B was greedy, but the server is used through LM Studio, which
+samples with temperature 0.8, top_p 0.95, top_k 40 and min_p 0.05. `fnbench --sampling lmstudio` sends exactly
+those parameters, and every arm runs the prompts in both modes. The modes can disagree: SV1/SV2 only act on
+sampling steps, rejection sampling only changes sampling acceptance, and the extra eager work of a sampling step
+was 250-300 µs on the old build (`lab-notes/FC_fc-map_2026-10-01.md` §5b). A change is reported per mode, never
+as one blended number.
+
+**Eight server starts, ABBA then BAAB.** One server start moves ms/step by 1-3 % on its own (FG1's two B arms, with
+the same code, differed by 6.7 %), and in wa it also changes the generated texts, so a 4-start ABBA cannot resolve
+a 1 % effect however many requests each arm has. From the stack ABBA on, A/Bs use 8 starts in the order
+A1 B1 B2 A2 B3 A3 A4 B4, with 4 or 8 BN1 held-out prompts per workload (§6) in both modes.
+
+**ANCOVA instead of paired t/s** (`bench/bench/stats/ancova_ab.py`). Per mode, three least-squares fits on log
+values, each with one intercept per prompt, the arm position (linear drift) and a B indicator:
+
+* `ms/token`: the user-facing cost (1 / t/s), including any acceptance change;
+* `tok/step`: the acceptance;
+* `ms/step|a`: ms per verify step with per-workload slopes on log tok/step, i.e. the step cost at equal
+  acceptance. In wa a run that accepted more also picked wider steps, which are slower for reasons unrelated to
+  the change; the slope removes that.
+
+Each fit gives the B effect with two CIs:
+
+* **request level**: the usual regression CI. It treats every request as independent and ignores that requests in
+  one server start share that start's offset, so it is too narrow. (Sanity check: SV1 cannot change greedy steps,
+  yet its greedy rows gave −1.22 % [−2.02, −0.40] at request level.)
+* **arm level**: the arm means regressed on drift + B, one server start as the unit (5 degrees of freedom with 8
+  starts). This is the honest interval. It is often 2-3× wider.
+
+The docs quote both where they disagree. A result whose arm-level CI crosses 0 is called unresolved, not a
+win or a loss. `t/s = 1 / (1 + ms/token) − 1` converts the first fit to a throughput change.
+
+**Display time-slicing.** The desktop shares the GPU. On 2026-10-01 morning the display contexts paused the
+kernels for 0.3-1.4 ms at a time, 20-28 % of every step span (2-8 % on a quiet night in September). This moves
+unprofiled ms/step between arms minutes apart without changing tok/step. Two counters were used:
+
+* **clipped R.eager**: the eager (non-graph) sample/accept/commit block of a step from in-server CUPTI traces,
+  each kernel clipped to its median + 20 µs (`bench/prof/fc_eager_clip.py`). This is the number behind "the sampling
+  eager tail fell from 376-391 to 119-139 µs/step" in the stack ABBA.
+* **pause share**: each kernel's excess over median + 20 µs plus idle gaps over 100 µs
+  (`bench/prof/fc_pause_share.py`). Without the pauses, the 10-01 steps matched 09-07 within about 3 %.
+
+**Which number to trust for what.**
+
+| question | number | why |
+|---|---|---|
+| did a kernel get faster | CUPTI median per kernel, in-server trace | the most stable number (§4); medians ignore display pauses |
+| did the step get cheaper | `ms/step|a`, arm level | removes acceptance and per-start offsets |
+| does the user see it | `ms/token` / client t/s, arm level | includes acceptance; noisiest |
+| did acceptance change | `tok/step` per workload and mode | sampling and greedy can move in opposite directions |
+
+**Greedy exactness is not testable on this stack.** Even with MoE autotune off, two W4 servers with the same
+code produced 0/8 identical greedy texts, and two repeats inside one server 0/4 (DT1 note, `results/runs-1002/
+stack8/exact/`, hashes only). Bit-exact changes are therefore checked at kernel level (`torch.equal` against the
+reference on real shapes), as in §2, and rejection-sampling changes by statistics on the GPU: accept@0 against
+Σ min(p, q), and chi-square / Fisher tests on the output distribution per position.
+
+**Pre-registered rules.** Each A/B's adoption rule (which CI must exclude what, per mode and workload) was
+written before the run. Where a candidate failed its rule and shipped anyway (the RS package, code-edit
+unresolved), the docs say so.

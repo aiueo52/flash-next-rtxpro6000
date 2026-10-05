@@ -1,7 +1,8 @@
 # Reproducing the setup
 
 This is the recipe behind the numbers in `results/TABLES.md`, written for someone with the same
-class of machine. The code is exact (patch series, FlashInfer patches). The launch flags are those of
+class of machine. It builds the 2026-10-02 production state by default; the notes in each step say how
+to get the 2026-09-08 state that sections 1-5 of `TABLES.md` measured. The code is exact (patch series, FlashInfer patches). The launch flags are those of
 `launch/serve-fast.sh`; its memory defaults differ from some measured runs, and section 4 shows the
 settings of the final measured tables. Two inputs of the measured runs are **not included**: the privately fine-tuned MTP draft head and the
 reduced draft vocabulary (token map), both built from private data (see the end of section 4). With
@@ -32,8 +33,13 @@ export SGLANG_DIR=$WORK/sglang-rtxpro6000
 
 ```bash
 git clone https://github.com/jpezzulli/sglang-rtxpro6000 "$SGLANG_DIR"
-"$REPO"/patches/sglang/apply.sh "$SGLANG_DIR"       # branch flash-next-fast = base + 105 patches
+"$REPO"/patches/sglang/apply.sh "$SGLANG_DIR"       # branch flash-next-fast = base + 121 patches
 ```
+
+Patches 0001-0105 are the 2026-09-08 tree, 0106-0121 the 2026-10-02 additions. Every 2026-10 feature is
+behind its own flag (default off in the code, on in `launch/serve-fast.sh`), so with those flags set to 0 the full
+series serves the September SGLang configuration (`docs/optimizations.md`, appendix). The FlashInfer
+prologue changes (patches 08 and 10 below) have no flag; stop at patch 07 for the September FlashInfer.
 
 Then build the venv inside `$SGLANG_DIR` exactly as the base fork's `BUILD.md` describes (uv,
 Python 3.12.13, editable install of `python/`), so that it ends up at `$SGLANG_DIR/.venv`. Pitfalls we hit on a machine without root:
@@ -46,22 +52,33 @@ Python 3.12.13, editable install of `python/`), so that it ends up at `$SGLANG_D
 ## 2. Patch FlashInfer inside that venv
 
 ```bash
-"$REPO"/patches/flashinfer/apply.sh "$SGLANG_DIR/.venv/lib/python3.12/site-packages"
+"$REPO"/patches/flashinfer/apply.sh "$SGLANG_DIR/.venv/lib/python3.12/site-packages"          # 01-10
+# "$REPO"/patches/flashinfer/apply.sh "$SGLANG_DIR/.venv/lib/python3.12/site-packages" 07     # the 2026-09-08 stack
 ```
 
-The first MoE call after this rebuilds FlashInfer's JIT module (about two minutes).
+The optional second argument is the last patch to apply. The default (10) gives the 2026-10-02
+production behaviour from a normal JIT build; `apply.sh`'s header explains 09 vs 10. Run it after the
+venv is complete: a later reinstall of `flashinfer-python` silently undoes it, and the script refuses
+to run on files that are not pristine 0.6.17. The first MoE call after this rebuilds FlashInfer's JIT
+module (about two minutes).
+
+Production serves a frozen copy of the patched FlashInfer and its JIT cache (`FLASHINFER_DIR`,
+`FLASHINFER_WORKSPACE_BASE`, `FLASHINFER_P2_NO_NINJA=1`; see the comments in `launch/serve-fast.sh`), so
+that later development cannot change the served build. With a single venv you do not need this.
 
 ## 3. Get the model and build a draft token map
 
 Download `RadixArk/Qwen3.8-Flash-Next-NVFP4` to e.g. `$HOME/models/RadixArk/Qwen3.8-Flash-Next-NVFP4`.
-Build a reduced draft vocabulary as described in `tokenmaps/README.md` (49,152 rows recommended).
+Use the published public-data map `tokenmaps/public/public_49152.pt` (49,152 rows, built only from
+public datasets; licence CC BY-SA 4.0, see `tokenmaps/README.md` and `NOTICE`), or build your own as
+described in `tokenmaps/README.md` (49,152 rows recommended).
 Without one the launcher still works, but the draft head runs over the full vocabulary and is much
 slower at wide draft widths.
 
 ## 4. Launch
 
 ```bash
-export TOKEN_MAP=$HOME/tokenmap-work/hot_49152.pt   # the map you built in step 3 (kept outside the repo)
+export TOKEN_MAP=$REPO/tokenmaps/public/public_49152.pt   # or the map you built in step 3
 "$REPO"/launch/serve-fast.sh wa                   # or w4 / w16; uses $SGLANG_DIR
 ```
 
@@ -93,7 +110,14 @@ Differences from the measured configuration that you cannot remove:
   neutral at W16; v5 vs v3 added +1–5 % at W4 and +2–8 % at W16. With the public head expect
   correspondingly lower acceptance and t/s (roughly 5–10 % on prose/agent), or train your own head
   with [`train-your-own-mtp-head.md`](train-your-own-mtp-head.md).
-- **Token map.** Built from private data; yours will differ in coverage.
+- **Token map.** The measured map was built partly from private data and is not published. The public
+  map shares 72.0 % of its ids; its effect on speed has not been measured yet.
+- **2026-10 flags.** The launcher turns on every 2026-10-02 feature by default, including rejection
+  sampling for sampling requests (`SGLANG_OPT_SPEC_SPARSE_RS=1`). Set the flags listed in the appendix of
+  `docs/optimizations.md` to 0 to compare with the September tables.
+- **Context length.** The launcher defaults to 262,144 tokens. `CONTEXT_LENGTH=524288` turns on factor-2
+  YaRN and, for `wa`, a 0.96 memory fraction; it needs a nearly idle desktop on the same GPU
+  (`docs/optimizations.md` H5).
 
 ## 5. Measure
 
@@ -121,7 +145,10 @@ python3.12 -m venv .venv && .venv/bin/pip install -r requirements.txt
 - Compare with `results/runs/p2m2332-*.jsonl` (headline) and `results/bn1-study-v2/` (sets), e.g. by
   copying your stripped files next to them (`results/strip_runs.py in.jsonl out.jsonl`).
 - For A/B decisions use the protocol in `measurement.md` (fresh server per arm, ABBA, 8 prompts per
-  domain, `bench/bench/stats/paired_ab.py`), not single runs.
+  domain, `bench/bench/stats/paired_ab.py`), not single runs. The 2026-10 round used 8 server starts and
+  `bench/bench/stats/ancova_ab.py` (`measurement.md` §9).
+- `--sampling lmstudio` sends LM Studio's default sampler (temperature 0.8, top_p 0.95, top_k 40,
+  min_p 0.05). Measure both modes: several 2026-10 changes act only on sampling requests.
 
 ## 6. Optional: profiling
 

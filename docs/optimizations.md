@@ -5,9 +5,12 @@ This page covers every change that went into the production launcher
 (`RadixArk/Qwen3.8-Flash-Next-NVFP4`) on one RTX PRO 6000 Blackwell Max-Q.
 The base is the SGLang fork `jpezzulli/sglang-rtxpro6000`. The changes are:
 
-* a patch series of about 105 commits on that fork;
-* six patches to FlashInfer 0.6.17's C++ sources;
-* one patch to FlashInfer's vendored GDN WY decode wrapper.
+* a patch series of about 105 commits on that fork (121 since 2026-10-02);
+* six patches to FlashInfer 0.6.17's C++ sources (eight since 2026-10-02);
+* one patch to FlashInfer's vendored GDN WY decode wrapper;
+* since 2026-10-02, one patch to FlashInfer's JIT loader (`FLASHINFER_P2_NO_NINJA`, load a copied cache as-is).
+
+Sections A-G describe the 2026-09-08 state. Section H adds the 2026-10-02 round.
 
 Conventions:
 
@@ -38,6 +41,7 @@ Contents:
 * E. MoE singleton-route pruning (P1/P2) and the quality audit
 * F. Adaptive width
 * G. Runtime and operations
+* H. The 2026-10 round: fixed-cost cuts, sampling fidelity, rejection sampling, 524k context
 * Appendix: production flags
 
 ---
@@ -1263,9 +1267,163 @@ One server that chooses the draft width per step from {3, 15} and later
 * Wait a few seconds after killing a server; otherwise the KV pool size varied
   from 5k to 180k tokens.
 
+## H. The 2026-10 round: fixed-cost cuts, sampling fidelity, rejection sampling, 524k context
+
+Everything in this section shipped on 2026-10-02 as SGLang patches 0106-0121 and FlashInfer patches 08-10
+(`patches/sglang/SERIES.md`, `patches/flashinfer/`). Every flag is a `${VAR:-1}` default in
+`launch/serve-fast.sh`; setting it to 0 restores the 2026-09-08 behaviour of that piece. The raw results are in
+`results/runs-1002/`, the lab notes in `lab-notes/` (`STACK_2026-10-01.md` is the overview).
+
+Two things changed in how this round was measured (details in `measurement.md`, "The 2026-10 protocol"):
+
+* **Sampling counts as much as greedy.** Until September every decision was greedy. LM Studio, which is how the
+  server is actually used, samples with T 0.8, top_p 0.95, top_k 40, min_p 0.05. `fnbench --sampling lmstudio`
+  sends exactly that, and every A/B in this section reports both modes. The two can move in opposite directions.
+* **Eight server starts per A/B** (A1 B1 B2 A2 B3 A3 A4 B4), analysed with an ANCOVA that reports ms/token,
+  tok/step and ms/step at fixed acceptance (`ms/step|a`). One server start moves ms/step by 1-3 % on its own, so
+  four starts could not resolve 1 % changes (FG1 below).
+
+Unless a row says otherwise, numbers are on the `wa` profile with the private MTP head and token map (see the
+README's results note). Kernel numbers are CUPTI medians or CUDA-graph microbenchmarks; "clipped R.eager" is the
+eager (non-graph) tail of a step from in-server traces with display stalls clipped.
+
+### H1. The fixed-cost stack (RT1, SV1, SV2, FG1, DG1, RQ2 u2h)
+
+A fixed-cost map of the production step (`FC_fc-map_2026-10-01.md`, `FC_fc-moe_2026-10-01.md`,
+`FC_fc-glue_2026-10-01.md`) listed the per-step costs that do not scale with the weights read. Six pieces came
+out of it. Each was checked on its own (bit-exactness or a stated output difference, kernel timing, an in-server
+smoke), then all six were judged together in one 8-start ABBA.
+
+| piece | what | own measurement | output |
+|---|---|---|---|
+| **RT1** `SGLANG_ROUTER_FAST_TOPK` (0110-0111) | router softmax top-k on 32-bit packed keys | router share 3.8 → 1.5-1.6 µs per call, about −0.13 ms/step at wa (55 calls) | bit-exact (12 cases × 65,536 rows) |
+| **SV1** `SGLANG_OPT_SPEC_SPARSE_VERIFY` (0108) | sampling verify on the top-KP logits (KP 64 for top_k 40) instead of five full-vocabulary passes | sampling eager tail −205 µs/step in a 4-start ABBA, tok/step unchanged | rounding-level; greedy untouched |
+| **SV2** `SGLANG_OPT_SPEC_SPARSE_TOPK` (0113) | FlashInfer radix top-k (sorted, deterministic) for SV1's top-KP | −32..−38 µs per call; 2 top-k launches per sampling step instead of 28 | same values as `torch.topk` |
+| **FG1** `SGLANG_OPT_GDN_FRONT_OVERLAP` (0109) | GDN verify front: the combine gate forked onto the alt stream, overlapping the HC mix kernels | −3.57 µs per layer at M=4 (microbenchmark), about −0.13 ms/step at W4; its own ABBA was inconclusive (`rejected.md`) | bit-exact |
+| **DG1** `SGLANG_OPT_DRAFT_MOE_GEMV` (0112) | the draft's one-token MoE as two Triton W4A16 NVFP4 GEMV kernels instead of the CUTLASS FP4 chain | 49.4 → 29.8 µs per call; −0.27..−0.34 ms per step at 15 draft steps | drafts change (bf16 instead of FP4 activations); target untouched |
+| **RQ2 u2h** (FlashInfer 08, 10) | MoE routing prologue: expand row staged with `cp.async`, rolled quantize loop, scale-factor address hoisted | in-server prologue 12.4 → 7.8 µs; 4-start ABBA ms/step −3.38 % [−5.35, −1.36] greedy, −3.28 % sampling (request-level CI) | bit-exact by construction |
+
+**The stack ABBA** (`results/runs-1002/stack8/`, `TABLES.md` §6). All six against the 2026-09-08 production,
+min_p off in both arms, 8 starts, 4 workloads × both modes. B/A, 95 % CI at arm level (5 degrees of freedom):
+
+| mode | ms/token | tok/step | ms/step\|a |
+|---|---|---|---|
+| LM Studio sampling | **−9.55 %** [−13.63, −5.27] | +3.13 % [+1.05, +5.24] | −7.57 % [−11.19, −3.80] |
+| greedy | **−4.59 %** [−8.89, −0.08] | −1.18 % [−5.82, +3.70] | −5.40 % [−8.32, −2.40] |
+
+Client t/s per workload (geometric mean per arm, then the mean of the 4 arms; `TABLES.md` uses arithmetic
+means and differs by 1-6 t/s):
+
+| mode | code-edit | prose-en | prose-ja | agent-loop |
+|---|---|---|---|---|
+| LM Studio | 511 → 580 (+13.6 %) | 203 → 222 | 221 → 241 | 286 → 317 |
+| greedy | 555 → 569 | 237 → 248 | 268 → 275 | 323 → 349 |
+
+* Sampling gains more because SV1/SV2 only act on sampling steps. In clipped R.eager, the sampling eager tail
+  fell from 376-391 µs/step (A arms) to 119-139 µs/step (B arms).
+* No piece targets acceptance. DG1 changes the drafts, so the tok/step rise under sampling may be real, but it
+  was not tested on its own.
+* DT1 (draft-tail glue) was built in the same round and is not shipped (`rejected.md`).
+
+### H2. min_p in the speculative verify (fidelity fix)
+
+* **What was wrong.** The speculative sampling verify ignored `min_p`, both target-only and with rejection
+  sampling. With LM Studio's min_p 0.05, a speculative server could emit tokens below 0.05 × p_max, which the
+  non-speculative sampler excludes. Found while mapping the sampling cost (`FC_fc-map_2026-10-01.md`).
+* **Fix.** Patch 0107, `SGLANG_SPEC_MIN_P=1`: min_p is applied in the verify and in the RS draft proposal.
+* **Cost.** None measurable (`RS1_REJECTION_SAMPLING.md`, the min_p ABBA). It ships for correctness, not speed.
+  The stack, ST1 and XA1 ABBAs ran with min_p off in both arms; the RS ABBAs with it on in both arms.
+
+### H3. ST1 + XA1: the draft's valid prefix, and a Triton decode attention
+
+* **ST1** `SGLANG_ENABLE_QSA_SHARED_TAIL_PREFIX` is a **correctness fix**. Index-shared draft rows broke the
+  attention's valid-prefix contract, so the draft's attention silently dropped its newest positions. XA1's
+  kernel work found it (its §1.3). Output is exact either way (the target verifies every token); the open
+  question was whether acceptance would rise. It did not beyond noise. 8 starts, request-level CI:
+  LM Studio ms/token −2.09 % [−4.35, +0.21], tok/step +0.38 %, ms/step|a −1.68 % [−3.16, −0.18]; greedy ms/token
+  −0.64 %, tok/step −3.49 % [−7.81, +1.03]. Arm-level CIs are about 3× wider and all cross 0, and the night arms
+  alone show LM Studio ms/token +0.18 %. So ST1 is **not claimed as a speed-up**; it ships only because XA1 was
+  measured on top of it and relies on its layout.
+* **XA1** `SGLANG_OPT_TRITON_DECODE_ATTN`: the QSA decode attention as one split-KV Triton kernel instead of
+  the production XQA path: 12.2 µs against 16.2-16.4 µs per call in server traces (microbenchmark savings
+  −6.2..−14 µs per call). 8-start A/B with ST1 in both arms (`results/runs-1002/xa1-st1/`):
+  * LM Studio ms/step|a −2.52 % [−3.54, −1.49] (arm level [−5.52, +0.35]); pooled t/s +2.82 % [+0.01, +5.70]
+    (arm level [−0.88, +6.66]);
+  * greedy t/s +1.17 % [−1.33, +3.75], ms/step|a −0.44 % (unresolved);
+  * no workload's tok/step CI excludes 0.
+  The speed claim rests on the kernel timing and the request-level sampling result; the arm-level CIs cross 0.
+
+### H4. The RS package: sparse rejection sampling with a K = 16 draft support
+
+Rejection sampling (RS) lets a sampling request accept a draft token with probability min(1, p/q) instead of
+requiring an exact match with the target's sample, which raises acceptance under sampling. Greedy requests are
+unaffected in principle.
+
+* **RS1** (dense RS over the hot vocabulary, patch 0106) raised acceptance but its per-step cost ate the gain on
+  code (rejected, `rejected.md`). **RS2** (patch 0116, `SGLANG_OPT_SPEC_SPARSE_RS`) keeps the draft proposal
+  sparse: q lives on the draft's top-K ids, after the request's own top_k/top_p/min_p filters. RS2 alone was
+  rejected too (code-edit slower).
+* What shipped is a **package** on top of RS2, measured as one unit against the stack's target-only verify:
+  * RS2d draft sharpening (0117): `SGLANG_RS_DRAFT_TEMP_SCALE=0.7`, `SGLANG_RS_DRAFT_ONEHOT_ABOVE=0.9`;
+  * G1 greedy fast path in the proposal (0118): `SGLANG_RS_GREEDY_FAST=1`;
+  * RS3 block verification (0119-0120): `SGLANG_RS_BLOCK_VERIFY=1`, vectorised over the chain (+8.5 µs per
+    verify at most; the sequential version cost +58 µs);
+  * `--speculative-use-rejection-sampling` (added by the launcher when RS is on; never for ngram).
+* **Exactness.** Each step was checked against Σ min(p, q) and per-position chi-square / Fisher tests on the GPU
+  (e.g. RS2: accept@0 0.73396 against 0.73481, SE 0.00156, Fisher p = 0.837).
+* **Package ABBA** (`results/runs-1002/rs2d-abba/`), 8 starts, request CI (arm CI in brackets after):
+  * LM Studio t/s pooled **+6.53 %** [+4.60, +8.51] (arm [+1.36, +11.97]); agent-loop +6.17 %, prose-en +8.52 %,
+    prose-ja +10.01 %;
+  * code-edit +1.63 % [−2.49, +5.90]: **unresolved**, and below the rule's −2 % floor at the lower bound;
+  * greedy ms/step|a −2.18 % [−3.30, −1.04] (arm [−8.05, +4.12]). Nothing in the package should make a greedy
+    step cheaper; read this as drift between arms.
+  * By the pre-registered rule the package was **not adopted**. The author shipped it anyway for the prose and
+    agent gains, accepting the unresolved code-edit result. Turn it off with `SGLANG_OPT_SPEC_SPARSE_RS=0`.
+* **K = 16** (`SGLANG_RS_DRAFT_TOPK=16`, was 64 in the ABBA): after LM Studio's filters q has only 6.7-15.1
+  nonzero ranks per verify, so 16 loses nothing measurable offline. It saves 11.7 µs per draft step; the
+  support computation went from 21.10 to 8.22 µs per call (fp32), about 82 µs per verify at 7 draft steps and
+  176 µs at 15 (`results/runs-1002/rs4-k16/`). Offline on the dump, the acceptance change is −0.005 %. It joined the package after a
+  one-arm smoke (kernel medians against the ABBA's B traces), without its own ABBA, by a rule fixed beforehand.
+
+### H5. 524,288-token context on wa
+
+* **How.** Above 262,144 tokens the launcher turns on factor-2 YaRN, and `wa` raises its memory fraction to
+  `WA_LONG_MEM_FRACTION` (0.96). The default context stays 262,144; 524,288 is opt-in via `CONTEXT_LENGTH`.
+* **Needles** (thinking off, temperature 0, `results/runs-1002/long-524k/`): 16k PASS in 8.1 s; 185k at depth
+  0.5 PASS in 17.5 s; 480k at depth 0.25 PASS in 70.7 s; 480k at depth 0.75 PASS in 71.4 s.
+* Prefill about 6.8k tok/s at 480k. Decode with LM Studio sampling 185.5 t/s at 480k context, 284.4 t/s at 2k
+  (same request shape).
+* GPU memory in use peaked at 96,220 MiB (1,667 MiB free), with the desktop holding about 6.8 GB of it. At the
+  normal 0.925 fraction the KV pool would have been capped below 524,288 with that desktop.
+* Short prompts with YaRN on, one run each, against the 262,144 smoke: −25 % to +34 % per workload and mode.
+  Outputs differ under YaRN, so this is noise-level evidence, not a measured cost. W4 and W16 were not tested
+  above 262,144.
+* 1,048,576 tokens do not fit: KV and state need about 10 GB more than the GPU has (13.5 KB per token), and the
+  model only promises 262,144. YaRN factor 4 is outside the fork's qualified range.
+
+### H6. Shipped build smokes
+
+One server start per profile with the shipped flags at context 262,144 (the worst case for memory), one prompt
+per workload and mode, plus a check script that every flag logged its enable line and no error appeared
+(`results/runs-1002/ship/`, `TABLES.md` §7). LM Studio t/s, code-edit / prose-en / prose-ja / agent-loop:
+
+| profile | LM Studio t/s |
+|---|---|
+| wa | 524 / 226 / 335 / 317 |
+| W4 | 348 / 235 / 241 / 304 |
+| W16 | 539 / 149 / 152 / 242 |
+
+These are single prompts, so they show that the build works, not how fast it is. A proper measurement of the
+shipped build is pending (README, "2026-10 update").
+
+Every A/B in this section ran `wa`. W4 and W16 ran the new pieces for the first time in these smokes, so their
+speed with them is not measured. A code reading found no adaptive-only assumption in the shipped diff (W4 runs
+wa's width-3 code, W16 its width-15 code). The wa width model (`SGLANG_ADAPTIVE_STEP_A/B`) was fitted to the
+September step cost and has not been re-fitted to the cheaper steps.
+
 ---
 
-## Appendix: production flags (as of 2026-09-08)
+## Appendix: production flags (as of 2026-09-08; the 2026-10 additions at the end)
 
 | Flag / argument | Section | Profiles |
 |---|---|---|
@@ -1296,3 +1454,8 @@ One server that chooses the draft width per step from {3, 15} and later
 | `--speculative-num-steps 15 --speculative-num-draft-tokens 16`, `MAMBA_SLOTS=10` | A4 | W16, wa |
 | `--speculative-adaptive`, `SGLANG_ADAPTIVE_POLICY=confidence`, `w16_3_7_15_c.json`, `SGLANG_ADAPTIVE_STEP_A/B=7.943/0.5554`, `SGLANG_ADAPTIVE_TARGET_AUTOTUNE=1` | F | wa |
 | `--mem-fraction-static` 0.935 / 0.93 / 0.925 | G3 | W4 / W16 / wa |
+| `SGLANG_ROUTER_FAST_TOPK=1`, `SGLANG_OPT_SPEC_SPARSE_VERIFY=1`, `SGLANG_OPT_SPEC_SPARSE_TOPK=1`, `SGLANG_OPT_GDN_FRONT_OVERLAP=1`, `SGLANG_OPT_DRAFT_MOE_GEMV=1` (+ FlashInfer 08, 10) | H1 | all (2026-10-02) |
+| `SGLANG_SPEC_MIN_P=1` | H2 | all (2026-10-02) |
+| `SGLANG_ENABLE_QSA_SHARED_TAIL_PREFIX=1`, `SGLANG_OPT_TRITON_DECODE_ATTN=1` | H3 | all (2026-10-02) |
+| `SGLANG_OPT_SPEC_SPARSE_RS=1`, `SGLANG_RS_DRAFT_TOPK=16`, `SGLANG_RS_DRAFT_TEMP_SCALE=0.7`, `SGLANG_RS_DRAFT_ONEHOT_ABOVE=0.9`, `SGLANG_RS_GREEDY_FAST=1`, `SGLANG_RS_BLOCK_VERIFY=1`, `--speculative-use-rejection-sampling` | H4 | all but ngram (2026-10-02) |
+| `CONTEXT_LENGTH` > 262144: factor-2 YaRN, `WA_LONG_MEM_FRACTION=0.96` | H5 | wa (opt-in) |

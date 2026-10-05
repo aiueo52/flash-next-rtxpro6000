@@ -1,4 +1,4 @@
-# Timeline (2026-08-28 to 2026-09-08)
+# Timeline (2026-08-28 to 2026-10-02)
 
 A dated record of how single-stream (batch size 1) decode of Qwen3.8-Flash-Next
 (NVFP4 checkpoint `RadixArk/Qwen3.8-Flash-Next-NVFP4`) on one RTX PRO 6000
@@ -205,6 +205,40 @@ Every run this day used the default 300 W power limit; 325 W was set from 2026-0
 
 * 2026-09-09 (night): a τ = 0.10 shipping gate (T10) returned NO SHIP. See
   `rejected.md`.
+
+* The production SGLang build (patch 0105) then stayed unchanged until 2026-10-02.
+
+## 2026-10-01 / 10-02: fixed-cost cuts, sampling, rejection sampling
+
+This round measured LM Studio's sampling settings next to greedy, and judged every server A/B with 8 server
+starts and an ANCOVA (`measurement.md`, "The 2026-10 protocol"). Its numbers come from the BN1 held-out prompts (4 or 8
+per workload, `measurement.md` §6) and are not comparable with the single-prompt smokes in the table below. Details:
+`optimizations.md` §H, `rejected.md` §7.
+
+* **10-01 early morning**: fixed-cost maps of the production step (fc-map, fc-moe, fc-glue). They found that the
+  speculative verify ignored `min_p`, and that a sampling step cost 250-300 µs more than a greedy one. A host-RAM
+  exhaustion freeze and a GPU hang (driver module hot-loaded after boot) cost a reboot; new rules: at least 110 GB
+  of free host RAM before a server, compiles in their own capped scope.
+* **10-01 morning to 09:50**: RS1 (dense rejection sampling) ABBAs without and with the min_p fix. Not adopted
+  (code-edit −7.7 % / −3.6 % t/s); the min_p fix kept as a fidelity fix.
+* **10-01 late morning to 13:42**: RT1, SV1, SV2, FG1, DG1 built and checked one by one; RQ2 u2h (FlashInfer
+  prologue) ABBA −3.3 % ms/step. FG1's own 4-start ABBA was inconclusive (12:33-13:01), so the single-piece ABBAs
+  of RT1 and DG1 were cancelled.
+* **10-01 13:42-16:15**: **the stack ABBA, 8 starts: LM Studio ms/token −9.55 %, greedy −4.59 %** (arm-level CIs
+  exclude 0 in both modes).
+* **10-01 16:50 to 10-02 02:19**: ST1 (8 starts, no speed-up) and XA1 on ST1 (8 starts, LM Studio t/s +2.8 %,
+  request level). DT1 was built; its exactness check found that greedy text is not reproducible across starts,
+  so it stays off.
+* **10-01 evening to 23:55**: RS2 sparse RS, 8 starts: faster on prose and agent, slower on code-edit; not
+  adopted. A verify dump picked the RS2d knobs and estimated RS3 block verification offline (+0.20 % and
+  +0.59 % tok/step).
+* **10-02 02:19-06:40**: the RS package ABBA, 8 starts: LM Studio t/s +6.5 % pooled, code-edit unresolved
+  (+1.6 % [−2.5, +5.9]). Not adopted by the rule; K = 16 joined it at 06:40.
+* **10-02 morning**: **shipped**: the stack, ST1 + XA1, min_p on, and the RS package with K = 16 (patch 0121,
+  FlashInfer 08-10), in a new worktree with a frozen FlashInfer copy; the old build kept as the rollback. Smokes
+  on wa, W4 and W16 clean.
+* **10-02 21:40-22:00**: 524,288-token context on wa with factor-2 YaRN: all needles up to 480k PASS; shipped as
+  opt-in. 1M does not fit.
 
 ## Summary of production numbers
 

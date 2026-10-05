@@ -21,6 +21,7 @@ Contents:
 4. MoE
 5. Adaptive width
 6. Findings that were not rejections
+7. The 2026-10 round
 
 ---
 
@@ -757,3 +758,99 @@ Compositor interference is real: about 7.5 % of the W4 step at 4K 160 Hz. It
 has no complete software fix. Stream priorities, MPS and green contexts do not
 isolate the compute context from the compositor. MIG would require disabling
 display output and would leave only 48 GB. See `measurement.md` §5.
+
+---
+
+## 7. The 2026-10 round
+
+What did not ship, or did not ship for the reason first proposed, in the round described in
+`optimizations.md` §H. The protocol (8 server starts, ANCOVA, both sampling modes) is in `measurement.md`.
+Request-level 95 % CIs unless marked "arm"; raw files under `../results/runs-1002/`.
+
+### 7.1 RS1: dense rejection sampling over the hot vocabulary
+
+* **Idea.** Make `--speculative-use-rejection-sampling` work with the reduced draft vocabulary, with the draft
+  proposal q truncated to the request's own top-k/top-p support (patch 0106).
+* **Offline.** Lossless: accept@0 matched Σ min(p, q) within 1.6 SE in every case. Truncating q raised accept@0
+  from 0.7995 to 0.8182 on the same logits.
+* **Server, 4-start ABBA, LM Studio sampling** (t/s; acceptance):
+
+  | | code-edit | prose-en | agent-loop | prose-ja |
+  |---|---|---|---|---|
+  | without the min_p fix | **−7.7 %** [−12.0, −3.2]; −2.6 % | **+6.2 %** [+3.9, +8.8]; +7.7 % | +1.0 %; +4.5 % | +0.1 %; +0.5 % |
+  | with the min_p fix in both arms | **−3.6 %** [−6.8, −0.0]; +5.1 % | **+5.3 %** [+3.8, +6.6]; +6.6 % | +1.4 %; +6.4 % | −1.4 %; −2.3 % |
+
+* **Why it lost.** With min_p honoured, RS raised acceptance by 5-8 % on code, agent and prose-en, but both RS arms
+  were 7-10 % slower per step on code-edit. RS1 builds a full-vocabulary (bs, S, V) buffer and runs a dense verify,
+  a cost that grows with the chain length, and code runs the longest chains.
+* **Kept from it.** The min_p fix (`optimizations.md` H2), and the plan to remove the per-step cost (RS2).
+* **Source.** `lab-notes/RS1_REJECTION_SAMPLING.md`; `results/runs-1002/rs1/`, `rs1-minp/`.
+
+### 7.2 RS2 alone: sparse rejection sampling
+
+* **Idea.** Keep q sparse (the draft's top-K ids after the request's filters) and verify on that support (patch
+  0116).
+* **8-start ABBA against target-only:** LM Studio t/s pooled +3.7 % [+1.6, +5.8] (arm [−0.3, +7.8]); prose-en
+  +8.0 %, prose-ja +7.5 %, agent-loop +4.8 %; **code-edit −5.0 % [−9.1, −0.8]**, with tok/step −3.8 % and
+  ms/step|a +2.8 % [+0.3, +5.4]. **Greedy ms/step|a +1.9 % [+0.8, +3.2]**, over the +1 % bound: an all-greedy batch
+  still ran the RS2 proposal (9.0 + 12.4 µs per draft step instead of 1.8 + 1.9).
+* **Why rejected.** On code the target is peaked: RS's acceptance Σ min(p, q) loses to target-only's
+  p(draft argmax). Greedy paid for a proposal it did not need.
+* **What followed.** G1 (greedy fast path), the RS2d knobs, RS3 block verification and K = 16 were added, and the
+  whole package was measured again (`optimizations.md` H4). The package also failed the pre-registered rule
+  (code-edit unresolved) and was shipped by the author's decision anyway.
+* **Source.** `lab-notes/RS2_SPARSE_RS_2026-10-01.md`; `results/runs-1002/rs2/`.
+
+### 7.3 RS2d knobs and RS3 block verification, judged on their own
+
+* **RS2d** (draft temperature scale, one-hot threshold): a verify dump (24,723 verifies) was replayed offline to
+  choose the knobs. Best pair (0.8, 0.9): **+0.20 %** pooled tok/step over RS2, against a +2 % gate. Fails alone.
+* **RS3 block verification:** offline on the same dump **+0.59 %** pooled tok/step (paired SE 0.04 %), below the
+  +2 % gate. The vectorised version costs at most 8.5 µs per verify.
+* Both went into the package anyway, because together they add in expectation and cost little; the package ABBA
+  is the only server measurement of them.
+* **Source.** `lab-notes/RS2D_DRAFT_SHARPEN_2026-10-01.md`, `lab-notes/RS3_BLOCK_VERIFY_2026-10-01.md`;
+  `results/runs-1002/rs2d-offline/`.
+
+### 7.4 RS2b: FlashInfer radix top-k for RS2's draft proposal
+
+* `tie_break=1` fails at launch in this FlashInfer build. The modes that run (25.6-34.4 µs) are slower than RS2's
+  whole proposal (21.5 µs). Closed. (SV2, a different call site, does use FlashInfer's top-k.)
+* **Source.** `lab-notes/RS2B_FI_TOPK_2026-10-01.md`.
+
+### 7.5 ST1 as a speed-up
+
+* ST1 fixes the draft's valid-prefix contract (`optimizations.md` H3), so the draft now sees its newest
+  positions. The hope was higher acceptance. 8 starts: LM Studio ms/token −2.09 % [−4.35, +0.21], tok/step +0.38 %;
+  greedy tok/step −3.49 % [−7.81, +1.03]. Arm-level CIs all cross 0, and the night arms alone show LM Studio
+  ms/token +0.18 %.
+* No speed-up claimed. It ships only with XA1, which was measured on top of it.
+* Likely reason: the MTP input already carries the previous hidden state and the current token's embedding.
+* **Source.** `lab-notes/ST1_SHARED_TAIL_2026-10-01.md`; `results/runs-1002/st1/`.
+
+### 7.6 FG1, RT1, DG1: single-piece server A/Bs
+
+* **FG1** 4-start ABBA, B/A ms/step: greedy −0.84 % [−5.91, +4.44], sampling −0.01 % [−4.72, +4.69]; ANCOVA
+  greedy +0.33 % [−2.44, +3.17]. Inconclusive. The two B arms differed by 6.7 % with the same code.
+* **RT1, DG1**: their own ABBAs were cancelled after FG1's showed that four starts cannot resolve a 1 % change.
+* All three were then judged inside the 8-start stack ABBA, which resolves the set but not each piece. Their
+  individual effects rest on kernel timings (`optimizations.md` H1).
+* **Source.** `lab-notes/FG1_GDN_FRONT_OVERLAP.md`, `lab-notes/STACK_2026-10-01.md`; `results/runs-1002/fg1/`.
+
+### 7.7 DT1: draft-phase tail glue
+
+* **Idea.** Remove copies and small kernels from the draft phase at topk = 1 (four bit-exact parts: no input
+  copy in the draft graph, fp32 draft logits buffer, one-pass draft_extend select, one-kernel chain tree).
+  Estimated −0.035 ms/step at W4, −0.05..−0.07 at wa, −0.13..−0.14 at W16: 0.4-0.7 % of a step.
+* **Why not shipped.** Below what any server A/B here resolves, so the plan was an exactness check instead. That
+  check could not run: greedy text is not reproducible across server starts even with the same code (wa: 0/16
+  prompts with the same completion length and verify count; W4 with MoE autotune off: 0/8, two repeats in one server 0/4). Some kernel in the untuned W4
+  path is still nondeterministic; this was not investigated. DT1's kernels pass their own bit-exact checks, but
+  it was never measured with the RS package, so it stays off (`SGLANG_OPT_DRAFT_TAIL`, default off).
+* **Source.** `lab-notes/DT1_DRAFT_TAIL_2026-10-01.md`; `results/runs-1002/stack8/exact/`, `stack8/C1-*`.
+
+### 7.8 1M-token context
+
+* 1,048,576 tokens need about 10 GB more KV and state than the GPU has, and need YaRN factor 4, outside the fork's
+  qualified range. 524,288 shipped as opt-in (`optimizations.md` H5); about 750k would be borderline.
+* **Source.** `lab-notes/LONGCTX_2026-10-02.md`.
