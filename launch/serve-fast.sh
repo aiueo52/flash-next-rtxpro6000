@@ -15,6 +15,11 @@
 #                              (full-vocab draft head; much slower at W16, see docs/rejected.md)
 # Optional:      TARGET_MODEL (default: the public RadixArk/Qwen3.8-Flash-Next-NVFP4 under $HOME/models)
 #                ADAPTIVE_CONFIG (default: bench/adaptive/w16_3_7_15_c.json of this repo)
+#                FLASHINFER_DIR  a patched FlashInfer package directory to put ahead of the venv's
+#                                (default: none = the venv's flashinfer, patched in place by
+#                                patches/flashinfer/apply.sh)
+#                CONTEXT_LENGTH  above 262144 serve-local.sh turns on factor-2 YaRN (up to 524288) and
+#                                the wa profile raises its memory fraction to WA_LONG_MEM_FRACTION (0.96)
 # Extra arguments are passed through to `sglang serve`.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -74,6 +79,30 @@ export FLASHINFER_MOE_PACK_GROUPS=${FLASHINFER_MOE_PACK_GROUPS:-1}
 # Programmatic dependent launch for the fork's Triton kernels
 export SGLANG_TRITON_PDL=${SGLANG_TRITON_PDL:-1}
 
+# ---- 2026-10-02 additions (patches 0106-0121, FlashInfer 08-10); any flag =0 turns it off. ----
+# FlashInfer: by default the venv's (patched) package is used. To serve a frozen copy instead, set
+# FLASHINFER_DIR to it and FLASHINFER_WORKSPACE_BASE to its pre-built JIT cache, and add
+# FLASHINFER_P2_NO_NINJA=1 (patch 09) so that a copied cache is loaded as-is instead of recompiled.
+if [ -n "${FLASHINFER_DIR:-}" ]; then export PYTHONPATH="$FLASHINFER_DIR:$SGLANG_DIR/python${PYTHONPATH:+:$PYTHONPATH}"; fi
+# Stack (RT1 packed-key router top-k, SV1 sparse sampling verify, SV2 FlashInfer radix top-k for it,
+# FG1 GDN verify front overlap, DG1 one-token draft MoE GEMV); with FlashInfer RQ2 (patch 08):
+# wa 8-start ABBA ms/token -9.6% LM Studio sampling, -4.6% greedy (docs/optimizations.md).
+export SGLANG_ROUTER_FAST_TOPK=${SGLANG_ROUTER_FAST_TOPK:-1} SGLANG_OPT_SPEC_SPARSE_VERIFY=${SGLANG_OPT_SPEC_SPARSE_VERIFY:-1}
+export SGLANG_OPT_SPEC_SPARSE_TOPK=${SGLANG_OPT_SPEC_SPARSE_TOPK:-1} SGLANG_OPT_GDN_FRONT_OVERLAP=${SGLANG_OPT_GDN_FRONT_OVERLAP:-1}
+export SGLANG_OPT_DRAFT_MOE_GEMV=${SGLANG_OPT_DRAFT_MOE_GEMV:-1}
+# min_p honoured in the speculative sampling verify and the RS draft proposal (a fidelity fix: before,
+# min_p was ignored on the speculative path); ST1 MTP shared-index tail + XA1 split-KV Triton decode
+# attention (adopted together, +2.8%; ST1 alone is not a speed-up).
+export SGLANG_SPEC_MIN_P=${SGLANG_SPEC_MIN_P:-1}
+export SGLANG_ENABLE_QSA_SHARED_TAIL_PREFIX=${SGLANG_ENABLE_QSA_SHARED_TAIL_PREFIX:-1} SGLANG_OPT_TRITON_DECODE_ATTN=${SGLANG_OPT_TRITON_DECODE_ATTN:-1}
+# RS package: sparse chain rejection sampling over a K=16 draft support, draft sharpened (temperature
+# x0.7, one-hot above p=0.9), greedy fast path, block verification. LM Studio t/s +6.5% pooled
+# (code-edit +1.6%, unresolved). Needs --speculative-use-rejection-sampling (added below).
+# DT1 (SGLANG_OPT_DRAFT_TAIL) was never measured with it and stays off.
+export SGLANG_OPT_SPEC_SPARSE_RS=${SGLANG_OPT_SPEC_SPARSE_RS:-1} SGLANG_RS_DRAFT_TOPK=${SGLANG_RS_DRAFT_TOPK:-16}
+export SGLANG_RS_DRAFT_TEMP_SCALE=${SGLANG_RS_DRAFT_TEMP_SCALE:-0.7} SGLANG_RS_DRAFT_ONEHOT_ABOVE=${SGLANG_RS_DRAFT_ONEHOT_ABOVE:-0.9}
+export SGLANG_RS_GREEDY_FAST=${SGLANG_RS_GREEDY_FAST:-1} SGLANG_RS_BLOCK_VERIFY=${SGLANG_RS_BLOCK_VERIFY:-1}
+
 # Target checkpoint. The measurements used privately fine-tuned MTP heads (mtpft3 / mtpft5) that are NOT
 # published; the public checkpoint's original MTP head gives somewhat lower acceptance (README.md, "Limitations and measurement noise").
 export TARGET_MODEL="${TARGET_MODEL:-$HOME/models/RadixArk/Qwen3.8-Flash-Next-NVFP4}"
@@ -94,10 +123,16 @@ if [ -n "${SERVE_DISPLAY_HZ:-}" ]; then
     ( setsid bash -c "while kill -0 $$ 2>/dev/null; do sleep 5; done; xrandr --output $_out --mode $_mode --rate $_orig" >/dev/null 2>&1 < /dev/null & )
   fi
 fi
+# Above 262144 serve-local.sh turns on factor-2 YaRN; wa then needs ~3.5 GB more KV. 524288 passed
+# all needles (up to 480k tokens) at 0.96 with ~6.8 GB of VRAM used by the desktop (docs/optimizations.md).
+if [ "$PROFILE" = wa ] && [ "${CONTEXT_LENGTH:-0}" -gt 262144 ]; then WA_MEM_FRACTION="${WA_LONG_MEM_FRACTION:-0.96}"; fi
 COMMON=()
 [ "$TOKEN_MAP" != none ] && COMMON+=(--speculative-token-map "$TOKEN_MAP")
 COMMON+=(--qwen4-exp-dense-fp8 shared_expert,attn,linear_attn,lm_head,mtp_dense
         --speculative-draft-model-quantization modelopt_fp4 --enable-metrics)
+# RS runs in the rejection-sampling verify; ngram keeps the target-only verify (RS never measured there).
+if [ "$PROFILE" = ngram ]; then export SGLANG_OPT_SPEC_SPARSE_RS=0
+elif [ "$SGLANG_OPT_SPEC_SPARSE_RS" = 1 ]; then COMMON+=(--speculative-use-rejection-sampling); fi
 case "$PROFILE" in
   w4)    MEM_FRACTION="${MEM_FRACTION:-${W4_MEM_FRACTION:-0.935}}" exec "$HERE/serve-local.sh" "${COMMON[@]}" "$@" ;;
   w8)    MAMBA_SLOTS="${MAMBA_SLOTS:-10}" exec "$HERE/serve-local.sh" "${COMMON[@]}" --speculative-num-steps 7 --speculative-num-draft-tokens 8 "$@" ;;

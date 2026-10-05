@@ -63,6 +63,23 @@ export SGLANG_LMHEAD_NVFP4=${SGLANG_LMHEAD_NVFP4:-0}
 export FLASHINFER_MOE_PACK_GROUPS=${FLASHINFER_MOE_PACK_GROUPS:-1}
 # 2026-09-06: PDL on the fork's Triton kernels (e58cf349d3): W4 -0.6ms/step (-5.5%); W16 -0.2ms (-1.2%, headless 2x2 A/B 02:35) -> on for all profiles.
 export SGLANG_TRITON_PDL=${SGLANG_TRITON_PDL:-1}
+# 2026-10-02 shipping: this worktree is opus/cand-1002 (7118260ce3, patch 0121); the flags below are what the wa
+# measurements ran (flash-next-bench specs/STACK_2026-10-01.md 5.1, RS2D_DRAFT_SHARPEN_2026-10-01.md 6). Any of them =0 turns it off.
+# Frozen copy of the RQ2 u2h FlashInfer (fused MoE prologue + top-k module): a copied cache must never run ninja -> NO_NINJA.
+export PYTHONPATH="$HOME/tools/flashinfer-prod-1002:$REPO/python"
+export FLASHINFER_WORKSPACE_BASE="${FLASHINFER_WORKSPACE_BASE:-$HOME/.cache/sglang-prod-1002}" FLASHINFER_P2_NO_NINJA=1
+# Stack (RT1 router top-k, SV1 sparse verify, SV2 FlashInfer top-k, FG1 GDN front overlap, DG1 draft MoE GEMV): wa ABBA -9.6% ms/token LM Studio, -4.6% greedy.
+export SGLANG_ROUTER_FAST_TOPK=${SGLANG_ROUTER_FAST_TOPK:-1} SGLANG_OPT_SPEC_SPARSE_VERIFY=${SGLANG_OPT_SPEC_SPARSE_VERIFY:-1}
+export SGLANG_OPT_SPEC_SPARSE_TOPK=${SGLANG_OPT_SPEC_SPARSE_TOPK:-1} SGLANG_OPT_GDN_FRONT_OVERLAP=${SGLANG_OPT_GDN_FRONT_OVERLAP:-1}
+export SGLANG_OPT_DRAFT_MOE_GEMV=${SGLANG_OPT_DRAFT_MOE_GEMV:-1}
+# min_p honored in the speculative verify (LM Studio sends it); ST1 MTP shared-index tail + XA1 Triton decode attention (+2.8% together).
+export SGLANG_SPEC_MIN_P=${SGLANG_SPEC_MIN_P:-1}
+export SGLANG_ENABLE_QSA_SHARED_TAIL_PREFIX=${SGLANG_ENABLE_QSA_SHARED_TAIL_PREFIX:-1} SGLANG_OPT_TRITON_DECODE_ATTN=${SGLANG_OPT_TRITON_DECODE_ATTN:-1}
+# RS package: sparse chain rejection sampling, draft support K=16 sharpened (LM Studio t/s +6.5% pooled, prose-ja +10%, code-edit +1.6% unresolved).
+# Needs --speculative-use-rejection-sampling (added to COMMON below); DT1 (SGLANG_OPT_DRAFT_TAIL) was never measured with it -> stays off.
+export SGLANG_OPT_SPEC_SPARSE_RS=${SGLANG_OPT_SPEC_SPARSE_RS:-1} SGLANG_RS_DRAFT_TOPK=${SGLANG_RS_DRAFT_TOPK:-16}
+export SGLANG_RS_DRAFT_TEMP_SCALE=${SGLANG_RS_DRAFT_TEMP_SCALE:-0.7} SGLANG_RS_DRAFT_ONEHOT_ABOVE=${SGLANG_RS_DRAFT_ONEHOT_ABOVE:-0.9}
+export SGLANG_RS_GREEDY_FAST=${SGLANG_RS_GREEDY_FAST:-1} SGLANG_RS_BLOCK_VERIFY=${SGLANG_RS_BLOCK_VERIFY:-1}
 # 2026-09-03: MTP draft dense projections FP8 (mtp_dense) + online NVFP4 draft experts
 # 2026-09-05: v3 MTP head (soft-target distillation + rollout; W4 prose-en/agent +6-7%, W16 neutral). TARGET_MODEL=<dir> overrides.
 # 2026-09-07: v5 MTP head (breadth re-extraction; server A/B vs v3: W4 acc +0.8/+4.5/+4.0/+3.2%, W16 +6.5/+7.5/+3.1/+1.6% code/prose-en/prose-ja/agent, needle PASS). mtpft3 kept as fallback.
@@ -85,10 +102,16 @@ if [ -n "${SERVE_DISPLAY_HZ:-}" ]; then
     ( setsid bash -c "while kill -0 $$ 2>/dev/null; do sleep 5; done; xrandr --output $_out --mode $_mode --rate $_orig" >/dev/null 2>&1 < /dev/null & )
   fi
 fi
+# 2026-10-02: above 262144 serve-local.sh turns on factor-2 YaRN; wa then needs ~3.5GB more KV.
+# 524288 passed all needles (480k tokens) at 0.96 with a 6.8GB desktop (runs/long/wa-524288-summary.txt).
+[ "$PROFILE" = wa ] && [ "${CONTEXT_LENGTH:-0}" -gt 262144 ] && WA_MEM_FRACTION="${WA_LONG_MEM_FRACTION:-0.96}"
 COMMON=()
 [ "$TOKEN_MAP" != none ] && COMMON+=(--speculative-token-map "$TOKEN_MAP")
 COMMON+=(--qwen4-exp-dense-fp8 shared_expert,attn,linear_attn,lm_head,mtp_dense
         --speculative-draft-model-quantization modelopt_fp4 --enable-metrics)
+# 2026-10-02: RS runs in the rejection-sampling verify; ngram keeps the target-only verify (RS never measured there).
+if [ "$PROFILE" = ngram ]; then export SGLANG_OPT_SPEC_SPARSE_RS=0
+elif [ "$SGLANG_OPT_SPEC_SPARSE_RS" = 1 ]; then COMMON+=(--speculative-use-rejection-sampling); fi
 case "$PROFILE" in
   # 2026-09-06 P1: drop routes to experts used by exactly one verify row when their routing weight < tau (SGLANG_MOE_PRUNE_SINGLETON_TAU):
   #   W4 step -10% (t/s code +9.9 / prose-en +5.1 / agent +14.5 / prose-ja +13.3%), needle PASS, acceptance flat.
