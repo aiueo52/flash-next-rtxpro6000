@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Needle check, thinking disabled: [approx_tokens] [depth 0-1] [label] [--dry-run]."""
-if __name__ != "__main__":  # collected by pytest: this is a GPU experiment script, not a unit test
+if __name__ != "__main__" and "pytest" in __import__("sys").modules:  # collected by pytest: this is a GPU experiment script, not a unit test
     import pytest
     pytest.skip("GPU experiment script: run it directly (see the docstring)", allow_module_level=True)
 import argparse

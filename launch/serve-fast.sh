@@ -101,7 +101,7 @@ export SGLANG_ENABLE_QSA_SHARED_TAIL_PREFIX=${SGLANG_ENABLE_QSA_SHARED_TAIL_PREF
 # DT1 (SGLANG_OPT_DRAFT_TAIL) was never measured with it and stays off.
 export SGLANG_OPT_SPEC_SPARSE_RS=${SGLANG_OPT_SPEC_SPARSE_RS:-1} SGLANG_RS_DRAFT_TOPK=${SGLANG_RS_DRAFT_TOPK:-16}
 export SGLANG_RS_DRAFT_TEMP_SCALE=${SGLANG_RS_DRAFT_TEMP_SCALE:-0.7} SGLANG_RS_DRAFT_ONEHOT_ABOVE=${SGLANG_RS_DRAFT_ONEHOT_ABOVE:-0.9}
-export SGLANG_RS_GREEDY_FAST=${SGLANG_RS_GREEDY_FAST:-1} SGLANG_RS_BLOCK_VERIFY=${SGLANG_RS_BLOCK_VERIFY:-1}
+export SGLANG_RS_GREEDY_FAST=${SGLANG_RS_GREEDY_FAST:-1} SGLANG_RS_BLOCK_VERIFY=${SGLANG_RS_BLOCK_VERIFY:-$SGLANG_OPT_SPEC_SPARSE_RS}  # block verify needs the RS package
 
 # Target checkpoint. The measurements used privately fine-tuned MTP heads (mtpft3 / mtpft5) that are NOT
 # published; the public checkpoint's original MTP head gives somewhat lower acceptance (README.md, "Limitations and measurement noise").

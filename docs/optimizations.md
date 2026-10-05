@@ -1338,7 +1338,8 @@ means and differs by 1-6 t/s):
 
 * **ST1** `SGLANG_ENABLE_QSA_SHARED_TAIL_PREFIX` is a **correctness fix**. Index-shared draft rows broke the
   attention's valid-prefix contract, so the draft's attention silently dropped its newest positions. XA1's
-  kernel work found it (its §1.3). Output is exact either way (the target verifies every token); the open
+  kernel work found it (its §1.3). With pruning off (`PRUNE_TAU=0`) output is exact either way, because the target verifies every token (with the
+  default pruning the target's routing, and so its output, can depend on the draft; see the README); the open
   question was whether acceptance would rise. It did not beyond noise. 8 starts, request-level CI:
   LM Studio ms/token −2.09 % [−4.35, +0.21], tok/step +0.38 %, ms/step|a −1.68 % [−3.16, −0.18]; greedy ms/token
   −0.64 %, tok/step −3.49 % [−7.81, +1.03]. Arm-level CIs are about 3× wider and all cross 0, and the night arms
@@ -1378,7 +1379,8 @@ unaffected in principle.
   * greedy ms/step|a −2.18 % [−3.30, −1.04] (arm [−8.05, +4.12]). Nothing in the package should make a greedy
     step cheaper; read this as drift between arms.
   * By the pre-registered rule the package was **not adopted**. The author shipped it anyway for the prose and
-    agent gains, accepting the unresolved code-edit result. Turn it off with `SGLANG_OPT_SPEC_SPARSE_RS=0`.
+    agent gains, accepting the unresolved code-edit result. Turn it off with `SGLANG_OPT_SPEC_SPARSE_RS=0` (`launch/serve-fast.sh` then also clears `SGLANG_RS_BLOCK_VERIFY`; with
+    `launch/as-measured/serve-fast.sh` set `SGLANG_RS_BLOCK_VERIFY=0` yourself, or start-up fails).
 * **K = 16** (`SGLANG_RS_DRAFT_TOPK=16`, was 64 in the ABBA): after LM Studio's filters q has only 6.7-15.1
   nonzero ranks per verify, so 16 loses nothing measurable offline. It saves 11.7 µs per draft step; the
   support computation went from 21.10 to 8.22 µs per call (fp32), about 82 µs per verify at 7 draft steps and
@@ -1413,13 +1415,31 @@ per workload and mode, plus a check script that every flag logged its enable lin
 | W4 | 348 / 235 / 241 / 304 |
 | W16 | 539 / 149 / 152 / 242 |
 
-These are single prompts, so they show that the build works, not how fast it is. A proper measurement of the
-shipped build is pending (README, "2026-10 update").
+These are single prompts, so they show that the build works, not how fast it is. The shipped build was measured
+properly on 2026-10-06 (32 prompts, `TABLES.md` §8, README "2026-10 update").
 
 Every A/B in this section ran `wa`. W4 and W16 ran the new pieces for the first time in these smokes, so their
 speed with them is not measured. A code reading found no adaptive-only assumption in the shipped diff (W4 runs
 wa's width-3 code, W16 its width-15 code). The wa width model (`SGLANG_ADAPTIVE_STEP_A/B`) was fitted to the
 September step cost and has not been re-fitted to the cheaper steps.
+
+### H7. Known issues found in the pre-publication review (2026-10-06, not fixed yet)
+
+None of these can occur in the measured setting (one running request, SGLang's own contiguous hidden states),
+but they matter if you reuse the code elsewhere:
+
+* **RS greedy fast path with mixed batches.** With `SGLANG_RS_GREEDY_FAST=1` a greedy request's draft support
+  repeats one token id. If a batch mixes it with a request that needs the dense verify fallback (for example
+  `top_k=-1`), the dense scatter of the support (`eagle_utils.py`, `draft_probs.scatter_`) can let a zero
+  overwrite the probability 1, which biases rejection sampling for that request. Needs ≥ 2 running requests.
+  Fix: `scatter_add_` or unique support ids.
+* **Sparse verify cuts boundary ties.** SV1 keeps a fixed `KP` (≥ 8 entries past the largest `top_k`); if more
+  logits tie exactly at the top-k boundary than that margin, the extra ones are dropped, so the target
+  distribution differs slightly from the dense path (documented in `sparse_verify.py`, not in the launcher).
+  Fix: fall back to the dense verify when a tie reaches the boundary.
+* **FlashInfer patch 08 assumes 16-byte aligned input.** The RQ2 expand-row staging uses 16-byte `cp.async`;
+  FlashInfer itself only requires 4-byte alignment for BF16 input, so a sliced input view (for example
+  `storage_offset=2`) would fault. Fix: gate the fused path on `input.data_ptr() % 16 == 0`.
 
 ---
 

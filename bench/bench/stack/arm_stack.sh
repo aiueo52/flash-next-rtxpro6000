@@ -46,8 +46,10 @@ stop() {
   [ -n "$pg" ] && kill -TERM -- -$pg 2>/dev/null
   for i in $(seq 1 20); do kill -0 $SPID 2>/dev/null || break; sleep 1; done
   [ -n "$pg" ] && kill -KILL -- -$pg 2>/dev/null
-  # our own leftovers only: processes still listening on our port
-  for p in $(ss -ltnpH "sport = :$PORT" 2>/dev/null | grep -oP 'pid=\K[0-9]+' | sort -u); do kill -KILL $p 2>/dev/null; done
+  # our own leftovers only: processes of our process group still listening on our port
+  for p in $(ss -ltnpH "sport = :$PORT" 2>/dev/null | grep -oP 'pid=\K[0-9]+' | sort -u); do
+    [ -n "$pg" ] && [ "$(ps -o pgid= -p $p 2>/dev/null | tr -d ' ')" = "$pg" ] && kill -KILL $p 2>/dev/null
+  done
   for i in $(seq 1 60); do
     [ -z "$(nvidia-smi --query-compute-apps=pid --format=csv,noheader 2>/dev/null)" ] && break; sleep 2
   done

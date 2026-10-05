@@ -138,7 +138,10 @@ Attributions:
   (https://creativecommons.org/licenses/by-sa/3.0/) and GFDL.
 - SWE-agent-trajectories by Nebius (https://huggingface.co/datasets/nebius/SWE-agent-trajectories,
   revision 68195a1450865274106246d0d0296a1d6807b88e, shard data/train-00000-of-00012). Licence:
-  CC BY 4.0 (https://creativecommons.org/licenses/by/4.0/).
+  CC BY 4.0 (https://creativecommons.org/licenses/by/4.0/). Its dataset card also asks users to
+  respect the licence of each repository an instance is based on, and says that use of the model
+  outputs it contains must comply with the Llama 3.1 Community License. Whether either note applies
+  to a frequency-ranked list of token ids is not settled; we record them here so you can judge.
 - Other sources (permissive licences; listed for completeness): HuggingFaceH4/ultrachat_200k (MIT),
   llm-jp/oasst2-33k-ja (Apache-2.0), open-thoughts/OpenThoughts-114k (Apache-2.0),
   NousResearch/hermes-function-calling-v1 (Apache-2.0), and the source trees of python/cpython

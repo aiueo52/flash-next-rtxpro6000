@@ -134,7 +134,8 @@ unit:
 
 The rejection-sampling package did **not** pass the adoption rule we set before measuring it: code-edit
 stayed unresolved. We shipped it anyway for the prose and agent gains (+6 to +10 %). Turn it off with
-`SGLANG_OPT_SPEC_SPARSE_RS=0`. `w16` has run the new build only in single-prompt smokes (`w4` is in the table below).
+`SGLANG_OPT_SPEC_SPARSE_RS=0` (with `launch/as-measured/serve-fast.sh` also set `SGLANG_RS_BLOCK_VERIFY=0`,
+or the server refuses to start). `w16` has run the new build only in single-prompt smokes (`w4` is in the table below).
 
 Absolute throughput of the shipped build, measured on 2026-10-06 with the 32 held-out prompts of the
 September study (8 per workload, thinking on, one request at a time, one server start per row, launched the
@@ -257,7 +258,9 @@ build its venv, `patches/flashinfer/apply.sh`, download the NVFP4 checkpoint, us
   conservative test of the single-request setting that the speed numbers use, and quality with thinking
   enabled was not measured. Set `PRUNE_TAU=0` to turn it off.
 - Single-user oriented: memory fractions and state-slot counts are sized for one request at a time on
-  a GPU that also runs a desktop. Throughput with concurrent requests was not optimised.
+  a GPU that also runs a desktop. Throughput with concurrent requests was not optimised, and three known
+  issues that only matter with several running requests or other callers are listed in
+  [`docs/optimizations.md`](docs/optimizations.md) §H7.
 - The baseline row was measured with the harness's recommended sampling (temperature 0.2–0.7), the
   other rows greedy.
 - Known issue: two unit tests of the rejected `NGRAM_CHAIN` drafter fail after a later logging change
@@ -274,7 +277,7 @@ build its venv, `patches/flashinfer/apply.sh`, download the NVFP4 checkpoint, us
 | `bench/` | the benchmark / profiling harness (`fnbench`), synthetic workloads, analysis and experiment scripts |
 | `kernels/` | readable snapshots of our Triton kernels + micro-benchmarks |
 | `sim/` | offline n-gram acceptance simulator (no corpora) |
-| `tokenmaps/` | how to build a reduced draft vocabulary; the scripts actually used; `public/` = a 49,152-token map built only from public data, with its sources and build scripts (CC BY-SA 4.0) |
+| `tokenmaps/` | how to build a reduced draft vocabulary; the scripts actually used; `public/` = a 49,152-token map built only from public data, with its sources and build scripts (map and sources file CC BY-SA 4.0, scripts Apache-2.0) |
 | `mtp-train/` | MTP draft-head fine-tuning pipeline: dump client, corpus readers, self-generation, trainer, renewal evaluator, write-back (no data or weights) |
 | `docs/` | optimisations, rejected experiments, roofline, measurement method, timeline, reproduction; `lab-notes/` = the original engineering logs |
 

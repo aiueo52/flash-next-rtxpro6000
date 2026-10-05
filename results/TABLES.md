@@ -112,8 +112,8 @@ sessions carry roughly ±10 % desktop-compositor noise (see `docs/measurement.md
 
 A = the 2026-09-08 production code with every 2026-10 switch off; B = RT1 + SV1 + SV2 + FG1 + DG1 + the RQ2
 u2h FlashInfer build (min_p filtering off in both arms; see `docs/optimizations.md`). Profile `wa`, 16 prompts
-(4 per workload, `bench/prompts/`), one request each per arm and mode, 8 server starts in the order
-A1 B1 B2 A2 B3 A3 A4 B4. The effect sizes with confidence intervals come from `bench/stats/ancova_ab.py`
+(the first 4 per workload of `bench/workloads/sets/*-v1`), one request each per arm and mode, 8 server starts in the order
+A1 B1 B2 A2 B3 A3 A4 B4. The effect sizes with confidence intervals come from `bench/bench/stats/ancova_ab.py`
 (`runs-1002/stack8/ancova8.log`); the t/s cells below are plain means and move by several percent between
 server starts of the same arm. Cells: mean t/s / mean acceptance.
 

@@ -88,7 +88,7 @@ def main():
             print(f"  {name:9s} B effect {pct(g):+6.2f}%  [{pct(g - tq * se):+6.2f} .. {pct(g + tq * se):+6.2f}]"
                   f"  resid sd {100 * np.sqrt(s2):.2f}%  clock elasticity {beta[-3]:+.2f} (se {se_clock:.2f})")
             Xn = np.column_stack(cols + [clock_col])
-            rn = y - Xn @ np.linalg.lstsq(Xn, y, rcond=None)[0]
+            rn = y - Xn @ beta[:len(cols) + 1]  # joint-fit nuisance terms (see ancova_ab.py)
             adj = {lab: pct(np.mean([rn[i] for i in range(len(rs)) if rs[i][0] == lab])) for lab in labels}
             print(f"  {'':9s} arm means (%): " + "  ".join(f"{lab} {adj[lab]:+.2f}" for lab in labels))
             if len(labels) >= 5:

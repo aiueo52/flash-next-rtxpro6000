@@ -148,7 +148,8 @@ python3.12 -m venv .venv && .venv/bin/pip install -r requirements.txt
   copying your stripped files next to them (`results/strip_runs.py in.jsonl out.jsonl`).
 - For A/B decisions use the protocol in `measurement.md` (fresh server per arm, ABBA, 8 prompts per
   domain, `bench/bench/stats/paired_ab.py`), not single runs. The 2026-10 round used 8 server starts and
-  `bench/bench/stats/ancova_ab.py` (`measurement.md` §9).
+  `bench/bench/stats/ancova_ab.py` (`measurement.md` §9); the analysis scripts need `numpy` and `scipy`
+  (`pip install numpy scipy`), which `bench/requirements.txt` does not install.
 - `--sampling lmstudio` sends LM Studio's default sampler (temperature 0.8, top_p 0.95, top_k 40,
   min_p 0.05). Measure both modes: several 2026-10 changes act only on sampling requests.
 

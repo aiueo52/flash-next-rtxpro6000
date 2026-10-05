@@ -69,9 +69,12 @@ def main():
                               ("ms/step|a", np.log([r[6] for r in rs]), unit_cols + slope_cols)):
             beta, s2, se, dof = fit(y, cols, pos, isb)
             g, tq = beta[-1], stats.t.ppf(0.975, dof)
-            # covariate-adjusted arm means: residual of the fit without arm terms, averaged per arm
+            # covariate-adjusted arm means: y minus the nuisance terms (prompt intercepts, acceptance slopes) of the
+            # joint fit, averaged per arm. (Before 2026-10-06 the nuisance terms were refitted without drift and B,
+            # so a B effect correlated with acceptance leaked into the slopes; the logs in results/runs-1002 were
+            # made that way. Arm-level B effects move by at most 0.35 points, see docs/measurement.md section 9.)
             Xn = np.column_stack(cols)
-            rn = y - Xn @ np.linalg.lstsq(Xn, y, rcond=None)[0]
+            rn = y - Xn @ beta[:len(cols)]
             adj = {lab: pct(np.mean([rn[i] for i in range(len(rs)) if rs[i][0] == lab])) for lab in labels}
             extra = ("  slopes " + " ".join(f"{beta[len(units) + i]:.2f}" for i in range(len(wls)))
                      if name == "ms/step|a" else "")

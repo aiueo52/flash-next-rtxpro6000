@@ -319,6 +319,13 @@ stack8/exact/`, hashes only). Bit-exact changes are therefore checked at kernel 
 reference on real shapes), as in §2, and rejection-sampling changes by statistics on the GPU: accept@0 against
 Σ min(p, q), and chi-square / Fisher tests on the output distribution per position.
 
+**Arm-level adjusted means (correction, 2026-10-06).** Until 2026-10-06 `ancova_ab.py` computed the arm means
+by refitting the nuisance terms (prompt intercepts, and for `ms/step|a` the acceptance slopes) without drift and
+B. When B changes acceptance, part of its effect then leaks into the slopes. The script now subtracts the
+joint-fit nuisance terms. Rerunning the corrected script on the stripped files moves the arm-level B effects of
+`stack8/`, `st1/` and `xa1-st1/` by at most 0.35 percentage points (largest: stack greedy `ms/step|a` −7.57 % →
+−7.92 %). No conclusion changes. The logs in `results/runs-1002/` are from the old version.
+
 **Pre-registered rules.** Each A/B's adoption rule (which CI must exclude what, per mode and workload) was
 written before the run. Where a candidate failed its rule and shipped anyway (the RS package, code-edit
 unresolved), the docs say so.

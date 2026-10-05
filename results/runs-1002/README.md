@@ -30,4 +30,5 @@ What was removed before publishing (`../strip_runs.py` and a path rewrite):
 
 The `paired-*.json` files record sha256 sums of the *unstripped* run files they were computed from, so
 those sums do not match the files here. The numbers in them are unchanged; `bench/bench/stats/ancova_ab.py`
-on the stripped files reproduces the logged results (checked for `stack8/`).
+on the stripped files reproduced the logged results (checked for `stack8/`); since its 2026-10-06
+correction the arm-level lines differ slightly (at most 0.35 points, `docs/measurement.md` §9).
