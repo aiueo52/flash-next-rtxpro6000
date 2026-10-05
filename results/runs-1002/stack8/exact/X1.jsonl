@@ -1,0 +1,8 @@
+{"workload": "code-edit.txt", "repeat": 0, "tokens": 2048, "sha": "878a25b10a734b2c"}
+{"workload": "prose-en.txt", "repeat": 0, "tokens": 2048, "sha": "24389b293064322b"}
+{"workload": "prose-ja.txt", "repeat": 0, "tokens": 2048, "sha": "e61d76b9abc4f602"}
+{"workload": "agent-loop.txt", "repeat": 0, "tokens": 2048, "sha": "b9f6175ac1169efe"}
+{"workload": "code-edit.txt", "repeat": 1, "tokens": 2048, "sha": "5bd8aaffae4ad7fd"}
+{"workload": "prose-en.txt", "repeat": 1, "tokens": 2048, "sha": "9c4bdd89a8e78ae7"}
+{"workload": "prose-ja.txt", "repeat": 1, "tokens": 1957, "sha": "691df18338313505"}
+{"workload": "agent-loop.txt", "repeat": 1, "tokens": 2048, "sha": "b471a0c6ffdc4db2"}

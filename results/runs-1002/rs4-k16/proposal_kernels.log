@@ -1,0 +1,9 @@
+== code-edit
+B: 4 dirs  draft_partial_topk n=616 med=8.58  draft_finalize n=616 med=12.29  chain_sampling_sparse n=80 med=8.74  sparse_target_probs n=80 med=2.05  proposal/verify 146.0 us
+K16: 1 dirs  draft_partial_topk n=300 med=5.04  draft_finalize n=300 med=4.10  chain_sampling_sparse n=20 med=6.58  sparse_target_probs n=20 med=2.26  proposal/verify 64.0 us
+== prose-en
+B: 4 dirs  draft_partial_topk n=560 med=8.54  draft_finalize n=560 med=12.22  chain_sampling_sparse n=80 med=9.57  sparse_target_probs n=80 med=2.08  proposal/verify 145.4 us
+K16: 1 dirs  draft_partial_topk n=300 med=4.93  draft_finalize n=300 med=4.03  chain_sampling_sparse n=20 med=6.08  sparse_target_probs n=20 med=2.14  proposal/verify 62.7 us
+== g-code-edit
+B: 4 dirs  draft_partial_topk n=560 med=1.82  draft_finalize n=560 med=4.58  chain_sampling_sparse n=0 med=0.00  sparse_target_probs n=0 med=0.00  proposal/verify 44.8 us
+K16: 1 dirs  draft_partial_topk n=140 med=1.50  draft_finalize n=140 med=2.94  chain_sampling_sparse n=0 med=0.00  sparse_target_probs n=0 med=0.00  proposal/verify 31.1 us

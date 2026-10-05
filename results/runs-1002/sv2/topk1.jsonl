@@ -1,0 +1,200 @@
+{"k": 64, "n": 1, "mode": "randn", "variant": "torch", "errors": [], "graph": 55.49, "queued": 71.02, "sync": 246.17}
+{"k": 64, "n": 1, "mode": "randn", "variant": "triton", "errors": [], "graph": 46.97, "queued": 60.49, "sync": 102.54}
+{"k": 64, "n": 1, "mode": "randn", "variant": "fi_sorted", "errors": [], "graph": 30.19, "queued": 44.3, "sync": 85.41}
+{"k": 64, "n": 1, "mode": "randn", "variant": "fi_det_sorted", "errors": [], "graph": 27.53, "queued": 41.08, "sync": 156.93}
+{"k": 64, "n": 1, "mode": "randn", "variant": "fi_unsorted", "errors": [], "graph": 22.53, "queued": 36.01, "sync": 194.13}
+{"k": 64, "n": 1, "mode": "peaked", "variant": "torch", "errors": [], "graph": 55.39, "queued": 71.84, "sync": 275.98}
+{"k": 64, "n": 1, "mode": "peaked", "variant": "triton", "errors": [], "graph": 46.98, "queued": 60.5, "sync": 255.36}
+{"k": 64, "n": 1, "mode": "peaked", "variant": "fi_sorted", "errors": [], "graph": 30.2, "queued": 44.41, "sync": 221.96}
+{"k": 64, "n": 1, "mode": "peaked", "variant": "fi_det_sorted", "errors": [], "graph": 27.54, "queued": 40.92, "sync": 54.65}
+{"k": 64, "n": 1, "mode": "peaked", "variant": "fi_unsorted", "errors": [], "graph": 22.73, "queued": 36.16, "sync": 199.26}
+{"k": 64, "n": 1, "mode": "ties", "variant": "torch", "errors": []}
+{"k": 64, "n": 1, "mode": "ties", "variant": "triton", "errors": []}
+{"k": 64, "n": 1, "mode": "ties", "variant": "fi_sorted", "errors": []}
+{"k": 64, "n": 1, "mode": "ties", "variant": "fi_det_sorted", "errors": []}
+{"k": 64, "n": 1, "mode": "ties", "variant": "fi_unsorted", "errors": []}
+{"k": 64, "n": 1, "mode": "masked", "variant": "torch", "errors": []}
+{"k": 64, "n": 1, "mode": "masked", "variant": "triton", "errors": []}
+{"k": 64, "n": 1, "mode": "masked", "variant": "fi_sorted", "errors": []}
+{"k": 64, "n": 1, "mode": "masked", "variant": "fi_det_sorted", "errors": []}
+{"k": 64, "n": 1, "mode": "masked", "variant": "fi_unsorted", "errors": []}
+{"k": 64, "n": 4, "mode": "randn", "variant": "torch", "errors": [], "graph": 63.58, "queued": 89.62, "sync": 269.96}
+{"k": 64, "n": 4, "mode": "randn", "variant": "triton", "errors": [], "graph": 57.25, "queued": 71.19, "sync": 175.78}
+{"k": 64, "n": 4, "mode": "randn", "variant": "fi_sorted", "errors": [], "graph": 31.82, "queued": 45.22, "sync": 126.63}
+{"k": 64, "n": 4, "mode": "randn", "variant": "fi_det_sorted", "errors": [], "graph": 28.03, "queued": 42.19, "sync": 75.89}
+{"k": 64, "n": 4, "mode": "randn", "variant": "fi_unsorted", "errors": [], "graph": 23.12, "queued": 37.19, "sync": 97.08}
+{"k": 64, "n": 4, "mode": "peaked", "variant": "torch", "errors": [], "graph": 63.58, "queued": 79.23, "sync": 257.43}
+{"k": 64, "n": 4, "mode": "peaked", "variant": "triton", "errors": [], "graph": 57.24, "queued": 70.99, "sync": 246.09}
+{"k": 64, "n": 4, "mode": "peaked", "variant": "fi_sorted", "errors": [], "graph": 31.83, "queued": 46.86, "sync": 164.93}
+{"k": 64, "n": 4, "mode": "peaked", "variant": "fi_det_sorted", "errors": [], "graph": 28.05, "queued": 42.15, "sync": 149.38}
+{"k": 64, "n": 4, "mode": "peaked", "variant": "fi_unsorted", "errors": [], "graph": 23.04, "queued": 37.24, "sync": 134.64}
+{"k": 64, "n": 4, "mode": "ties", "variant": "torch", "errors": []}
+{"k": 64, "n": 4, "mode": "ties", "variant": "triton", "errors": []}
+{"k": 64, "n": 4, "mode": "ties", "variant": "fi_sorted", "errors": []}
+{"k": 64, "n": 4, "mode": "ties", "variant": "fi_det_sorted", "errors": []}
+{"k": 64, "n": 4, "mode": "ties", "variant": "fi_unsorted", "errors": []}
+{"k": 64, "n": 4, "mode": "masked", "variant": "torch", "errors": []}
+{"k": 64, "n": 4, "mode": "masked", "variant": "triton", "errors": []}
+{"k": 64, "n": 4, "mode": "masked", "variant": "fi_sorted", "errors": []}
+{"k": 64, "n": 4, "mode": "masked", "variant": "fi_det_sorted", "errors": []}
+{"k": 64, "n": 4, "mode": "masked", "variant": "fi_unsorted", "errors": []}
+{"k": 64, "n": 8, "mode": "randn", "variant": "torch", "errors": [], "graph": 60.94, "queued": 79.18, "sync": 145.69}
+{"k": 64, "n": 8, "mode": "randn", "variant": "triton", "errors": [], "graph": 70.01, "queued": 82.97, "sync": 207.64}
+{"k": 64, "n": 8, "mode": "randn", "variant": "fi_sorted", "errors": [], "graph": 33.49, "queued": 49.53, "sync": 146.35}
+{"k": 64, "n": 8, "mode": "randn", "variant": "fi_det_sorted", "errors": [], "graph": 28.86, "queued": 40.89, "sync": 152.3}
+{"k": 64, "n": 8, "mode": "randn", "variant": "fi_unsorted", "errors": [], "graph": 23.78, "queued": 38.53, "sync": 172.74}
+{"k": 64, "n": 8, "mode": "peaked", "variant": "torch", "errors": [], "graph": 61.1, "queued": 76.45, "sync": 265.28}
+{"k": 64, "n": 8, "mode": "peaked", "variant": "triton", "errors": [], "graph": 70.03, "queued": 86.58, "sync": 213.08}
+{"k": 64, "n": 8, "mode": "peaked", "variant": "fi_sorted", "errors": [], "graph": 33.5, "queued": 49.33, "sync": 259.98}
+{"k": 64, "n": 8, "mode": "peaked", "variant": "fi_det_sorted", "errors": [], "graph": 28.95, "queued": 41.8, "sync": 165.74}
+{"k": 64, "n": 8, "mode": "peaked", "variant": "fi_unsorted", "errors": [], "graph": 23.75, "queued": 38.72, "sync": 118.42}
+{"k": 64, "n": 8, "mode": "ties", "variant": "torch", "errors": []}
+{"k": 64, "n": 8, "mode": "ties", "variant": "triton", "errors": []}
+{"k": 64, "n": 8, "mode": "ties", "variant": "fi_sorted", "errors": []}
+{"k": 64, "n": 8, "mode": "ties", "variant": "fi_det_sorted", "errors": []}
+{"k": 64, "n": 8, "mode": "ties", "variant": "fi_unsorted", "errors": []}
+{"k": 64, "n": 8, "mode": "masked", "variant": "torch", "errors": []}
+{"k": 64, "n": 8, "mode": "masked", "variant": "triton", "errors": []}
+{"k": 64, "n": 8, "mode": "masked", "variant": "fi_sorted", "errors": []}
+{"k": 64, "n": 8, "mode": "masked", "variant": "fi_det_sorted", "errors": []}
+{"k": 64, "n": 8, "mode": "masked", "variant": "fi_unsorted", "errors": []}
+{"k": 64, "n": 16, "mode": "randn", "variant": "torch", "errors": [], "graph": 68.61, "queued": 84.8, "sync": 295.7}
+{"k": 64, "n": 16, "mode": "randn", "variant": "triton", "errors": [], "graph": 130.23, "queued": 145.38, "sync": 319.46}
+{"k": 64, "n": 16, "mode": "randn", "variant": "fi_sorted", "errors": [], "graph": 36.75, "queued": 49.85, "sync": 120.04}
+{"k": 64, "n": 16, "mode": "randn", "variant": "fi_det_sorted", "errors": [], "graph": 30.42, "queued": 47.38, "sync": 97.7}
+{"k": 64, "n": 16, "mode": "randn", "variant": "fi_unsorted", "errors": [], "graph": 25.19, "queued": 42.01, "sync": 59.37}
+{"k": 64, "n": 16, "mode": "peaked", "variant": "torch", "errors": [], "graph": 68.38, "queued": 84.51, "sync": 186.38}
+{"k": 64, "n": 16, "mode": "peaked", "variant": "triton", "errors": [], "graph": 136.95, "queued": 144.95, "sync": 329.96}
+{"k": 64, "n": 16, "mode": "peaked", "variant": "fi_sorted", "errors": [], "graph": 36.74, "queued": 50.29, "sync": 133.99}
+{"k": 64, "n": 16, "mode": "peaked", "variant": "fi_det_sorted", "errors": [], "graph": 30.52, "queued": 46.65, "sync": 74.71}
+{"k": 64, "n": 16, "mode": "peaked", "variant": "fi_unsorted", "errors": [], "graph": 25.18, "queued": 49.13, "sync": 55.39}
+{"k": 64, "n": 16, "mode": "ties", "variant": "torch", "errors": []}
+{"k": 64, "n": 16, "mode": "ties", "variant": "triton", "errors": []}
+{"k": 64, "n": 16, "mode": "ties", "variant": "fi_sorted", "errors": []}
+{"k": 64, "n": 16, "mode": "ties", "variant": "fi_det_sorted", "errors": []}
+{"k": 64, "n": 16, "mode": "ties", "variant": "fi_unsorted", "errors": []}
+{"k": 64, "n": 16, "mode": "masked", "variant": "torch", "errors": []}
+{"k": 64, "n": 16, "mode": "masked", "variant": "triton", "errors": []}
+{"k": 64, "n": 16, "mode": "masked", "variant": "fi_sorted", "errors": []}
+{"k": 64, "n": 16, "mode": "masked", "variant": "fi_det_sorted", "errors": []}
+{"k": 64, "n": 16, "mode": "masked", "variant": "fi_unsorted", "errors": []}
+{"k": 64, "n": 32, "mode": "randn", "variant": "torch", "errors": [], "graph": 90.0, "queued": 109.44, "sync": 259.95}
+{"k": 64, "n": 32, "mode": "randn", "variant": "triton", "errors": [], "graph": 201.04, "queued": 219.92, "sync": 364.28}
+{"k": 64, "n": 32, "mode": "randn", "variant": "fi_sorted", "errors": [], "graph": 57.44, "queued": 74.93, "sync": 185.87}
+{"k": 64, "n": 32, "mode": "randn", "variant": "fi_det_sorted", "errors": [], "graph": 51.82, "queued": 69.05, "sync": 185.11}
+{"k": 64, "n": 32, "mode": "randn", "variant": "fi_unsorted", "errors": [], "graph": 45.96, "queued": 62.95, "sync": 228.65}
+{"k": 64, "n": 32, "mode": "peaked", "variant": "torch", "errors": [], "graph": 89.68, "queued": 108.3, "sync": 278.56}
+{"k": 64, "n": 32, "mode": "peaked", "variant": "triton", "errors": [], "graph": 198.85, "queued": 212.25, "sync": 351.87}
+{"k": 64, "n": 32, "mode": "peaked", "variant": "fi_sorted", "errors": [], "graph": 57.35, "queued": 80.87, "sync": 194.93}
+{"k": 64, "n": 32, "mode": "peaked", "variant": "fi_det_sorted", "errors": [], "graph": 51.73, "queued": 72.98, "sync": 121.62}
+{"k": 64, "n": 32, "mode": "peaked", "variant": "fi_unsorted", "errors": [], "graph": 45.87, "queued": 63.09, "sync": 90.83}
+{"k": 64, "n": 32, "mode": "ties", "variant": "torch", "errors": []}
+{"k": 64, "n": 32, "mode": "ties", "variant": "triton", "errors": []}
+{"k": 64, "n": 32, "mode": "ties", "variant": "fi_sorted", "errors": []}
+{"k": 64, "n": 32, "mode": "ties", "variant": "fi_det_sorted", "errors": []}
+{"k": 64, "n": 32, "mode": "ties", "variant": "fi_unsorted", "errors": []}
+{"k": 64, "n": 32, "mode": "masked", "variant": "torch", "errors": []}
+{"k": 64, "n": 32, "mode": "masked", "variant": "triton", "errors": []}
+{"k": 64, "n": 32, "mode": "masked", "variant": "fi_sorted", "errors": []}
+{"k": 64, "n": 32, "mode": "masked", "variant": "fi_det_sorted", "errors": []}
+{"k": 64, "n": 32, "mode": "masked", "variant": "fi_unsorted", "errors": []}
+{"k": 128, "n": 1, "mode": "randn", "variant": "torch", "errors": [], "graph": 55.3, "queued": 81.38, "sync": 200.8}
+{"k": 128, "n": 1, "mode": "randn", "variant": "triton", "errors": [], "graph": 65.63, "queued": 85.53, "sync": 142.18}
+{"k": 128, "n": 1, "mode": "randn", "variant": "fi_sorted", "errors": [], "graph": 30.73, "queued": 48.77, "sync": 61.81}
+{"k": 128, "n": 1, "mode": "randn", "variant": "fi_det_sorted", "errors": [], "graph": 27.56, "queued": 41.23, "sync": 83.67}
+{"k": 128, "n": 1, "mode": "randn", "variant": "fi_unsorted", "errors": [], "graph": 22.63, "queued": 43.94, "sync": 48.68}
+{"k": 128, "n": 1, "mode": "peaked", "variant": "torch", "errors": [], "graph": 55.27, "queued": 82.73, "sync": 121.13}
+{"k": 128, "n": 1, "mode": "peaked", "variant": "triton", "errors": [], "graph": 65.55, "queued": 83.16, "sync": 124.39}
+{"k": 128, "n": 1, "mode": "peaked", "variant": "fi_sorted", "errors": [], "graph": 30.8, "queued": 48.15, "sync": 65.05}
+{"k": 128, "n": 1, "mode": "peaked", "variant": "fi_det_sorted", "errors": [], "graph": 27.56, "queued": 41.13, "sync": 47.52}
+{"k": 128, "n": 1, "mode": "peaked", "variant": "fi_unsorted", "errors": [], "graph": 22.79, "queued": 36.12, "sync": 41.99}
+{"k": 128, "n": 1, "mode": "ties", "variant": "torch", "errors": []}
+{"k": 128, "n": 1, "mode": "ties", "variant": "triton", "errors": []}
+{"k": 128, "n": 1, "mode": "ties", "variant": "fi_sorted", "errors": []}
+{"k": 128, "n": 1, "mode": "ties", "variant": "fi_det_sorted", "errors": []}
+{"k": 128, "n": 1, "mode": "ties", "variant": "fi_unsorted", "errors": []}
+{"k": 128, "n": 1, "mode": "masked", "variant": "torch", "errors": []}
+{"k": 128, "n": 1, "mode": "masked", "variant": "triton", "errors": []}
+{"k": 128, "n": 1, "mode": "masked", "variant": "fi_sorted", "errors": []}
+{"k": 128, "n": 1, "mode": "masked", "variant": "fi_det_sorted", "errors": []}
+{"k": 128, "n": 1, "mode": "masked", "variant": "fi_unsorted", "errors": []}
+{"k": 128, "n": 4, "mode": "randn", "variant": "torch", "errors": [], "graph": 63.59, "queued": 78.71, "sync": 141.1}
+{"k": 128, "n": 4, "mode": "randn", "variant": "triton", "errors": [], "graph": 79.19, "queued": 99.03, "sync": 124.08}
+{"k": 128, "n": 4, "mode": "randn", "variant": "fi_sorted", "errors": [], "graph": 33.88, "queued": 48.61, "sync": 73.59}
+{"k": 128, "n": 4, "mode": "randn", "variant": "fi_det_sorted", "errors": [], "graph": 28.68, "queued": 49.69, "sync": 89.41}
+{"k": 128, "n": 4, "mode": "randn", "variant": "fi_unsorted", "errors": [], "graph": 23.75, "queued": 37.45, "sync": 47.67}
+{"k": 128, "n": 4, "mode": "peaked", "variant": "torch", "errors": [], "graph": 63.59, "queued": 88.29, "sync": 141.35}
+{"k": 128, "n": 4, "mode": "peaked", "variant": "triton", "errors": [], "graph": 79.13, "queued": 92.23, "sync": 147.49}
+{"k": 128, "n": 4, "mode": "peaked", "variant": "fi_sorted", "errors": [], "graph": 33.79, "queued": 48.57, "sync": 60.1}
+{"k": 128, "n": 4, "mode": "peaked", "variant": "fi_det_sorted", "errors": [], "graph": 28.66, "queued": 42.78, "sync": 67.11}
+{"k": 128, "n": 4, "mode": "peaked", "variant": "fi_unsorted", "errors": [], "graph": 23.66, "queued": 37.55, "sync": 45.88}
+{"k": 128, "n": 4, "mode": "ties", "variant": "torch", "errors": []}
+{"k": 128, "n": 4, "mode": "ties", "variant": "triton", "errors": []}
+{"k": 128, "n": 4, "mode": "ties", "variant": "fi_sorted", "errors": []}
+{"k": 128, "n": 4, "mode": "ties", "variant": "fi_det_sorted", "errors": []}
+{"k": 128, "n": 4, "mode": "ties", "variant": "fi_unsorted", "errors": []}
+{"k": 128, "n": 4, "mode": "masked", "variant": "torch", "errors": []}
+{"k": 128, "n": 4, "mode": "masked", "variant": "triton", "errors": []}
+{"k": 128, "n": 4, "mode": "masked", "variant": "fi_sorted", "errors": []}
+{"k": 128, "n": 4, "mode": "masked", "variant": "fi_det_sorted", "errors": []}
+{"k": 128, "n": 4, "mode": "masked", "variant": "fi_unsorted", "errors": []}
+{"k": 128, "n": 8, "mode": "randn", "variant": "torch", "errors": [], "graph": 61.22, "queued": 78.93, "sync": 201.84}
+{"k": 128, "n": 8, "mode": "randn", "variant": "triton", "errors": [], "graph": 103.21, "queued": 119.22, "sync": 235.17}
+{"k": 128, "n": 8, "mode": "randn", "variant": "fi_sorted", "errors": [], "graph": 35.73, "queued": 54.34, "sync": 169.71}
+{"k": 128, "n": 8, "mode": "randn", "variant": "fi_det_sorted", "errors": [], "graph": 29.06, "queued": 44.3, "sync": 60.04}
+{"k": 128, "n": 8, "mode": "randn", "variant": "fi_unsorted", "errors": [], "graph": 23.97, "queued": 38.78, "sync": 54.05}
+{"k": 128, "n": 8, "mode": "peaked", "variant": "torch", "errors": [], "graph": 61.42, "queued": 80.04, "sync": 129.47}
+{"k": 128, "n": 8, "mode": "peaked", "variant": "triton", "errors": [], "graph": 103.22, "queued": 119.51, "sync": 184.16}
+{"k": 128, "n": 8, "mode": "peaked", "variant": "fi_sorted", "errors": [], "graph": 35.73, "queued": 51.68, "sync": 86.12}
+{"k": 128, "n": 8, "mode": "peaked", "variant": "fi_det_sorted", "errors": [], "graph": 29.08, "queued": 50.25, "sync": 71.9}
+{"k": 128, "n": 8, "mode": "peaked", "variant": "fi_unsorted", "errors": [], "graph": 23.83, "queued": 43.12, "sync": 36.95}
+{"k": 128, "n": 8, "mode": "ties", "variant": "torch", "errors": []}
+{"k": 128, "n": 8, "mode": "ties", "variant": "triton", "errors": []}
+{"k": 128, "n": 8, "mode": "ties", "variant": "fi_sorted", "errors": []}
+{"k": 128, "n": 8, "mode": "ties", "variant": "fi_det_sorted", "errors": []}
+{"k": 128, "n": 8, "mode": "ties", "variant": "fi_unsorted", "errors": []}
+{"k": 128, "n": 8, "mode": "masked", "variant": "torch", "errors": []}
+{"k": 128, "n": 8, "mode": "masked", "variant": "triton", "errors": []}
+{"k": 128, "n": 8, "mode": "masked", "variant": "fi_sorted", "errors": []}
+{"k": 128, "n": 8, "mode": "masked", "variant": "fi_det_sorted", "errors": []}
+{"k": 128, "n": 8, "mode": "masked", "variant": "fi_unsorted", "errors": []}
+{"k": 128, "n": 16, "mode": "randn", "variant": "torch", "errors": [], "graph": 69.01, "queued": 84.91, "sync": 186.56}
+{"k": 128, "n": 16, "mode": "randn", "variant": "triton", "errors": [], "graph": 176.67, "queued": 198.21, "sync": 370.91}
+{"k": 128, "n": 16, "mode": "randn", "variant": "fi_sorted", "errors": [], "graph": 37.26, "queued": 50.34, "sync": 92.39}
+{"k": 128, "n": 16, "mode": "randn", "variant": "fi_det_sorted", "errors": [], "graph": 30.42, "queued": 47.68, "sync": 84.16}
+{"k": 128, "n": 16, "mode": "randn", "variant": "fi_unsorted", "errors": [], "graph": 25.28, "queued": 42.47, "sync": 97.24}
+{"k": 128, "n": 16, "mode": "peaked", "variant": "torch", "errors": [], "graph": 69.31, "queued": 86.79, "sync": 213.81}
+{"k": 128, "n": 16, "mode": "peaked", "variant": "triton", "errors": [], "graph": 171.16, "queued": 183.94, "sync": 365.07}
+{"k": 128, "n": 16, "mode": "peaked", "variant": "fi_sorted", "errors": [], "graph": 37.36, "queued": 62.99, "sync": 195.78}
+{"k": 128, "n": 16, "mode": "peaked", "variant": "fi_det_sorted", "errors": [], "graph": 30.51, "queued": 47.64, "sync": 137.0}
+{"k": 128, "n": 16, "mode": "peaked", "variant": "fi_unsorted", "errors": [], "graph": 25.3, "queued": 42.21, "sync": 66.67}
+{"k": 128, "n": 16, "mode": "ties", "variant": "torch", "errors": []}
+{"k": 128, "n": 16, "mode": "ties", "variant": "triton", "errors": []}
+{"k": 128, "n": 16, "mode": "ties", "variant": "fi_sorted", "errors": []}
+{"k": 128, "n": 16, "mode": "ties", "variant": "fi_det_sorted", "errors": []}
+{"k": 128, "n": 16, "mode": "ties", "variant": "fi_unsorted", "errors": []}
+{"k": 128, "n": 16, "mode": "masked", "variant": "torch", "errors": []}
+{"k": 128, "n": 16, "mode": "masked", "variant": "triton", "errors": []}
+{"k": 128, "n": 16, "mode": "masked", "variant": "fi_sorted", "errors": []}
+{"k": 128, "n": 16, "mode": "masked", "variant": "fi_det_sorted", "errors": []}
+{"k": 128, "n": 16, "mode": "masked", "variant": "fi_unsorted", "errors": []}
+{"k": 128, "n": 32, "mode": "randn", "variant": "torch", "errors": [], "graph": 90.62, "queued": 110.67, "sync": 197.69}
+{"k": 128, "n": 32, "mode": "randn", "variant": "triton", "errors": [], "graph": 282.65, "queued": 292.36, "sync": 470.61}
+{"k": 128, "n": 32, "mode": "randn", "variant": "fi_sorted", "errors": [], "graph": 58.03, "queued": 75.75, "sync": 220.64}
+{"k": 128, "n": 32, "mode": "randn", "variant": "fi_det_sorted", "errors": [], "graph": 51.98, "queued": 68.64, "sync": 248.09}
+{"k": 128, "n": 32, "mode": "randn", "variant": "fi_unsorted", "errors": [], "graph": 45.99, "queued": 63.0, "sync": 269.76}
+{"k": 128, "n": 32, "mode": "peaked", "variant": "torch", "errors": [], "graph": 90.29, "queued": 110.1, "sync": 303.05}
+{"k": 128, "n": 32, "mode": "peaked", "variant": "triton", "errors": [], "graph": 275.74, "queued": 292.27, "sync": 470.08}
+{"k": 128, "n": 32, "mode": "peaked", "variant": "fi_sorted", "errors": [], "graph": 58.04, "queued": 75.63, "sync": 165.84}
+{"k": 128, "n": 32, "mode": "peaked", "variant": "fi_det_sorted", "errors": [], "graph": 51.9, "queued": 68.37, "sync": 271.76}
+{"k": 128, "n": 32, "mode": "peaked", "variant": "fi_unsorted", "errors": [], "graph": 45.96, "queued": 63.2, "sync": 253.1}
+{"k": 128, "n": 32, "mode": "ties", "variant": "torch", "errors": []}
+{"k": 128, "n": 32, "mode": "ties", "variant": "triton", "errors": []}
+{"k": 128, "n": 32, "mode": "ties", "variant": "fi_sorted", "errors": []}
+{"k": 128, "n": 32, "mode": "ties", "variant": "fi_det_sorted", "errors": []}
+{"k": 128, "n": 32, "mode": "ties", "variant": "fi_unsorted", "errors": []}
+{"k": 128, "n": 32, "mode": "masked", "variant": "torch", "errors": []}
+{"k": 128, "n": 32, "mode": "masked", "variant": "triton", "errors": []}
+{"k": 128, "n": 32, "mode": "masked", "variant": "fi_sorted", "errors": []}
+{"k": 128, "n": 32, "mode": "masked", "variant": "fi_det_sorted", "errors": []}
+{"k": 128, "n": 32, "mode": "masked", "variant": "fi_unsorted", "errors": []}

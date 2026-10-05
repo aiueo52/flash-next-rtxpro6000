@@ -1,0 +1,78 @@
+Excluded dump rows: no_window=527; length_mismatch=0
+Caveat: positions j >= 1 use prefixes drawn from RS2's q, not from the alternative q.
+Approximation: s < 1 only sees kept q support; missing tail can cause slightly more top-p cuts.
+IS reweights the complete draft path; zero total weight gives undefined estimates and ESS=0.
+agent-loop: verifies=5986 realised tok/step=3.917307; RS2=3.898348; target-only=3.788089
+  verifies per prompt_id: bn1-agent-loop-01=1888, bn1-agent-loop-02=2242, bn1-agent-loop-03=1856
+  sanity mean E=2.898348 SE=0.026193; mean accept_len=2.917307 SE=0.030635; difference=0.018959 paired SE=0.015542
+  path estimates at RS2 q: realised tok/step=3.917307; E_tok tok/step=3.923043; E_bv tok/step=3.972348
+  BV gain over E_tok=+1.257%; paired SE=0.134% (relative to E_tok tok/step)
+  sanity mean E_tok=2.923043; mean accept_len=2.917307; difference=-0.005736 paired SE=0.011176
+  IS (self-normalised per workload):
+    RS2 (s, theta)=(1.0, 0.0): IS E_tok' tok/step=3.923043; IS E_bv' tok/step=3.972348; ESS=5986.000
+    best pooled E (s, theta)=(0.8, 0.9): IS E_tok' tok/step=3.937782; IS E_bv' tok/step=3.982784; ESS=4897.717
+    best pooled IS E_bv' (s, theta)=(0.7, 0.9): IS E_tok' tok/step=3.947674; IS E_bv' tok/step=3.991169; ESS=4318.728
+  s grid: (1.0, 0.0): 3.898348, (0.9, 0.0): 3.903159, (0.8, 0.0): 3.902680, (0.7, 0.0): 3.899044, (0.6, 0.0): 3.891347, (0.5, 0.0): 3.881220, (0.4, 0.0): 3.866844, (0.3, 0.0): 3.850955
+  theta grid (s=1): (1.0, 0.5): 3.819936, (1.0, 0.6): 3.860141, (1.0, 0.7): 3.881531, (1.0, 0.8): 3.894199, (1.0, 0.9): 3.900284, (1.0, 0.95): 3.898549
+  best (s, theta)=(0.9, 0.95): tok/step=3.903052
+  a_rs: j0=0.823779 (n=5986), j1=0.759719 (n=5986), j2=0.718353 (n=5986), j3=0.693084 (n=4574), j4=0.669333 (n=4574), j5=0.651217 (n=4574), j6=0.621526 (n=4574), j7=n/a
+  a_target_only: j0=0.795859 (n=5986), j1=0.738775 (n=5986), j2=0.702025 (n=5986), j3=0.679970 (n=4574), j4=0.652409 (n=4574), j5=0.637236 (n=4574), j6=0.610424 (n=4574), j7=n/a
+code-edit: verifies=3600 realised tok/step=10.248611; RS2=10.148038; target-only=10.237115
+  verifies per prompt_id: bn1-code-edit-01=1414, bn1-code-edit-02=1140, bn1-code-edit-03=1046
+  sanity mean E=9.148038 SE=0.068188; mean accept_len=9.248611 SE=0.071986; difference=0.100573 paired SE=0.021130
+  path estimates at RS2 q: realised tok/step=10.248611; E_tok tok/step=10.237294; E_bv tok/step=10.249338
+  BV gain over E_tok=+0.118%; paired SE=0.046% (relative to E_tok tok/step)
+  sanity mean E_tok=9.237294; mean accept_len=9.248611; difference=0.011318 paired SE=0.007608
+  IS (self-normalised per workload):
+    RS2 (s, theta)=(1.0, 0.0): IS E_tok' tok/step=10.237294; IS E_bv' tok/step=10.249338; ESS=3600.000
+    best pooled E (s, theta)=(0.8, 0.9): IS E_tok' tok/step=10.334879; IS E_bv' tok/step=10.345633; ESS=3256.072
+    best pooled IS E_bv' (s, theta)=(0.7, 0.9): IS E_tok' tok/step=10.353409; IS E_bv' tok/step=10.361525; ESS=3085.642
+  s grid: (1.0, 0.0): 10.148038, (0.9, 0.0): 10.175299, (0.8, 0.0): 10.191013, (0.7, 0.0): 10.206962, (0.6, 0.0): 10.219842, (0.5, 0.0): 10.229314, (0.4, 0.0): 10.235255, (0.3, 0.0): 10.238803
+  theta grid (s=1): (1.0, 0.5): 10.231829, (1.0, 0.6): 10.237457, (1.0, 0.7): 10.220244, (1.0, 0.8): 10.201907, (1.0, 0.9): 10.167852, (1.0, 0.95): 10.151586
+  best (s, theta)=(0.3, 0.6): tok/step=10.247463
+  a_rs: j0=0.979073 (n=3600), j1=0.961007 (n=3600), j2=0.956247 (n=3600), j3=0.967300 (n=3600), j4=0.953079 (n=3600), j5=0.910863 (n=3600), j6=0.898504 (n=3600), j7=0.875855 (n=3021)
+  a_target_only: j0=0.976328 (n=3600), j1=0.960193 (n=3600), j2=0.957535 (n=3600), j3=0.968401 (n=3600), j4=0.952932 (n=3600), j5=0.911847 (n=3600), j6=0.900020 (n=3600), j7=0.877851 (n=3021)
+prose-en: verifies=7771 realised tok/step=2.373054; RS2=2.358889; target-only=2.207307
+  verifies per prompt_id: bn1-prose-en-01=2492, bn1-prose-en-02=2606, bn1-prose-en-03=2673
+  sanity mean E=1.358889 SE=0.010626; mean accept_len=1.373054 SE=0.014550; difference=0.014165 paired SE=0.009748
+  path estimates at RS2 q: realised tok/step=2.373054; E_tok tok/step=2.357966; E_bv tok/step=2.388057
+  BV gain over E_tok=+1.276%; paired SE=0.135% (relative to E_tok tok/step)
+  sanity mean E_tok=1.357966; mean accept_len=1.373054; difference=0.015087 paired SE=0.007162
+  IS (self-normalised per workload):
+    RS2 (s, theta)=(1.0, 0.0): IS E_tok' tok/step=2.357966; IS E_bv' tok/step=2.388057; ESS=7771.000
+    best pooled E (s, theta)=(0.8, 0.9): IS E_tok' tok/step=2.347723; IS E_bv' tok/step=2.371406; ESS=6562.141
+    best pooled IS E_bv' (s, theta)=(0.7, 0.9): IS E_tok' tok/step=2.343929; IS E_bv' tok/step=2.365988; ESS=5856.967
+  s grid: (1.0, 0.0): 2.358889, (0.9, 0.0): 2.356548, (0.8, 0.0): 2.351650, (0.7, 0.0): 2.342478, (0.6, 0.0): 2.331176, (0.5, 0.0): 2.315638, (0.4, 0.0): 2.296851, (0.3, 0.0): 2.276492
+  theta grid (s=1): (1.0, 0.5): 2.268299, (1.0, 0.6): 2.303577, (1.0, 0.7): 2.328421, (1.0, 0.8): 2.345760, (1.0, 0.9): 2.357087, (1.0, 0.95): 2.358888
+  best (s, theta)=(1.0, 0.95): tok/step=2.358888
+  a_rs: j0=0.685788 (n=7771), j1=0.578027 (n=7771), j2=0.502093 (n=7771), j3=0.610042 (n=320), j4=0.586078 (n=320), j5=0.571624 (n=320), j6=0.513656 (n=320), j7=0.585491 (n=119)
+  a_target_only: j0=0.629417 (n=7771), j1=0.535861 (n=7771), j2=0.464233 (n=7771), j3=0.566482 (n=320), j4=0.559298 (n=320), j5=0.538393 (n=320), j6=0.486526 (n=320), j7=0.539590 (n=119)
+prose-ja: verifies=7366 realised tok/step=2.380668; RS2=2.361033; target-only=2.246911
+  verifies per prompt_id: bn1-prose-ja-01=2475, bn1-prose-ja-02=2479, bn1-prose-ja-03=2412
+  sanity mean E=1.361033 SE=0.011007; mean accept_len=1.380668 SE=0.014349; difference=0.019635 paired SE=0.009124
+  path estimates at RS2 q: realised tok/step=2.380668; E_tok tok/step=2.367544; E_bv tok/step=2.387549
+  BV gain over E_tok=+0.845%; paired SE=0.099% (relative to E_tok tok/step)
+  sanity mean E_tok=1.367544; mean accept_len=1.380668; difference=0.013124 paired SE=0.006463
+  IS (self-normalised per workload):
+    RS2 (s, theta)=(1.0, 0.0): IS E_tok' tok/step=2.367544; IS E_bv' tok/step=2.387549; ESS=7366.000
+    best pooled E (s, theta)=(0.8, 0.9): IS E_tok' tok/step=2.359536; IS E_bv' tok/step=2.375232; ESS=6269.029
+    best pooled IS E_bv' (s, theta)=(0.7, 0.9): IS E_tok' tok/step=2.351778; IS E_bv' tok/step=2.365646; ESS=5671.849
+  s grid: (1.0, 0.0): 2.361033, (0.9, 0.0): 2.360527, (0.8, 0.0): 2.356746, (0.7, 0.0): 2.350153, (0.6, 0.0): 2.341248, (0.5, 0.0): 2.330039, (0.4, 0.0): 2.316534, (0.3, 0.0): 2.300605
+  theta grid (s=1): (1.0, 0.5): 2.294956, (1.0, 0.6): 2.318922, (1.0, 0.7): 2.340019, (1.0, 0.8): 2.351837, (1.0, 0.9): 2.359610, (1.0, 0.95): 2.361208
+  best (s, theta)=(1.0, 0.95): tok/step=2.361208
+  a_rs: j0=0.695159 (n=7366), j1=0.557694 (n=7366), j2=0.514190 (n=7366), j3=0.636115 (n=229), j4=0.701685 (n=229), j5=0.477178 (n=229), j6=0.549907 (n=229), j7=n/a
+  a_target_only: j0=0.656202 (n=7366), j1=0.528418 (n=7366), j2=0.486875 (n=7366), j3=0.603584 (n=229), j4=0.661131 (n=229), j5=0.437869 (n=229), j6=0.466452 (n=229), j7=n/a
+pooled: unweighted mean over 4 workloads
+  path estimates at RS2 q: realised tok/step=4.729910; E_tok tok/step=4.721462; E_bv tok/step=4.749323
+  BV gain over E_tok=+0.590%; paired SE=0.043% (relative to E_tok tok/step)
+  sanity mean E_tok=3.721462; mean accept_len=3.729910; difference=0.008448 paired SE=0.004152
+  IS (self-normalised per workload):
+    RS2 (s, theta)=(1.0, 0.0): IS E_tok' tok/step=4.721462; IS E_bv' tok/step=4.749323; ESS=24723.000
+    best pooled E (s, theta)=(0.8, 0.9): IS E_tok' tok/step=4.744980; IS E_bv' tok/step=4.768764; ESS=20984.960
+    best pooled IS E_bv' (s, theta)=(0.7, 0.9): IS E_tok' tok/step=4.749197; IS E_bv' tok/step=4.771082; ESS=18933.186
+  RS2 (s=1, theta=0): tok/step=4.691577; gain over RS2=+0.000%
+  target-only: tok/step=4.619856; gain over RS2=-1.529%
+  best s-only (s, theta)=(0.8, 0.0): tok/step=4.700522; gain over RS2=+0.191%
+  best product-grid (s, theta)=(0.8, 0.9): tok/step=4.701112; gain over RS2=+0.203%
+CSV: runs/rs2d/rs2d-accept-grid.csv
+Analysis: rows=24723 elapsed=20.873s rows/s=1184.465

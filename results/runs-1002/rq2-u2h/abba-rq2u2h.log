@@ -1,0 +1,123 @@
+[abba-rq1] A1 (prod) queued 13:02:51
+[A1] MemAvailable 183G ok
+[A1] start 13:02:51 mode=prod n=4 wt=/home/user/tools/sglang-rq1 commit=7b4d539f9b env='PYTHONPATH=/home/user/tools/sglang-rq1/python '
+[A1] server up 13:08:03
+[A1] mapped: /home/user/.cache/sglang/.cache/flashinfer/0.6.17/120f/cached_ops/fused_moe_120/fused_moe_120.so
+  => greedy prose-en.txt: median ms/step (unprofiled) 16.80  tok/step 5.26
+  => sampling code-edit.txt: median ms/step (unprofiled) 13.68  tok/step 6.06
+  => greedy code-edit.txt: median ms/step (unprofiled) 18.06  tok/step 8.09
+  => sampling code-edit.txt: median ms/step (unprofiled) 18.64  tok/step 8.12
+  => greedy prose-en.txt: median ms/step (unprofiled) 10.13  tok/step 2.79
+  => sampling prose-en.txt: median ms/step (unprofiled) 10.83  tok/step 2.51
+  => greedy prose-ja.txt: median ms/step (unprofiled) 10.34  tok/step 2.52
+  => sampling prose-ja.txt: median ms/step (unprofiled) 10.67  tok/step 2.33
+  => greedy agent-loop.txt: median ms/step (unprofiled) 13.22  tok/step 4.15
+  => sampling agent-loop.txt: median ms/step (unprofiled) 13.64  tok/step 4.41
+  start_profile: 200
+  greedy   code-edit.txt  #0 chunks=  93 tokens= 600 tok/step=6.45 ms/step= 36.34 (profiled)
+[A1] error lines in server log: 0
+[A1] A1-code-edit grid   26 (T=1): n=  184 p10  12.03 p50  12.42 p90  13.39 fast   0.0%
+[A1] A1-code-edit grid   96 (T=8): n=  588 p10  12.28 p50  12.61 p90  13.09 fast   3.7%
+[A1] A1-code-edit grid  176 (T=16): n=  392 p10  12.23 p50  12.54 p90  12.95 fast   0.5%
+bench/rq1/arm_rq1.sh: 39 行: 231379 強制終了            env PORT=$PORT SERVE_DISPLAY_HZ= $ARM_ENV ${SERVER_ENV:-} setsid ./serve-fast.sh wa > "$LOG" 2>&1 < /dev/null
+[A1] stopped 13:09:43; gpu mem: 1970 MiB
+[abba-rq1] B1 (rq2u2h) queued 13:10:13
+[B1] MemAvailable 184G ok
+[B1] start 13:10:13 mode=rq2u2h n=4 wt=/home/user/tools/sglang-rq1 commit=7b4d539f9b env='PYTHONPATH=/home/user/tools/flashinfer-p3:/home/user/tools/sglang-rq1/python FLASHINFER_WORKSPACE_BASE=/home/user/.cache/sglang-rq2u2h FLASHINFER_P2_NO_NINJA=1 '
+[B1] server up 13:14:17
+[B1] mapped: /home/user/.cache/sglang-rq2u2h/.cache/flashinfer/0.6.17/120f/cached_ops/fused_moe_120/fused_moe_120.so
+  => greedy prose-en.txt: median ms/step (unprofiled) 15.36  tok/step 4.76
+  => sampling code-edit.txt: median ms/step (unprofiled) 13.21  tok/step 6.25
+  => greedy code-edit.txt: median ms/step (unprofiled) 15.75  tok/step 7.64
+  => sampling code-edit.txt: median ms/step (unprofiled) 18.02  tok/step 7.86
+  => greedy prose-en.txt: median ms/step (unprofiled) 9.89  tok/step 2.74
+  => sampling prose-en.txt: median ms/step (unprofiled) 10.25  tok/step 2.47
+  => greedy prose-ja.txt: median ms/step (unprofiled) 10.00  tok/step 2.56
+  => sampling prose-ja.txt: median ms/step (unprofiled) 10.27  tok/step 2.38
+  => greedy agent-loop.txt: median ms/step (unprofiled) 12.68  tok/step 4.28
+  => sampling agent-loop.txt: median ms/step (unprofiled) 12.99  tok/step 3.85
+  start_profile: 200
+  greedy   code-edit.txt  #0 chunks=  93 tokens= 600 tok/step=6.45 ms/step= 31.83 (profiled)
+[B1] error lines in server log: 0
+[B1] B1-code-edit grid   26 (T=1): n=  120 p10   7.27 p50   7.74 p90   8.12 fast 100.0%
+[B1] B1-code-edit grid   96 (T=8): n=  980 p10   7.94 p50   8.22 p90   8.54 fast  99.3%
+bench/rq1/arm_rq1.sh: 39 行: 237085 強制終了            env PORT=$PORT SERVE_DISPLAY_HZ= $ARM_ENV ${SERVER_ENV:-} setsid ./serve-fast.sh wa > "$LOG" 2>&1 < /dev/null
+[B1] stopped 13:15:55; gpu mem: 1970 MiB
+[abba-rq1] B2 (rq2u2h) queued 13:16:25
+[B2] MemAvailable 181G ok
+[B2] start 13:16:59 mode=rq2u2h n=4 wt=/home/user/tools/sglang-rq1 commit=7b4d539f9b env='PYTHONPATH=/home/user/tools/flashinfer-p3:/home/user/tools/sglang-rq1/python FLASHINFER_WORKSPACE_BASE=/home/user/.cache/sglang-rq2u2h FLASHINFER_P2_NO_NINJA=1 '
+[B2] server up 13:22:20
+[B2] mapped: /home/user/.cache/sglang-rq2u2h/.cache/flashinfer/0.6.17/120f/cached_ops/fused_moe_120/fused_moe_120.so
+  => greedy prose-en.txt: median ms/step (unprofiled) 16.50  tok/step 3.92
+  => sampling code-edit.txt: median ms/step (unprofiled) 12.92  tok/step 4.55
+  => greedy code-edit.txt: median ms/step (unprofiled) 13.11  tok/step 6.19
+  => sampling code-edit.txt: median ms/step (unprofiled) 18.04  tok/step 7.50
+  => greedy prose-en.txt: median ms/step (unprofiled) 10.65  tok/step 2.73
+  => sampling prose-en.txt: median ms/step (unprofiled) 10.80  tok/step 2.56
+  => greedy prose-ja.txt: median ms/step (unprofiled) 10.05  tok/step 2.62
+  => sampling prose-ja.txt: median ms/step (unprofiled) 10.46  tok/step 2.47
+  => greedy agent-loop.txt: median ms/step (unprofiled) 12.65  tok/step 4.18
+  => sampling agent-loop.txt: median ms/step (unprofiled) 13.34  tok/step 4.16
+  start_profile: 200
+  greedy   code-edit.txt  #0 chunks=  95 tokens= 600 tok/step=6.32 ms/step= 30.43 (profiled)
+[B2] error lines in server log: 0
+[B2] B2-code-edit grid   26 (T=1): n=  120 p10   7.40 p50   7.84 p90   8.16 fast  99.2%
+[B2] B2-code-edit grid   96 (T=8): n=  980 p10   8.03 p50   8.29 p90   8.73 fast  99.1%
+bench/rq1/arm_rq1.sh: 39 行: 243689 強制終了            env PORT=$PORT SERVE_DISPLAY_HZ= $ARM_ENV ${SERVER_ENV:-} setsid ./serve-fast.sh wa > "$LOG" 2>&1 < /dev/null
+[B2] stopped 13:23:58; gpu mem: 1982 MiB
+[abba-rq1] A2 (prod) queued 13:24:28
+[A2] MemAvailable 182G ok
+[A2] start 13:25:03 mode=prod n=4 wt=/home/user/tools/sglang-rq1 commit=7b4d539f9b env='PYTHONPATH=/home/user/tools/sglang-rq1/python '
+[A2] server up 13:29:52
+[A2] mapped: /home/user/.cache/sglang/.cache/flashinfer/0.6.17/120f/cached_ops/fused_moe_120/fused_moe_120.so
+  => greedy prose-en.txt: median ms/step (unprofiled) 16.61  tok/step 5.26
+  => sampling code-edit.txt: median ms/step (unprofiled) 13.15  tok/step 5.71
+  => greedy code-edit.txt: median ms/step (unprofiled) 13.44  tok/step 6.32
+  => sampling code-edit.txt: median ms/step (unprofiled) 17.79  tok/step 6.63
+  => greedy prose-en.txt: median ms/step (unprofiled) 10.34  tok/step 2.72
+  => sampling prose-en.txt: median ms/step (unprofiled) 10.63  tok/step 2.44
+  => greedy prose-ja.txt: median ms/step (unprofiled) 10.36  tok/step 2.59
+  => sampling prose-ja.txt: median ms/step (unprofiled) 10.61  tok/step 2.37
+  => greedy agent-loop.txt: median ms/step (unprofiled) 13.21  tok/step 4.29
+  => sampling agent-loop.txt: median ms/step (unprofiled) 13.59  tok/step 4.10
+  start_profile: 200
+  greedy   code-edit.txt  #0 chunks=  90 tokens= 600 tok/step=6.67 ms/step= 37.43 (profiled)
+[A2] error lines in server log: 0
+[A2] A2-code-edit grid   26 (T=1): n=  128 p10  11.90 p50  12.22 p90  12.74 fast   0.0%
+[A2] A2-code-edit grid   96 (T=8): n=  931 p10  12.32 p50  12.64 p90  13.12 fast   0.9%
+[A2] A2-code-edit grid  176 (T=16): n=   49 p10  12.19 p50  12.54 p90  12.93 fast   0.0%
+bench/rq1/arm_rq1.sh: 39 行: 246705 強制終了            env PORT=$PORT SERVE_DISPLAY_HZ= $ARM_ENV ${SERVER_ENV:-} setsid ./serve-fast.sh wa > "$LOG" 2>&1 < /dev/null
+[A2] stopped 13:31:34; gpu mem: 1975 MiB
+== ms_per_step: B/A change, 95% CI over requests; blocks B1/A1, B2/A2; A2/A1 drift
+  greedy   agent-loop.txt   -5.60%  [-10.48 ..  -1.30]  blocks -4.06 / -7.13  A2/A1 +0.81%  A 13.02  n 4/4/4/4
+  greedy   code-edit.txt    -7.53%  [-14.50 ..  -0.59]  blocks -11.28 / -2.58  A2/A1 -24.04%  A 17.71  n 4/4/4/4
+  greedy   prose-en.txt     -0.82%  [ -9.08 ..  +8.71]  blocks -2.72 / +1.13  A2/A1 -2.24%  A 10.86  n 4/4/4/4
+  greedy   prose-ja.txt     -2.96%  [ -3.55 ..  -2.31]  blocks -3.00 / -2.92  A2/A1 +0.38%  A 10.31  n 4/4/4/4
+  greedy   pooled           -4.26%  [ -9.49 ..  +1.03]
+  sampling agent-loop.txt   -3.45%  [ -4.12 ..  -2.84]  blocks -4.80 / -2.09  A2/A1 -0.24%  A 13.64  n 4/4/4/4
+  sampling code-edit.txt    -0.92%  [ -7.54 ..  +6.51]  blocks -3.46 / +1.88  A2/A1 -8.77%  A 18.66  n 4/4/4/4
+  sampling prose-en.txt     -3.42%  [ -7.18 ..  +0.53]  blocks -6.23 / -0.60  A2/A1 -0.34%  A 10.93  n 4/4/4/4
+  sampling prose-ja.txt     -1.48%  [ -3.19 ..  +1.15]  blocks -3.77 / +0.84  A2/A1 -0.66%  A 10.67  n 4/4/4/4
+  sampling pooled           -2.32%  [ -5.53 ..  +1.28]
+== tok_per_step: B/A change, 95% CI over requests; blocks B1/A1, B2/A2; A2/A1 drift
+  greedy   agent-loop.txt   +0.22%  [ -6.20 ..  +6.59]  blocks +2.94 / -2.42  A2/A1 +3.20%  A 4.15  n 4/4/4/4
+  greedy   code-edit.txt    -4.03%  [-12.88 ..  +6.65]  blocks -5.59 / -2.02  A2/A1 -21.87%  A 8.09  n 4/4/4/4
+  greedy   prose-en.txt     -0.80%  [ -7.67 ..  +6.73]  blocks -1.59 / +0.00  A2/A1 -2.18%  A 2.79  n 4/4/4/4
+  greedy   prose-ja.txt     +1.53%  [ -0.98 ..  +4.41]  blocks +1.88 / +1.19  A2/A1 +2.72%  A 2.52  n 4/4/4/4
+  greedy   pooled           -0.79%  [ -7.03 ..  +6.09]
+  sampling agent-loop.txt   -5.77%  [-11.26 ..  +0.59]  blocks -12.60 / +1.57  A2/A1 -7.00%  A 4.41  n 4/4/4/4
+  sampling code-edit.txt    +4.18%  [ -8.82 .. +19.53]  blocks -3.12 / +13.11  A2/A1 -18.27%  A 8.12  n 4/4/4/4
+  sampling prose-en.txt     +1.42%  [ -2.38 ..  +5.48]  blocks -1.84 / +4.76  A2/A1 -2.73%  A 2.51  n 4/4/4/4
+  sampling prose-ja.txt     +3.18%  [ -0.49 ..  +7.08]  blocks +2.11 / +4.23  A2/A1 +1.51%  A 2.33  n 4/4/4/4
+  sampling pooled           +0.67%  [ -5.84 ..  +7.95]
+A1-code-edit grid   26 (T=1): n=  184 p10  12.03 p50  12.42 p90  13.39 fast   0.0%
+A1-code-edit grid   96 (T=8): n=  588 p10  12.28 p50  12.61 p90  13.09 fast   3.7%
+A1-code-edit grid  176 (T=16): n=  392 p10  12.23 p50  12.54 p90  12.95 fast   0.5%
+B1-code-edit grid   26 (T=1): n=  120 p10   7.27 p50   7.74 p90   8.12 fast 100.0%
+B1-code-edit grid   96 (T=8): n=  980 p10   7.94 p50   8.22 p90   8.54 fast  99.3%
+B2-code-edit grid   26 (T=1): n=  120 p10   7.40 p50   7.84 p90   8.16 fast  99.2%
+B2-code-edit grid   96 (T=8): n=  980 p10   8.03 p50   8.29 p90   8.73 fast  99.1%
+A2-code-edit grid   26 (T=1): n=  128 p10  11.90 p50  12.22 p90  12.74 fast   0.0%
+A2-code-edit grid   96 (T=8): n=  931 p10  12.32 p50  12.64 p90  13.12 fast   0.9%
+A2-code-edit grid  176 (T=16): n=   49 p10  12.19 p50  12.54 p90  12.93 fast   0.0%
+[abba-rq1] done 13:32:07

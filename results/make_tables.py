@@ -136,6 +136,37 @@ def wa5_table() -> list[str]:
     return lines
 
 
+def stack8_table(mode: str) -> list[str]:
+    ws = ["code-edit", "prose-en", "prose-ja", "agent-loop"]
+    order = ["A1", "B1", "B2", "A2", "B3", "A3", "A4", "B4"]
+    lines = ["| arm (start order) | arm | " + " | ".join(ws) + " |", "|---|---|" + "---|" * len(ws)]
+    means: dict[str, dict[str, list[float]]] = {"A": {}, "B": {}}
+    for i, arm in enumerate(order, 1):
+        f = f"runs-1002/stack8/{arm}-{mode}.jsonl"
+        rows = load(HERE / f)
+        bw = by_workload(rows)
+        for w, rs in bw.items():
+            means[arm[0]].setdefault(w, []).append(st.mean(r["client"]["decode_tps"] for r in rs))
+        what = "A: all off" if arm[0] == "A" else "B: stack on"
+        lines.append(f"| {i}. `{f}` ({jst(rows[0]['timestamp'])} JST) | {what} | " + " | ".join(cell(bw.get(w, [])) for w in ws) + " |")
+    a = {w: st.mean(v) for w, v in means["A"].items()}
+    b = {w: st.mean(v) for w, v in means["B"].items()}
+    lines.append("| **A mean -> B mean (equal-weight arm means, t/s)** | | " + " | ".join(f"{a[w]:.0f} -> {b[w]:.0f} ({100*(b[w]/a[w]-1):+.1f}%)" for w in ws) + " |")
+    return lines
+
+
+def ship_table() -> list[str]:
+    ws = ["code-edit", "prose-en", "prose-ja", "agent-loop"]
+    lines = ["| run | profile | sampling | " + " | ".join(ws) + " |", "|---|---|---|" + "---|" * len(ws)]
+    for prof in ["wa", "w4", "w16"]:
+        for mode in ["lmstudio", "greedy"]:
+            f = f"runs-1002/ship/{prof}-{mode}.jsonl"
+            rows = load(HERE / f)
+            bw = by_workload(rows)
+            lines.append(f"| `{f}` ({jst(rows[0]['timestamp'])} JST) | `{prof}` | {mode} | " + " | ".join(cell(bw.get(w, [])) for w in ws) + " |")
+    return lines
+
+
 def build() -> str:
     L: list[str] = []
     L += ["# Result tables (generated)", "",
@@ -210,6 +241,21 @@ def build() -> str:
         ("runs/p2m2332-wa.jsonl", "wa + C1 confidence policy + P2"),
         ("runs/wa5prod0221-wa.jsonl", "wa final (mtpft5 head, three widths)"),
     ], ["code-edit", "prose-en", "prose-ja", "agent-loop", "long-ctx"])
+    L += ["## 6. 2026-10-01 stack, 8-start ABBA (2026-10-01 JST)", "",
+          "A = the 2026-09-08 production code with every 2026-10 switch off; B = RT1 + SV1 + SV2 + FG1 + DG1 + the RQ2",
+          "u2h FlashInfer build (min_p filtering off in both arms; see `docs/optimizations.md`). Profile `wa`, 16 prompts",
+          "(4 per workload, `bench/prompts/`), one request each per arm and mode, 8 server starts in the order",
+          "A1 B1 B2 A2 B3 A3 A4 B4. The effect sizes with confidence intervals come from `bench/stats/ancova_ab.py`",
+          "(`runs-1002/stack8/ancova8.log`); the t/s cells below are plain means and move by several percent between",
+          "server starts of the same arm. Cells: mean t/s / mean acceptance.", "",
+          "LM Studio sampling (temperature 0.8, top_p 0.95, top_k 40, min_p 0.05):", ""]
+    L += stack8_table("lmstudio")
+    L += ["", "Greedy:", ""]
+    L += stack8_table("greedy")
+    L += ["", "## 7. Shipped build, single-prompt smokes per profile (2026-10-02 JST)", "",
+          "One prompt per workload, one repeat, after the 2026-10-02 build was installed. Sanity check only, not a",
+          "measurement; the shipped server ran mem fraction 0.925, chunked prefill 4096 and one running request.", ""]
+    L += ship_table()
     L.append("")
     return "\n".join(L)
 

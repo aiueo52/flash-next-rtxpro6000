@@ -1,0 +1,300 @@
+{"dtype": "float32", "errors": [], "kp": 64, "mode": "random", "n": 4, "ok": true, "type": "correctness", "v": 248320}
+{"dtype": "float32", "kp": 64, "median_us": 105.03840446472168, "mode": "random", "n": 4, "operator": "torch.topk", "timing_mode": "eager", "type": "timing", "v": 248320}
+{"dtype": "float32", "kp": 64, "median_us": 63.09120059013367, "mode": "random", "n": 4, "operator": "torch.topk", "timing_mode": "cuda_graph", "type": "timing", "v": 248320}
+{"dtype": "float32", "kp": 64, "median_us": 57.43200182914734, "mode": "random", "n": 4, "operator": "sparse_topk", "timing_mode": "eager", "type": "timing", "v": 248320}
+{"dtype": "float32", "kp": 64, "median_us": 57.1120023727417, "mode": "random", "n": 4, "operator": "sparse_topk", "timing_mode": "cuda_graph", "type": "timing", "v": 248320}
+{"dtype": "float32", "errors": [], "kp": 64, "mode": "ties", "n": 4, "ok": true, "type": "correctness", "v": 248320}
+{"dtype": "float32", "kp": 64, "median_us": 84.20479893684387, "mode": "ties", "n": 4, "operator": "torch.topk", "timing_mode": "eager", "type": "timing", "v": 248320}
+{"dtype": "float32", "kp": 64, "median_us": 63.25920224189758, "mode": "ties", "n": 4, "operator": "torch.topk", "timing_mode": "cuda_graph", "type": "timing", "v": 248320}
+{"dtype": "float32", "kp": 64, "median_us": 57.44159817695618, "mode": "ties", "n": 4, "operator": "sparse_topk", "timing_mode": "eager", "type": "timing", "v": 248320}
+{"dtype": "float32", "kp": 64, "median_us": 57.043200731277466, "mode": "ties", "n": 4, "operator": "sparse_topk", "timing_mode": "cuda_graph", "type": "timing", "v": 248320}
+{"dtype": "float32", "errors": [], "kp": 64, "mode": "peaked", "n": 4, "ok": true, "type": "correctness", "v": 248320}
+{"dtype": "float32", "kp": 64, "median_us": 107.71199464797974, "mode": "peaked", "n": 4, "operator": "torch.topk", "timing_mode": "eager", "type": "timing", "v": 248320}
+{"dtype": "float32", "kp": 64, "median_us": 63.49920034408569, "mode": "peaked", "n": 4, "operator": "torch.topk", "timing_mode": "cuda_graph", "type": "timing", "v": 248320}
+{"dtype": "float32", "kp": 64, "median_us": 57.547199726104736, "mode": "peaked", "n": 4, "operator": "sparse_topk", "timing_mode": "eager", "type": "timing", "v": 248320}
+{"dtype": "float32", "kp": 64, "median_us": 57.124799489974976, "mode": "peaked", "n": 4, "operator": "sparse_topk", "timing_mode": "cuda_graph", "type": "timing", "v": 248320}
+{"dtype": "float32", "errors": [], "kp": 64, "mode": "masked", "n": 4, "ok": true, "type": "correctness", "v": 248320}
+{"dtype": "float32", "kp": 64, "median_us": 97.90400266647339, "mode": "masked", "n": 4, "operator": "torch.topk", "timing_mode": "eager", "type": "timing", "v": 248320}
+{"dtype": "float32", "kp": 64, "median_us": 61.65279746055603, "mode": "masked", "n": 4, "operator": "torch.topk", "timing_mode": "cuda_graph", "type": "timing", "v": 248320}
+{"dtype": "float32", "kp": 64, "median_us": 57.43359923362732, "mode": "masked", "n": 4, "operator": "sparse_topk", "timing_mode": "eager", "type": "timing", "v": 248320}
+{"dtype": "float32", "kp": 64, "median_us": 57.02720284461975, "mode": "masked", "n": 4, "operator": "sparse_topk", "timing_mode": "cuda_graph", "type": "timing", "v": 248320}
+{"dtype": "float32", "errors": [], "kp": 64, "mode": "edges", "n": 4, "ok": true, "type": "correctness", "v": 248320}
+{"dtype": "float32", "kp": 64, "median_us": 118.70239973068237, "mode": "edges", "n": 4, "operator": "torch.topk", "timing_mode": "eager", "type": "timing", "v": 248320}
+{"dtype": "float32", "kp": 64, "median_us": 61.62880063056946, "mode": "edges", "n": 4, "operator": "torch.topk", "timing_mode": "cuda_graph", "type": "timing", "v": 248320}
+{"dtype": "float32", "kp": 64, "median_us": 57.51199722290039, "mode": "edges", "n": 4, "operator": "sparse_topk", "timing_mode": "eager", "type": "timing", "v": 248320}
+{"dtype": "float32", "kp": 64, "median_us": 57.10560083389282, "mode": "edges", "n": 4, "operator": "sparse_topk", "timing_mode": "cuda_graph", "type": "timing", "v": 248320}
+{"dtype": "float32", "errors": [], "kp": 128, "mode": "random", "n": 4, "ok": true, "type": "correctness", "v": 248320}
+{"dtype": "float32", "kp": 128, "median_us": 80.62080144882202, "mode": "random", "n": 4, "operator": "torch.topk", "timing_mode": "eager", "type": "timing", "v": 248320}
+{"dtype": "float32", "kp": 128, "median_us": 63.59519958496094, "mode": "random", "n": 4, "operator": "torch.topk", "timing_mode": "cuda_graph", "type": "timing", "v": 248320}
+{"dtype": "float32", "kp": 128, "median_us": 89.76479768753052, "mode": "random", "n": 4, "operator": "sparse_topk", "timing_mode": "eager", "type": "timing", "v": 248320}
+{"dtype": "float32", "kp": 128, "median_us": 79.14239764213562, "mode": "random", "n": 4, "operator": "sparse_topk", "timing_mode": "cuda_graph", "type": "timing", "v": 248320}
+{"dtype": "float32", "errors": [], "kp": 128, "mode": "ties", "n": 4, "ok": true, "type": "correctness", "v": 248320}
+{"dtype": "float32", "kp": 128, "median_us": 112.27200031280518, "mode": "ties", "n": 4, "operator": "torch.topk", "timing_mode": "eager", "type": "timing", "v": 248320}
+{"dtype": "float32", "kp": 128, "median_us": 63.59040141105652, "mode": "ties", "n": 4, "operator": "torch.topk", "timing_mode": "cuda_graph", "type": "timing", "v": 248320}
+{"dtype": "float32", "kp": 128, "median_us": 89.66559767723083, "mode": "ties", "n": 4, "operator": "sparse_topk", "timing_mode": "eager", "type": "timing", "v": 248320}
+{"dtype": "float32", "kp": 128, "median_us": 79.04800176620483, "mode": "ties", "n": 4, "operator": "sparse_topk", "timing_mode": "cuda_graph", "type": "timing", "v": 248320}
+{"dtype": "float32", "errors": [], "kp": 128, "mode": "peaked", "n": 4, "ok": true, "type": "correctness", "v": 248320}
+{"dtype": "float32", "kp": 128, "median_us": 95.08000016212463, "mode": "peaked", "n": 4, "operator": "torch.topk", "timing_mode": "eager", "type": "timing", "v": 248320}
+{"dtype": "float32", "kp": 128, "median_us": 63.659197092056274, "mode": "peaked", "n": 4, "operator": "torch.topk", "timing_mode": "cuda_graph", "type": "timing", "v": 248320}
+{"dtype": "float32", "kp": 128, "median_us": 79.6559989452362, "mode": "peaked", "n": 4, "operator": "sparse_topk", "timing_mode": "eager", "type": "timing", "v": 248320}
+{"dtype": "float32", "kp": 128, "median_us": 79.14720177650452, "mode": "peaked", "n": 4, "operator": "sparse_topk", "timing_mode": "cuda_graph", "type": "timing", "v": 248320}
+{"dtype": "float32", "errors": [], "kp": 128, "mode": "masked", "n": 4, "ok": true, "type": "correctness", "v": 248320}
+{"dtype": "float32", "kp": 128, "median_us": 113.93920183181763, "mode": "masked", "n": 4, "operator": "torch.topk", "timing_mode": "eager", "type": "timing", "v": 248320}
+{"dtype": "float32", "kp": 128, "median_us": 63.19519877433777, "mode": "masked", "n": 4, "operator": "torch.topk", "timing_mode": "cuda_graph", "type": "timing", "v": 248320}
+{"dtype": "float32", "kp": 128, "median_us": 79.41759824752808, "mode": "masked", "n": 4, "operator": "sparse_topk", "timing_mode": "eager", "type": "timing", "v": 248320}
+{"dtype": "float32", "kp": 128, "median_us": 78.9408028125763, "mode": "masked", "n": 4, "operator": "sparse_topk", "timing_mode": "cuda_graph", "type": "timing", "v": 248320}
+{"dtype": "float32", "errors": [], "kp": 128, "mode": "edges", "n": 4, "ok": true, "type": "correctness", "v": 248320}
+{"dtype": "float32", "kp": 128, "median_us": 76.26879811286926, "mode": "edges", "n": 4, "operator": "torch.topk", "timing_mode": "eager", "type": "timing", "v": 248320}
+{"dtype": "float32", "kp": 128, "median_us": 62.038397789001465, "mode": "edges", "n": 4, "operator": "torch.topk", "timing_mode": "cuda_graph", "type": "timing", "v": 248320}
+{"dtype": "float32", "kp": 128, "median_us": 79.55999970436096, "mode": "edges", "n": 4, "operator": "sparse_topk", "timing_mode": "eager", "type": "timing", "v": 248320}
+{"dtype": "float32", "kp": 128, "median_us": 79.03199791908264, "mode": "edges", "n": 4, "operator": "sparse_topk", "timing_mode": "cuda_graph", "type": "timing", "v": 248320}
+{"dtype": "float32", "errors": [], "kp": 64, "mode": "random", "n": 8, "ok": true, "type": "correctness", "v": 248320}
+{"dtype": "float32", "kp": 64, "median_us": 110.7103943824768, "mode": "random", "n": 8, "operator": "torch.topk", "timing_mode": "eager", "type": "timing", "v": 248320}
+{"dtype": "float32", "kp": 64, "median_us": 61.004799604415894, "mode": "random", "n": 8, "operator": "torch.topk", "timing_mode": "cuda_graph", "type": "timing", "v": 248320}
+{"dtype": "float32", "kp": 64, "median_us": 70.3760027885437, "mode": "random", "n": 8, "operator": "sparse_topk", "timing_mode": "eager", "type": "timing", "v": 248320}
+{"dtype": "float32", "kp": 64, "median_us": 69.92480158805847, "mode": "random", "n": 8, "operator": "sparse_topk", "timing_mode": "cuda_graph", "type": "timing", "v": 248320}
+{"dtype": "float32", "errors": [], "kp": 64, "mode": "ties", "n": 8, "ok": true, "type": "correctness", "v": 248320}
+{"dtype": "float32", "kp": 64, "median_us": 115.73920249938965, "mode": "ties", "n": 8, "operator": "torch.topk", "timing_mode": "eager", "type": "timing", "v": 248320}
+{"dtype": "float32", "kp": 64, "median_us": 61.3103985786438, "mode": "ties", "n": 8, "operator": "torch.topk", "timing_mode": "cuda_graph", "type": "timing", "v": 248320}
+{"dtype": "float32", "kp": 64, "median_us": 69.85120177268982, "mode": "ties", "n": 8, "operator": "sparse_topk", "timing_mode": "eager", "type": "timing", "v": 248320}
+{"dtype": "float32", "kp": 64, "median_us": 69.33119893074036, "mode": "ties", "n": 8, "operator": "sparse_topk", "timing_mode": "cuda_graph", "type": "timing", "v": 248320}
+{"dtype": "float32", "errors": [], "kp": 64, "mode": "peaked", "n": 8, "ok": true, "type": "correctness", "v": 248320}
+{"dtype": "float32", "kp": 64, "median_us": 116.43999814987183, "mode": "peaked", "n": 8, "operator": "torch.topk", "timing_mode": "eager", "type": "timing", "v": 248320}
+{"dtype": "float32", "kp": 64, "median_us": 61.03519797325134, "mode": "peaked", "n": 8, "operator": "torch.topk", "timing_mode": "cuda_graph", "type": "timing", "v": 248320}
+{"dtype": "float32", "kp": 64, "median_us": 70.41760087013245, "mode": "peaked", "n": 8, "operator": "sparse_topk", "timing_mode": "eager", "type": "timing", "v": 248320}
+{"dtype": "float32", "kp": 64, "median_us": 70.01439929008484, "mode": "peaked", "n": 8, "operator": "sparse_topk", "timing_mode": "cuda_graph", "type": "timing", "v": 248320}
+{"dtype": "float32", "errors": [], "kp": 64, "mode": "masked", "n": 8, "ok": true, "type": "correctness", "v": 248320}
+{"dtype": "float32", "kp": 64, "median_us": 118.84959936141968, "mode": "masked", "n": 8, "operator": "torch.topk", "timing_mode": "eager", "type": "timing", "v": 248320}
+{"dtype": "float32", "kp": 64, "median_us": 59.58719849586487, "mode": "masked", "n": 8, "operator": "torch.topk", "timing_mode": "cuda_graph", "type": "timing", "v": 248320}
+{"dtype": "float32", "kp": 64, "median_us": 69.82079744338989, "mode": "masked", "n": 8, "operator": "sparse_topk", "timing_mode": "eager", "type": "timing", "v": 248320}
+{"dtype": "float32", "kp": 64, "median_us": 69.40320134162903, "mode": "masked", "n": 8, "operator": "sparse_topk", "timing_mode": "cuda_graph", "type": "timing", "v": 248320}
+{"dtype": "float32", "errors": [], "kp": 64, "mode": "edges", "n": 8, "ok": true, "type": "correctness", "v": 248320}
+{"dtype": "float32", "kp": 64, "median_us": 85.11840105056763, "mode": "edges", "n": 8, "operator": "torch.topk", "timing_mode": "eager", "type": "timing", "v": 248320}
+{"dtype": "float32", "kp": 64, "median_us": 59.359997510910034, "mode": "edges", "n": 8, "operator": "torch.topk", "timing_mode": "cuda_graph", "type": "timing", "v": 248320}
+{"dtype": "float32", "kp": 64, "median_us": 70.43359875679016, "mode": "edges", "n": 8, "operator": "sparse_topk", "timing_mode": "eager", "type": "timing", "v": 248320}
+{"dtype": "float32", "kp": 64, "median_us": 69.94240283966064, "mode": "edges", "n": 8, "operator": "sparse_topk", "timing_mode": "cuda_graph", "type": "timing", "v": 248320}
+{"dtype": "float32", "errors": [], "kp": 128, "mode": "random", "n": 8, "ok": true, "type": "correctness", "v": 248320}
+{"dtype": "float32", "kp": 128, "median_us": 65.0272011756897, "mode": "random", "n": 8, "operator": "torch.topk", "timing_mode": "eager", "type": "timing", "v": 248320}
+{"dtype": "float32", "kp": 128, "median_us": 61.40959858894348, "mode": "random", "n": 8, "operator": "torch.topk", "timing_mode": "cuda_graph", "type": "timing", "v": 248320}
+{"dtype": "float32", "kp": 128, "median_us": 103.53920459747314, "mode": "random", "n": 8, "operator": "sparse_topk", "timing_mode": "eager", "type": "timing", "v": 248320}
+{"dtype": "float32", "kp": 128, "median_us": 103.08799743652344, "mode": "random", "n": 8, "operator": "sparse_topk", "timing_mode": "cuda_graph", "type": "timing", "v": 248320}
+{"dtype": "float32", "errors": [], "kp": 128, "mode": "ties", "n": 8, "ok": true, "type": "correctness", "v": 248320}
+{"dtype": "float32", "kp": 128, "median_us": 82.09279775619507, "mode": "ties", "n": 8, "operator": "torch.topk", "timing_mode": "eager", "type": "timing", "v": 248320}
+{"dtype": "float32", "kp": 128, "median_us": 61.63359880447388, "mode": "ties", "n": 8, "operator": "torch.topk", "timing_mode": "cuda_graph", "type": "timing", "v": 248320}
+{"dtype": "float32", "kp": 128, "median_us": 102.6960015296936, "mode": "ties", "n": 8, "operator": "sparse_topk", "timing_mode": "eager", "type": "timing", "v": 248320}
+{"dtype": "float32", "kp": 128, "median_us": 102.26240158081055, "mode": "ties", "n": 8, "operator": "sparse_topk", "timing_mode": "cuda_graph", "type": "timing", "v": 248320}
+{"dtype": "float32", "errors": [], "kp": 128, "mode": "peaked", "n": 8, "ok": true, "type": "correctness", "v": 248320}
+{"dtype": "float32", "kp": 128, "median_us": 74.80639815330505, "mode": "peaked", "n": 8, "operator": "torch.topk", "timing_mode": "eager", "type": "timing", "v": 248320}
+{"dtype": "float32", "kp": 128, "median_us": 61.32479906082153, "mode": "peaked", "n": 8, "operator": "torch.topk", "timing_mode": "cuda_graph", "type": "timing", "v": 248320}
+{"dtype": "float32", "kp": 128, "median_us": 103.55360507965088, "mode": "peaked", "n": 8, "operator": "sparse_topk", "timing_mode": "eager", "type": "timing", "v": 248320}
+{"dtype": "float32", "kp": 128, "median_us": 103.12960147857666, "mode": "peaked", "n": 8, "operator": "sparse_topk", "timing_mode": "cuda_graph", "type": "timing", "v": 248320}
+{"dtype": "float32", "errors": [], "kp": 128, "mode": "masked", "n": 8, "ok": true, "type": "correctness", "v": 248320}
+{"dtype": "float32", "kp": 128, "median_us": 73.99200201034546, "mode": "masked", "n": 8, "operator": "torch.topk", "timing_mode": "eager", "type": "timing", "v": 248320}
+{"dtype": "float32", "kp": 128, "median_us": 60.00000238418579, "mode": "masked", "n": 8, "operator": "torch.topk", "timing_mode": "cuda_graph", "type": "timing", "v": 248320}
+{"dtype": "float32", "kp": 128, "median_us": 102.76639461517334, "mode": "masked", "n": 8, "operator": "sparse_topk", "timing_mode": "eager", "type": "timing", "v": 248320}
+{"dtype": "float32", "kp": 128, "median_us": 102.28159427642822, "mode": "masked", "n": 8, "operator": "sparse_topk", "timing_mode": "cuda_graph", "type": "timing", "v": 248320}
+{"dtype": "float32", "errors": [], "kp": 128, "mode": "edges", "n": 8, "ok": true, "type": "correctness", "v": 248320}
+{"dtype": "float32", "kp": 128, "median_us": 112.43840456008911, "mode": "edges", "n": 8, "operator": "torch.topk", "timing_mode": "eager", "type": "timing", "v": 248320}
+{"dtype": "float32", "kp": 128, "median_us": 59.70720052719116, "mode": "edges", "n": 8, "operator": "torch.topk", "timing_mode": "cuda_graph", "type": "timing", "v": 248320}
+{"dtype": "float32", "kp": 128, "median_us": 103.48000526428223, "mode": "edges", "n": 8, "operator": "sparse_topk", "timing_mode": "eager", "type": "timing", "v": 248320}
+{"dtype": "float32", "kp": 128, "median_us": 103.0959963798523, "mode": "edges", "n": 8, "operator": "sparse_topk", "timing_mode": "cuda_graph", "type": "timing", "v": 248320}
+{"dtype": "float32", "errors": [], "kp": 64, "mode": "random", "n": 16, "ok": true, "type": "correctness", "v": 248320}
+{"dtype": "float32", "kp": 64, "median_us": 72.03519940376282, "mode": "random", "n": 16, "operator": "torch.topk", "timing_mode": "eager", "type": "timing", "v": 248320}
+{"dtype": "float32", "kp": 64, "median_us": 68.4831976890564, "mode": "random", "n": 16, "operator": "torch.topk", "timing_mode": "cuda_graph", "type": "timing", "v": 248320}
+{"dtype": "float32", "kp": 64, "median_us": 131.10719919204712, "mode": "random", "n": 16, "operator": "sparse_topk", "timing_mode": "eager", "type": "timing", "v": 248320}
+{"dtype": "float32", "kp": 64, "median_us": 130.43999671936035, "mode": "random", "n": 16, "operator": "sparse_topk", "timing_mode": "cuda_graph", "type": "timing", "v": 248320}
+{"dtype": "float32", "errors": [], "kp": 64, "mode": "ties", "n": 16, "ok": true, "type": "correctness", "v": 248320}
+{"dtype": "float32", "kp": 64, "median_us": 114.92160558700562, "mode": "ties", "n": 16, "operator": "torch.topk", "timing_mode": "eager", "type": "timing", "v": 248320}
+{"dtype": "float32", "kp": 64, "median_us": 68.19999814033508, "mode": "ties", "n": 16, "operator": "torch.topk", "timing_mode": "cuda_graph", "type": "timing", "v": 248320}
+{"dtype": "float32", "kp": 64, "median_us": 129.79999780654907, "mode": "ties", "n": 16, "operator": "sparse_topk", "timing_mode": "eager", "type": "timing", "v": 248320}
+{"dtype": "float32", "kp": 64, "median_us": 128.66079807281494, "mode": "ties", "n": 16, "operator": "sparse_topk", "timing_mode": "cuda_graph", "type": "timing", "v": 248320}
+{"dtype": "float32", "errors": [], "kp": 64, "mode": "peaked", "n": 16, "ok": true, "type": "correctness", "v": 248320}
+{"dtype": "float32", "kp": 64, "median_us": 133.87999534606934, "mode": "peaked", "n": 16, "operator": "torch.topk", "timing_mode": "eager", "type": "timing", "v": 248320}
+{"dtype": "float32", "kp": 64, "median_us": 68.17280054092407, "mode": "peaked", "n": 16, "operator": "torch.topk", "timing_mode": "cuda_graph", "type": "timing", "v": 248320}
+{"dtype": "float32", "kp": 64, "median_us": 130.6272029876709, "mode": "peaked", "n": 16, "operator": "sparse_topk", "timing_mode": "eager", "type": "timing", "v": 248320}
+{"dtype": "float32", "kp": 64, "median_us": 130.01919984817505, "mode": "peaked", "n": 16, "operator": "sparse_topk", "timing_mode": "cuda_graph", "type": "timing", "v": 248320}
+{"dtype": "float32", "errors": [], "kp": 64, "mode": "masked", "n": 16, "ok": true, "type": "correctness", "v": 248320}
+{"dtype": "float32", "kp": 64, "median_us": 82.87039995193481, "mode": "masked", "n": 16, "operator": "torch.topk", "timing_mode": "eager", "type": "timing", "v": 248320}
+{"dtype": "float32", "kp": 64, "median_us": 65.85760116577148, "mode": "masked", "n": 16, "operator": "torch.topk", "timing_mode": "cuda_graph", "type": "timing", "v": 248320}
+{"dtype": "float32", "kp": 64, "median_us": 134.21920537948608, "mode": "masked", "n": 16, "operator": "sparse_topk", "timing_mode": "eager", "type": "timing", "v": 248320}
+{"dtype": "float32", "kp": 64, "median_us": 128.62399816513062, "mode": "masked", "n": 16, "operator": "sparse_topk", "timing_mode": "cuda_graph", "type": "timing", "v": 248320}
+{"dtype": "float32", "errors": [], "kp": 64, "mode": "edges", "n": 16, "ok": true, "type": "correctness", "v": 248320}
+{"dtype": "float32", "kp": 64, "median_us": 106.83200359344482, "mode": "edges", "n": 16, "operator": "torch.topk", "timing_mode": "eager", "type": "timing", "v": 248320}
+{"dtype": "float32", "kp": 64, "median_us": 64.92639780044556, "mode": "edges", "n": 16, "operator": "torch.topk", "timing_mode": "cuda_graph", "type": "timing", "v": 248320}
+{"dtype": "float32", "kp": 64, "median_us": 130.29119968414307, "mode": "edges", "n": 16, "operator": "sparse_topk", "timing_mode": "eager", "type": "timing", "v": 248320}
+{"dtype": "float32", "kp": 64, "median_us": 130.01760244369507, "mode": "edges", "n": 16, "operator": "sparse_topk", "timing_mode": "cuda_graph", "type": "timing", "v": 248320}
+{"dtype": "float32", "errors": [], "kp": 128, "mode": "random", "n": 16, "ok": true, "type": "correctness", "v": 248320}
+{"dtype": "float32", "kp": 128, "median_us": 83.09599757194519, "mode": "random", "n": 16, "operator": "torch.topk", "timing_mode": "eager", "type": "timing", "v": 248320}
+{"dtype": "float32", "kp": 128, "median_us": 68.80639791488647, "mode": "random", "n": 16, "operator": "torch.topk", "timing_mode": "cuda_graph", "type": "timing", "v": 248320}
+{"dtype": "float32", "kp": 128, "median_us": 171.27039432525635, "mode": "random", "n": 16, "operator": "sparse_topk", "timing_mode": "eager", "type": "timing", "v": 248320}
+{"dtype": "float32", "kp": 128, "median_us": 170.75999975204468, "mode": "random", "n": 16, "operator": "sparse_topk", "timing_mode": "cuda_graph", "type": "timing", "v": 248320}
+{"dtype": "float32", "errors": [], "kp": 128, "mode": "ties", "n": 16, "ok": true, "type": "correctness", "v": 248320}
+{"dtype": "float32", "kp": 128, "median_us": 83.09919834136963, "mode": "ties", "n": 16, "operator": "torch.topk", "timing_mode": "eager", "type": "timing", "v": 248320}
+{"dtype": "float32", "kp": 128, "median_us": 69.29919719696045, "mode": "ties", "n": 16, "operator": "torch.topk", "timing_mode": "cuda_graph", "type": "timing", "v": 248320}
+{"dtype": "float32", "kp": 128, "median_us": 170.29759883880615, "mode": "ties", "n": 16, "operator": "sparse_topk", "timing_mode": "eager", "type": "timing", "v": 248320}
+{"dtype": "float32", "kp": 128, "median_us": 167.81920194625854, "mode": "ties", "n": 16, "operator": "sparse_topk", "timing_mode": "cuda_graph", "type": "timing", "v": 248320}
+{"dtype": "float32", "errors": [], "kp": 128, "mode": "peaked", "n": 16, "ok": true, "type": "correctness", "v": 248320}
+{"dtype": "float32", "kp": 128, "median_us": 96.45119905471802, "mode": "peaked", "n": 16, "operator": "torch.topk", "timing_mode": "eager", "type": "timing", "v": 248320}
+{"dtype": "float32", "kp": 128, "median_us": 68.71359944343567, "mode": "peaked", "n": 16, "operator": "torch.topk", "timing_mode": "cuda_graph", "type": "timing", "v": 248320}
+{"dtype": "float32", "kp": 128, "median_us": 181.19200468063354, "mode": "peaked", "n": 16, "operator": "sparse_topk", "timing_mode": "eager", "type": "timing", "v": 248320}
+{"dtype": "float32", "kp": 128, "median_us": 170.71199417114258, "mode": "peaked", "n": 16, "operator": "sparse_topk", "timing_mode": "cuda_graph", "type": "timing", "v": 248320}
+{"dtype": "float32", "errors": [], "kp": 128, "mode": "masked", "n": 16, "ok": true, "type": "correctness", "v": 248320}
+{"dtype": "float32", "kp": 128, "median_us": 133.6735963821411, "mode": "masked", "n": 16, "operator": "torch.topk", "timing_mode": "eager", "type": "timing", "v": 248320}
+{"dtype": "float32", "kp": 128, "median_us": 66.11999869346619, "mode": "masked", "n": 16, "operator": "torch.topk", "timing_mode": "cuda_graph", "type": "timing", "v": 248320}
+{"dtype": "float32", "kp": 128, "median_us": 170.35200595855713, "mode": "masked", "n": 16, "operator": "sparse_topk", "timing_mode": "eager", "type": "timing", "v": 248320}
+{"dtype": "float32", "kp": 128, "median_us": 167.5536036491394, "mode": "masked", "n": 16, "operator": "sparse_topk", "timing_mode": "cuda_graph", "type": "timing", "v": 248320}
+{"dtype": "float32", "errors": [], "kp": 128, "mode": "edges", "n": 16, "ok": true, "type": "correctness", "v": 248320}
+{"dtype": "float32", "kp": 128, "median_us": 89.09919857978821, "mode": "edges", "n": 16, "operator": "torch.topk", "timing_mode": "eager", "type": "timing", "v": 248320}
+{"dtype": "float32", "kp": 128, "median_us": 65.32480120658875, "mode": "edges", "n": 16, "operator": "torch.topk", "timing_mode": "cuda_graph", "type": "timing", "v": 248320}
+{"dtype": "float32", "kp": 128, "median_us": 171.5664029121399, "mode": "edges", "n": 16, "operator": "sparse_topk", "timing_mode": "eager", "type": "timing", "v": 248320}
+{"dtype": "float32", "kp": 128, "median_us": 170.95839977264404, "mode": "edges", "n": 16, "operator": "sparse_topk", "timing_mode": "cuda_graph", "type": "timing", "v": 248320}
+{"dtype": "bfloat16", "errors": [], "kp": 64, "mode": "random", "n": 4, "ok": true, "type": "correctness", "v": 248320}
+{"dtype": "bfloat16", "kp": 64, "median_us": 58.876800537109375, "mode": "random", "n": 4, "operator": "torch.topk", "timing_mode": "eager", "type": "timing", "v": 248320}
+{"dtype": "bfloat16", "kp": 64, "median_us": 43.28480064868927, "mode": "random", "n": 4, "operator": "torch.topk", "timing_mode": "cuda_graph", "type": "timing", "v": 248320}
+{"dtype": "bfloat16", "kp": 64, "median_us": 49.454399943351746, "mode": "random", "n": 4, "operator": "sparse_topk", "timing_mode": "eager", "type": "timing", "v": 248320}
+{"dtype": "bfloat16", "kp": 64, "median_us": 49.12480115890503, "mode": "random", "n": 4, "operator": "sparse_topk", "timing_mode": "cuda_graph", "type": "timing", "v": 248320}
+{"dtype": "bfloat16", "errors": [], "kp": 64, "mode": "ties", "n": 4, "ok": true, "type": "correctness", "v": 248320}
+{"dtype": "bfloat16", "kp": 64, "median_us": 100.77120065689087, "mode": "ties", "n": 4, "operator": "torch.topk", "timing_mode": "eager", "type": "timing", "v": 248320}
+{"dtype": "bfloat16", "kp": 64, "median_us": 43.110400438308716, "mode": "ties", "n": 4, "operator": "torch.topk", "timing_mode": "cuda_graph", "type": "timing", "v": 248320}
+{"dtype": "bfloat16", "kp": 64, "median_us": 49.43839907646179, "mode": "ties", "n": 4, "operator": "sparse_topk", "timing_mode": "eager", "type": "timing", "v": 248320}
+{"dtype": "bfloat16", "kp": 64, "median_us": 49.12799894809723, "mode": "ties", "n": 4, "operator": "sparse_topk", "timing_mode": "cuda_graph", "type": "timing", "v": 248320}
+{"dtype": "bfloat16", "errors": [], "kp": 64, "mode": "peaked", "n": 4, "ok": true, "type": "correctness", "v": 248320}
+{"dtype": "bfloat16", "kp": 64, "median_us": 60.10559797286987, "mode": "peaked", "n": 4, "operator": "torch.topk", "timing_mode": "eager", "type": "timing", "v": 248320}
+{"dtype": "bfloat16", "kp": 64, "median_us": 43.39840114116669, "mode": "peaked", "n": 4, "operator": "torch.topk", "timing_mode": "cuda_graph", "type": "timing", "v": 248320}
+{"dtype": "bfloat16", "kp": 64, "median_us": 49.42399859428406, "mode": "peaked", "n": 4, "operator": "sparse_topk", "timing_mode": "eager", "type": "timing", "v": 248320}
+{"dtype": "bfloat16", "kp": 64, "median_us": 49.134400486946106, "mode": "peaked", "n": 4, "operator": "sparse_topk", "timing_mode": "cuda_graph", "type": "timing", "v": 248320}
+{"dtype": "bfloat16", "errors": [], "kp": 64, "mode": "masked", "n": 4, "ok": true, "type": "correctness", "v": 248320}
+{"dtype": "bfloat16", "kp": 64, "median_us": 60.78400015830994, "mode": "masked", "n": 4, "operator": "torch.topk", "timing_mode": "eager", "type": "timing", "v": 248320}
+{"dtype": "bfloat16", "kp": 64, "median_us": 43.10239851474762, "mode": "masked", "n": 4, "operator": "torch.topk", "timing_mode": "cuda_graph", "type": "timing", "v": 248320}
+{"dtype": "bfloat16", "kp": 64, "median_us": 49.457600712776184, "mode": "masked", "n": 4, "operator": "sparse_topk", "timing_mode": "eager", "type": "timing", "v": 248320}
+{"dtype": "bfloat16", "kp": 64, "median_us": 49.134400486946106, "mode": "masked", "n": 4, "operator": "sparse_topk", "timing_mode": "cuda_graph", "type": "timing", "v": 248320}
+{"dtype": "bfloat16", "errors": [], "kp": 64, "mode": "edges", "n": 4, "ok": true, "type": "correctness", "v": 248320}
+{"dtype": "bfloat16", "kp": 64, "median_us": 68.0079996585846, "mode": "edges", "n": 4, "operator": "torch.topk", "timing_mode": "eager", "type": "timing", "v": 248320}
+{"dtype": "bfloat16", "kp": 64, "median_us": 43.10239851474762, "mode": "edges", "n": 4, "operator": "torch.topk", "timing_mode": "cuda_graph", "type": "timing", "v": 248320}
+{"dtype": "bfloat16", "kp": 64, "median_us": 49.45119917392731, "mode": "edges", "n": 4, "operator": "sparse_topk", "timing_mode": "eager", "type": "timing", "v": 248320}
+{"dtype": "bfloat16", "kp": 64, "median_us": 49.134400486946106, "mode": "edges", "n": 4, "operator": "sparse_topk", "timing_mode": "cuda_graph", "type": "timing", "v": 248320}
+{"dtype": "bfloat16", "errors": [], "kp": 128, "mode": "random", "n": 4, "ok": true, "type": "correctness", "v": 248320}
+{"dtype": "bfloat16", "kp": 128, "median_us": 85.61919927597046, "mode": "random", "n": 4, "operator": "torch.topk", "timing_mode": "eager", "type": "timing", "v": 248320}
+{"dtype": "bfloat16", "kp": 128, "median_us": 43.699198961257935, "mode": "random", "n": 4, "operator": "torch.topk", "timing_mode": "cuda_graph", "type": "timing", "v": 248320}
+{"dtype": "bfloat16", "kp": 128, "median_us": 77.98879742622375, "mode": "random", "n": 4, "operator": "sparse_topk", "timing_mode": "eager", "type": "timing", "v": 248320}
+{"dtype": "bfloat16", "kp": 128, "median_us": 77.79840230941772, "mode": "random", "n": 4, "operator": "sparse_topk", "timing_mode": "cuda_graph", "type": "timing", "v": 248320}
+{"dtype": "bfloat16", "errors": [], "kp": 128, "mode": "ties", "n": 4, "ok": true, "type": "correctness", "v": 248320}
+{"dtype": "bfloat16", "kp": 128, "median_us": 57.27999806404114, "mode": "ties", "n": 4, "operator": "torch.topk", "timing_mode": "eager", "type": "timing", "v": 248320}
+{"dtype": "bfloat16", "kp": 128, "median_us": 43.217599391937256, "mode": "ties", "n": 4, "operator": "torch.topk", "timing_mode": "cuda_graph", "type": "timing", "v": 248320}
+{"dtype": "bfloat16", "kp": 128, "median_us": 77.99680233001709, "mode": "ties", "n": 4, "operator": "sparse_topk", "timing_mode": "eager", "type": "timing", "v": 248320}
+{"dtype": "bfloat16", "kp": 128, "median_us": 77.72799730300903, "mode": "ties", "n": 4, "operator": "sparse_topk", "timing_mode": "cuda_graph", "type": "timing", "v": 248320}
+{"dtype": "bfloat16", "errors": [], "kp": 128, "mode": "peaked", "n": 4, "ok": true, "type": "correctness", "v": 248320}
+{"dtype": "bfloat16", "kp": 128, "median_us": 46.22719883918762, "mode": "peaked", "n": 4, "operator": "torch.topk", "timing_mode": "eager", "type": "timing", "v": 248320}
+{"dtype": "bfloat16", "kp": 128, "median_us": 43.21120083332062, "mode": "peaked", "n": 4, "operator": "torch.topk", "timing_mode": "cuda_graph", "type": "timing", "v": 248320}
+{"dtype": "bfloat16", "kp": 128, "median_us": 78.1104028224945, "mode": "peaked", "n": 4, "operator": "sparse_topk", "timing_mode": "eager", "type": "timing", "v": 248320}
+{"dtype": "bfloat16", "kp": 128, "median_us": 77.72480249404907, "mode": "peaked", "n": 4, "operator": "sparse_topk", "timing_mode": "cuda_graph", "type": "timing", "v": 248320}
+{"dtype": "bfloat16", "errors": [], "kp": 128, "mode": "masked", "n": 4, "ok": true, "type": "correctness", "v": 248320}
+{"dtype": "bfloat16", "kp": 128, "median_us": 47.788798809051514, "mode": "masked", "n": 4, "operator": "torch.topk", "timing_mode": "eager", "type": "timing", "v": 248320}
+{"dtype": "bfloat16", "kp": 128, "median_us": 43.20000112056732, "mode": "masked", "n": 4, "operator": "torch.topk", "timing_mode": "cuda_graph", "type": "timing", "v": 248320}
+{"dtype": "bfloat16", "kp": 128, "median_us": 78.09280157089233, "mode": "masked", "n": 4, "operator": "sparse_topk", "timing_mode": "eager", "type": "timing", "v": 248320}
+{"dtype": "bfloat16", "kp": 128, "median_us": 77.71679759025574, "mode": "masked", "n": 4, "operator": "sparse_topk", "timing_mode": "cuda_graph", "type": "timing", "v": 248320}
+{"dtype": "bfloat16", "errors": [], "kp": 128, "mode": "edges", "n": 4, "ok": true, "type": "correctness", "v": 248320}
+{"dtype": "bfloat16", "kp": 128, "median_us": 59.63360071182251, "mode": "edges", "n": 4, "operator": "torch.topk", "timing_mode": "eager", "type": "timing", "v": 248320}
+{"dtype": "bfloat16", "kp": 128, "median_us": 43.1088000535965, "mode": "edges", "n": 4, "operator": "torch.topk", "timing_mode": "cuda_graph", "type": "timing", "v": 248320}
+{"dtype": "bfloat16", "kp": 128, "median_us": 77.9856026172638, "mode": "edges", "n": 4, "operator": "sparse_topk", "timing_mode": "eager", "type": "timing", "v": 248320}
+{"dtype": "bfloat16", "kp": 128, "median_us": 77.71199941635132, "mode": "edges", "n": 4, "operator": "sparse_topk", "timing_mode": "cuda_graph", "type": "timing", "v": 248320}
+{"dtype": "bfloat16", "errors": [], "kp": 64, "mode": "random", "n": 8, "ok": true, "type": "correctness", "v": 248320}
+{"dtype": "bfloat16", "kp": 64, "median_us": 66.2559986114502, "mode": "random", "n": 8, "operator": "torch.topk", "timing_mode": "eager", "type": "timing", "v": 248320}
+{"dtype": "bfloat16", "kp": 64, "median_us": 43.10239851474762, "mode": "random", "n": 8, "operator": "torch.topk", "timing_mode": "cuda_graph", "type": "timing", "v": 248320}
+{"dtype": "bfloat16", "kp": 64, "median_us": 60.684800148010254, "mode": "random", "n": 8, "operator": "sparse_topk", "timing_mode": "eager", "type": "timing", "v": 248320}
+{"dtype": "bfloat16", "kp": 64, "median_us": 60.0816011428833, "mode": "random", "n": 8, "operator": "sparse_topk", "timing_mode": "cuda_graph", "type": "timing", "v": 248320}
+{"dtype": "bfloat16", "errors": [], "kp": 64, "mode": "ties", "n": 8, "ok": true, "type": "correctness", "v": 248320}
+{"dtype": "bfloat16", "kp": 64, "median_us": 55.615997314453125, "mode": "ties", "n": 8, "operator": "torch.topk", "timing_mode": "eager", "type": "timing", "v": 248320}
+{"dtype": "bfloat16", "kp": 64, "median_us": 42.91839897632599, "mode": "ties", "n": 8, "operator": "torch.topk", "timing_mode": "cuda_graph", "type": "timing", "v": 248320}
+{"dtype": "bfloat16", "kp": 64, "median_us": 60.096001625061035, "mode": "ties", "n": 8, "operator": "sparse_topk", "timing_mode": "eager", "type": "timing", "v": 248320}
+{"dtype": "bfloat16", "kp": 64, "median_us": 59.79040265083313, "mode": "ties", "n": 8, "operator": "sparse_topk", "timing_mode": "cuda_graph", "type": "timing", "v": 248320}
+{"dtype": "bfloat16", "errors": [], "kp": 64, "mode": "peaked", "n": 8, "ok": true, "type": "correctness", "v": 248320}
+{"dtype": "bfloat16", "kp": 64, "median_us": 79.11840081214905, "mode": "peaked", "n": 8, "operator": "torch.topk", "timing_mode": "eager", "type": "timing", "v": 248320}
+{"dtype": "bfloat16", "kp": 64, "median_us": 43.115198612213135, "mode": "peaked", "n": 8, "operator": "torch.topk", "timing_mode": "cuda_graph", "type": "timing", "v": 248320}
+{"dtype": "bfloat16", "kp": 64, "median_us": 60.47999858856201, "mode": "peaked", "n": 8, "operator": "sparse_topk", "timing_mode": "eager", "type": "timing", "v": 248320}
+{"dtype": "bfloat16", "kp": 64, "median_us": 59.912002086639404, "mode": "peaked", "n": 8, "operator": "sparse_topk", "timing_mode": "cuda_graph", "type": "timing", "v": 248320}
+{"dtype": "bfloat16", "errors": [], "kp": 64, "mode": "masked", "n": 8, "ok": true, "type": "correctness", "v": 248320}
+{"dtype": "bfloat16", "kp": 64, "median_us": 76.8992006778717, "mode": "masked", "n": 8, "operator": "torch.topk", "timing_mode": "eager", "type": "timing", "v": 248320}
+{"dtype": "bfloat16", "kp": 64, "median_us": 41.785600781440735, "mode": "masked", "n": 8, "operator": "torch.topk", "timing_mode": "cuda_graph", "type": "timing", "v": 248320}
+{"dtype": "bfloat16", "kp": 64, "median_us": 60.172802209854126, "mode": "masked", "n": 8, "operator": "sparse_topk", "timing_mode": "eager", "type": "timing", "v": 248320}
+{"dtype": "bfloat16", "kp": 64, "median_us": 59.80479717254639, "mode": "masked", "n": 8, "operator": "sparse_topk", "timing_mode": "cuda_graph", "type": "timing", "v": 248320}
+{"dtype": "bfloat16", "errors": [], "kp": 64, "mode": "edges", "n": 8, "ok": true, "type": "correctness", "v": 248320}
+{"dtype": "bfloat16", "kp": 64, "median_us": 57.2704017162323, "mode": "edges", "n": 8, "operator": "torch.topk", "timing_mode": "eager", "type": "timing", "v": 248320}
+{"dtype": "bfloat16", "kp": 64, "median_us": 41.16159975528717, "mode": "edges", "n": 8, "operator": "torch.topk", "timing_mode": "cuda_graph", "type": "timing", "v": 248320}
+{"dtype": "bfloat16", "kp": 64, "median_us": 60.31839847564697, "mode": "edges", "n": 8, "operator": "sparse_topk", "timing_mode": "eager", "type": "timing", "v": 248320}
+{"dtype": "bfloat16", "kp": 64, "median_us": 59.90239977836609, "mode": "edges", "n": 8, "operator": "sparse_topk", "timing_mode": "cuda_graph", "type": "timing", "v": 248320}
+{"dtype": "bfloat16", "errors": [], "kp": 128, "mode": "random", "n": 8, "ok": true, "type": "correctness", "v": 248320}
+{"dtype": "bfloat16", "kp": 128, "median_us": 84.3392014503479, "mode": "random", "n": 8, "operator": "torch.topk", "timing_mode": "eager", "type": "timing", "v": 248320}
+{"dtype": "bfloat16", "kp": 128, "median_us": 43.40960085391998, "mode": "random", "n": 8, "operator": "torch.topk", "timing_mode": "cuda_graph", "type": "timing", "v": 248320}
+{"dtype": "bfloat16", "kp": 128, "median_us": 101.24800205230713, "mode": "random", "n": 8, "operator": "sparse_topk", "timing_mode": "eager", "type": "timing", "v": 248320}
+{"dtype": "bfloat16", "kp": 128, "median_us": 100.94079971313477, "mode": "random", "n": 8, "operator": "sparse_topk", "timing_mode": "cuda_graph", "type": "timing", "v": 248320}
+{"dtype": "bfloat16", "errors": [], "kp": 128, "mode": "ties", "n": 8, "ok": true, "type": "correctness", "v": 248320}
+{"dtype": "bfloat16", "kp": 128, "median_us": 88.66239786148071, "mode": "ties", "n": 8, "operator": "torch.topk", "timing_mode": "eager", "type": "timing", "v": 248320}
+{"dtype": "bfloat16", "kp": 128, "median_us": 43.09599995613098, "mode": "ties", "n": 8, "operator": "torch.topk", "timing_mode": "cuda_graph", "type": "timing", "v": 248320}
+{"dtype": "bfloat16", "kp": 128, "median_us": 100.72319507598877, "mode": "ties", "n": 8, "operator": "sparse_topk", "timing_mode": "eager", "type": "timing", "v": 248320}
+{"dtype": "bfloat16", "kp": 128, "median_us": 100.42719841003418, "mode": "ties", "n": 8, "operator": "sparse_topk", "timing_mode": "cuda_graph", "type": "timing", "v": 248320}
+{"dtype": "bfloat16", "errors": [], "kp": 128, "mode": "peaked", "n": 8, "ok": true, "type": "correctness", "v": 248320}
+{"dtype": "bfloat16", "kp": 128, "median_us": 56.70560002326965, "mode": "peaked", "n": 8, "operator": "torch.topk", "timing_mode": "eager", "type": "timing", "v": 248320}
+{"dtype": "bfloat16", "kp": 128, "median_us": 43.5263991355896, "mode": "peaked", "n": 8, "operator": "torch.topk", "timing_mode": "cuda_graph", "type": "timing", "v": 248320}
+{"dtype": "bfloat16", "kp": 128, "median_us": 101.19040012359619, "mode": "peaked", "n": 8, "operator": "sparse_topk", "timing_mode": "eager", "type": "timing", "v": 248320}
+{"dtype": "bfloat16", "kp": 128, "median_us": 100.76320171356201, "mode": "peaked", "n": 8, "operator": "sparse_topk", "timing_mode": "cuda_graph", "type": "timing", "v": 248320}
+{"dtype": "bfloat16", "errors": [], "kp": 128, "mode": "masked", "n": 8, "ok": true, "type": "correctness", "v": 248320}
+{"dtype": "bfloat16", "kp": 128, "median_us": 91.05920195579529, "mode": "masked", "n": 8, "operator": "torch.topk", "timing_mode": "eager", "type": "timing", "v": 248320}
+{"dtype": "bfloat16", "kp": 128, "median_us": 42.20480024814606, "mode": "masked", "n": 8, "operator": "torch.topk", "timing_mode": "cuda_graph", "type": "timing", "v": 248320}
+{"dtype": "bfloat16", "kp": 128, "median_us": 100.75360536575317, "mode": "masked", "n": 8, "operator": "sparse_topk", "timing_mode": "eager", "type": "timing", "v": 248320}
+{"dtype": "bfloat16", "kp": 128, "median_us": 100.45440196990967, "mode": "masked", "n": 8, "operator": "sparse_topk", "timing_mode": "cuda_graph", "type": "timing", "v": 248320}
+{"dtype": "bfloat16", "errors": [], "kp": 128, "mode": "edges", "n": 8, "ok": true, "type": "correctness", "v": 248320}
+{"dtype": "bfloat16", "kp": 128, "median_us": 78.5968005657196, "mode": "edges", "n": 8, "operator": "torch.topk", "timing_mode": "eager", "type": "timing", "v": 248320}
+{"dtype": "bfloat16", "kp": 128, "median_us": 41.334399580955505, "mode": "edges", "n": 8, "operator": "torch.topk", "timing_mode": "cuda_graph", "type": "timing", "v": 248320}
+{"dtype": "bfloat16", "kp": 128, "median_us": 101.1023998260498, "mode": "edges", "n": 8, "operator": "sparse_topk", "timing_mode": "eager", "type": "timing", "v": 248320}
+{"dtype": "bfloat16", "kp": 128, "median_us": 100.7599949836731, "mode": "edges", "n": 8, "operator": "sparse_topk", "timing_mode": "cuda_graph", "type": "timing", "v": 248320}
+{"dtype": "bfloat16", "errors": [], "kp": 64, "mode": "random", "n": 16, "ok": true, "type": "correctness", "v": 248320}
+{"dtype": "bfloat16", "kp": 64, "median_us": 84.74559783935547, "mode": "random", "n": 16, "operator": "torch.topk", "timing_mode": "eager", "type": "timing", "v": 248320}
+{"dtype": "bfloat16", "kp": 64, "median_us": 49.774399399757385, "mode": "random", "n": 16, "operator": "torch.topk", "timing_mode": "cuda_graph", "type": "timing", "v": 248320}
+{"dtype": "bfloat16", "kp": 64, "median_us": 94.91040110588074, "mode": "random", "n": 16, "operator": "sparse_topk", "timing_mode": "eager", "type": "timing", "v": 248320}
+{"dtype": "bfloat16", "kp": 64, "median_us": 94.52160000801086, "mode": "random", "n": 16, "operator": "sparse_topk", "timing_mode": "cuda_graph", "type": "timing", "v": 248320}
+{"dtype": "bfloat16", "errors": [], "kp": 64, "mode": "ties", "n": 16, "ok": true, "type": "correctness", "v": 248320}
+{"dtype": "bfloat16", "kp": 64, "median_us": 78.37759852409363, "mode": "ties", "n": 16, "operator": "torch.topk", "timing_mode": "eager", "type": "timing", "v": 248320}
+{"dtype": "bfloat16", "kp": 64, "median_us": 48.54879975318909, "mode": "ties", "n": 16, "operator": "torch.topk", "timing_mode": "cuda_graph", "type": "timing", "v": 248320}
+{"dtype": "bfloat16", "kp": 64, "median_us": 94.31040287017822, "mode": "ties", "n": 16, "operator": "sparse_topk", "timing_mode": "eager", "type": "timing", "v": 248320}
+{"dtype": "bfloat16", "kp": 64, "median_us": 93.80639791488647, "mode": "ties", "n": 16, "operator": "sparse_topk", "timing_mode": "cuda_graph", "type": "timing", "v": 248320}
+{"dtype": "bfloat16", "errors": [], "kp": 64, "mode": "peaked", "n": 16, "ok": true, "type": "correctness", "v": 248320}
+{"dtype": "bfloat16", "kp": 64, "median_us": 92.70240068435669, "mode": "peaked", "n": 16, "operator": "torch.topk", "timing_mode": "eager", "type": "timing", "v": 248320}
+{"dtype": "bfloat16", "kp": 64, "median_us": 49.73759949207306, "mode": "peaked", "n": 16, "operator": "torch.topk", "timing_mode": "cuda_graph", "type": "timing", "v": 248320}
+{"dtype": "bfloat16", "kp": 64, "median_us": 94.91360187530518, "mode": "peaked", "n": 16, "operator": "sparse_topk", "timing_mode": "eager", "type": "timing", "v": 248320}
+{"dtype": "bfloat16", "kp": 64, "median_us": 94.40799951553345, "mode": "peaked", "n": 16, "operator": "sparse_topk", "timing_mode": "cuda_graph", "type": "timing", "v": 248320}
+{"dtype": "bfloat16", "errors": [], "kp": 64, "mode": "masked", "n": 16, "ok": true, "type": "correctness", "v": 248320}
+{"dtype": "bfloat16", "kp": 64, "median_us": 70.99840044975281, "mode": "masked", "n": 16, "operator": "torch.topk", "timing_mode": "eager", "type": "timing", "v": 248320}
+{"dtype": "bfloat16", "kp": 64, "median_us": 46.95039987564087, "mode": "masked", "n": 16, "operator": "torch.topk", "timing_mode": "cuda_graph", "type": "timing", "v": 248320}
+{"dtype": "bfloat16", "kp": 64, "median_us": 94.30559873580933, "mode": "masked", "n": 16, "operator": "sparse_topk", "timing_mode": "eager", "type": "timing", "v": 248320}
+{"dtype": "bfloat16", "kp": 64, "median_us": 93.99359822273254, "mode": "masked", "n": 16, "operator": "sparse_topk", "timing_mode": "cuda_graph", "type": "timing", "v": 248320}
+{"dtype": "bfloat16", "errors": [], "kp": 64, "mode": "edges", "n": 16, "ok": true, "type": "correctness", "v": 248320}
+{"dtype": "bfloat16", "kp": 64, "median_us": 80.21600246429443, "mode": "edges", "n": 16, "operator": "torch.topk", "timing_mode": "eager", "type": "timing", "v": 248320}
+{"dtype": "bfloat16", "kp": 64, "median_us": 45.948800444602966, "mode": "edges", "n": 16, "operator": "torch.topk", "timing_mode": "cuda_graph", "type": "timing", "v": 248320}
+{"dtype": "bfloat16", "kp": 64, "median_us": 94.90879774093628, "mode": "edges", "n": 16, "operator": "sparse_topk", "timing_mode": "eager", "type": "timing", "v": 248320}
+{"dtype": "bfloat16", "kp": 64, "median_us": 94.52160000801086, "mode": "edges", "n": 16, "operator": "sparse_topk", "timing_mode": "cuda_graph", "type": "timing", "v": 248320}
+{"dtype": "bfloat16", "errors": [], "kp": 128, "mode": "random", "n": 16, "ok": true, "type": "correctness", "v": 248320}
+{"dtype": "bfloat16", "kp": 128, "median_us": 53.07040214538574, "mode": "random", "n": 16, "operator": "torch.topk", "timing_mode": "eager", "type": "timing", "v": 248320}
+{"dtype": "bfloat16", "kp": 128, "median_us": 50.36320090293884, "mode": "random", "n": 16, "operator": "torch.topk", "timing_mode": "cuda_graph", "type": "timing", "v": 248320}
+{"dtype": "bfloat16", "kp": 128, "median_us": 163.76320123672485, "mode": "random", "n": 16, "operator": "sparse_topk", "timing_mode": "eager", "type": "timing", "v": 248320}
+{"dtype": "bfloat16", "kp": 128, "median_us": 163.40320110321045, "mode": "random", "n": 16, "operator": "sparse_topk", "timing_mode": "cuda_graph", "type": "timing", "v": 248320}
+{"dtype": "bfloat16", "errors": [], "kp": 128, "mode": "ties", "n": 16, "ok": true, "type": "correctness", "v": 248320}
+{"dtype": "bfloat16", "kp": 128, "median_us": 81.52959942817688, "mode": "ties", "n": 16, "operator": "torch.topk", "timing_mode": "eager", "type": "timing", "v": 248320}
+{"dtype": "bfloat16", "kp": 128, "median_us": 49.78080093860626, "mode": "ties", "n": 16, "operator": "torch.topk", "timing_mode": "cuda_graph", "type": "timing", "v": 248320}
+{"dtype": "bfloat16", "kp": 128, "median_us": 164.8911952972412, "mode": "ties", "n": 16, "operator": "sparse_topk", "timing_mode": "eager", "type": "timing", "v": 248320}
+{"dtype": "bfloat16", "kp": 128, "median_us": 164.90880250930786, "mode": "ties", "n": 16, "operator": "sparse_topk", "timing_mode": "cuda_graph", "type": "timing", "v": 248320}
+{"dtype": "bfloat16", "errors": [], "kp": 128, "mode": "peaked", "n": 16, "ok": true, "type": "correctness", "v": 248320}
+{"dtype": "bfloat16", "kp": 128, "median_us": 63.92480134963989, "mode": "peaked", "n": 16, "operator": "torch.topk", "timing_mode": "eager", "type": "timing", "v": 248320}
+{"dtype": "bfloat16", "kp": 128, "median_us": 50.6991982460022, "mode": "peaked", "n": 16, "operator": "torch.topk", "timing_mode": "cuda_graph", "type": "timing", "v": 248320}
+{"dtype": "bfloat16", "kp": 128, "median_us": 165.13760089874268, "mode": "peaked", "n": 16, "operator": "sparse_topk", "timing_mode": "eager", "type": "timing", "v": 248320}
+{"dtype": "bfloat16", "kp": 128, "median_us": 163.32800388336182, "mode": "peaked", "n": 16, "operator": "sparse_topk", "timing_mode": "cuda_graph", "type": "timing", "v": 248320}
+{"dtype": "bfloat16", "errors": [], "kp": 128, "mode": "masked", "n": 16, "ok": true, "type": "correctness", "v": 248320}
+{"dtype": "bfloat16", "kp": 128, "median_us": 70.68319916725159, "mode": "masked", "n": 16, "operator": "torch.topk", "timing_mode": "eager", "type": "timing", "v": 248320}
+{"dtype": "bfloat16", "kp": 128, "median_us": 47.38239943981171, "mode": "masked", "n": 16, "operator": "torch.topk", "timing_mode": "cuda_graph", "type": "timing", "v": 248320}
+{"dtype": "bfloat16", "kp": 128, "median_us": 165.55839776992798, "mode": "masked", "n": 16, "operator": "sparse_topk", "timing_mode": "eager", "type": "timing", "v": 248320}
+{"dtype": "bfloat16", "kp": 128, "median_us": 164.88159894943237, "mode": "masked", "n": 16, "operator": "sparse_topk", "timing_mode": "cuda_graph", "type": "timing", "v": 248320}
+{"dtype": "bfloat16", "errors": [], "kp": 128, "mode": "edges", "n": 16, "ok": true, "type": "correctness", "v": 248320}
+{"dtype": "bfloat16", "kp": 128, "median_us": 82.05919861793518, "mode": "edges", "n": 16, "operator": "torch.topk", "timing_mode": "eager", "type": "timing", "v": 248320}
+{"dtype": "bfloat16", "kp": 128, "median_us": 46.09439969062805, "mode": "edges", "n": 16, "operator": "torch.topk", "timing_mode": "cuda_graph", "type": "timing", "v": 248320}
+{"dtype": "bfloat16", "kp": 128, "median_us": 163.76639604568481, "mode": "edges", "n": 16, "operator": "sparse_topk", "timing_mode": "eager", "type": "timing", "v": 248320}
+{"dtype": "bfloat16", "kp": 128, "median_us": 163.36640119552612, "mode": "edges", "n": 16, "operator": "sparse_topk", "timing_mode": "cuda_graph", "type": "timing", "v": 248320}

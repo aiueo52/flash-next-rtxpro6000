@@ -1,0 +1,35 @@
+[trunc k64 T0.8 k40 p0.95] N=20000 kernel 86.9s  accept@0 emp 0.8182 theory 0.8136  mean acc 1.841
+   pos 0: n=  20000  TV=0.0054  chi2 dof=  8 p=0.585
+   pos 1: n=  16364  TV=0.0142  chi2 dof= 29 p=0.423
+   pos 2: n=  11233  TV=0.0168  chi2 dof= 24 p=0.234
+   pos 3: n=   9217  TV=0.0140  chi2 dof= 30 p=0.999
+[untrunc (k_cap=0)] N=20000 kernel 87.7s  accept@0 emp 0.7995 theory 0.7998  mean acc 1.761
+   pos 0: n=  20000  TV=0.0029  chi2 dof=  8 p=0.745
+   pos 1: n=  15990  TV=0.0106  chi2 dof= 29 p=0.957
+   pos 2: n=  10622  TV=0.0150  chi2 dof= 24 p=0.590
+   pos 3: n=   8616  TV=0.0206  chi2 dof= 30 p=0.166
+[no top-k, top_p 0.9, T1.0] N=20000 kernel 79.6s  accept@0 emp 0.5782 theory 0.5802  mean acc 1.187
+   pos 0: n=  20000  TV=0.0298  chi2 dof=134 p=0.011
+   pos 1: n=  11563  TV=0.0312  chi2 dof=133 p=0.479
+   pos 2: n=   7517  TV=0.0405  chi2 dof=130 p=0.646
+   pos 3: n=   4656  TV=0.0403  chi2 dof=112 p=0.954
+[good draft, k_cap 16 < top_k 40] N=20000 kernel 82.5s  accept@0 emp 0.6223 theory 0.6173  mean acc 1.317
+   pos 0: n=  20000  TV=0.0130  chi2 dof= 31 p=0.864
+   pos 1: n=  12446  TV=0.0154  chi2 dof= 28 p=0.298
+   pos 2: n=   8915  TV=0.0272  chi2 dof= 33 p=0.325
+   pos 3: n=   4989  TV=0.0187  chi2 dof= 26 p=0.895
+[greedy (top_k=1)] N=5000 kernel 20.7s  accept@0 emp 1.0000 theory 1.0000  mean acc 1.000
+   pos 0: n=   5000  TV=0.0000  chi2 dof=  0 p=nan
+   pos 1: n=   5000  TV=0.0000  chi2 dof=  0 p=nan
+   pos 2: n=      0  TV=0.5000  chi2 dof=  0 p=1.000
+   pos 3: n=      0  TV=0.5000  chi2 dof=  0 p=1.000
+[min_p 0.05 T0.8 k40 p0.95] N=20000 kernel 79.2s  accept@0 emp 0.6171 theory 0.6183  mean acc 1.174
+   pos 0: n=  20000  TV=0.0140  chi2 dof= 34 p=0.664
+   pos 1: n=  12342  TV=0.0167  chi2 dof= 34 p=0.903
+   pos 2: n=   7381  TV=0.0097  chi2 dof= 11 p=0.755
+   pos 3: n=   3755  TV=0.0237  chi2 dof= 13 p=0.275
+[min_p 0.05, no min_p on q (k_cap=0)] N=20000 kernel 78.4s  accept@0 emp 0.5925 theory 0.5922  mean acc 1.086
+   pos 0: n=  20000  TV=0.0146  chi2 dof= 34 p=0.638
+   pos 1: n=  11850  TV=0.0150  chi2 dof= 34 p=0.988
+   pos 2: n=   6840  TV=0.0095  chi2 dof= 11 p=0.813
+   pos 3: n=   3035  TV=0.0254  chi2 dof= 13 p=0.250

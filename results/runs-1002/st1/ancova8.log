@@ -1,0 +1,22 @@
+== ancova lmstudio
+== lmstudio: 128 requests, 16 prompts, 4 workloads, 8 arms
+  ms/token  B effect  -2.09%  [ -4.35 ..  +0.21]  resid sd 6.65%
+            arm means (%): A1 +7.26  B1 +4.24  B2 -4.30  A2 +1.58  B3 -3.88  A3 -4.42  A4 +0.18  B4 -0.04
+            arm level B effect  -2.09%  [ -9.03 ..  +5.37]  (5 dof, arm sd 4.04%)
+  tok/step  B effect  +0.38%  [ -2.28 ..  +3.11]  resid sd 7.66%
+            arm means (%): A1 -4.33  B1 -0.57  B2 +0.49  A2 +2.47  B3 -0.86  A3 +0.62  A4 +0.61  B4 +1.72
+            arm level B effect  +0.38%  [ -2.99 ..  +3.87]  (5 dof, arm sd 1.88%)
+  ms/step|a B effect  -1.68%  [ -3.16 ..  -0.18]  resid sd 4.31%  slopes 0.57 0.35 -0.42 -0.12
+            arm means (%): A1 +4.09  B1 +3.32  B2 -2.80  A2 +2.90  B3 -4.20  A3 -4.15  A4 +0.73  B4 +0.52
+            arm level B effect  -1.66%  [ -7.69 ..  +4.76]  (5 dof, arm sd 3.48%)
+== ancova greedy
+== greedy: 128 requests, 16 prompts, 4 workloads, 8 arms
+  ms/token  B effect  -0.64%  [ -4.01 ..  +2.84]  resid sd 9.84%
+            arm means (%): A1 +0.81  B1 +0.49  B2 -0.54  A2 -2.44  B3 -2.48  A3 -1.22  A4 +4.27  B4 +1.28
+            arm level B effect  -0.64%  [ -5.04 ..  +3.96]  (5 dof, arm sd 2.49%)
+  tok/step  B effect  -3.49%  [ -7.81 ..  +1.03]  resid sd 13.08%
+            arm means (%): A1 +4.30  B1 -2.99  B2 -4.69  A2 +5.13  B3 -1.11  A3 +1.68  A4 -3.69  B4 +1.86
+            arm level B effect  -3.49%  [ -9.88 ..  +3.35]  (5 dof, arm sd 3.77%)
+  ms/step|a B effect  -3.03%  [ -4.70 ..  -1.33]  resid sd 4.89%  slopes 0.41 0.53 0.07 0.31
+            arm means (%): A1 +3.35  B1 -1.45  B2 -3.45  A2 +0.94  B3 -3.30  A3 +0.06  A4 +1.72  B4 +2.36
+            arm level B effect  -2.96%  [ -6.93 ..  +1.18]  (5 dof, arm sd 2.30%)

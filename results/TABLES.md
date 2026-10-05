@@ -108,3 +108,53 @@ sessions carry roughly ±10 % desktop-compositor noise (see `docs/measurement.md
 | `runs/p2m2332-w16.jsonl` (2026-09-06 23:38 JST, n=2) | W16 + P2 | greedy | 671 / 11.85 | 187 / 3.05 | – | 314 / 5.20 | – |
 | `runs/p2m2332-wa.jsonl` (2026-09-06 23:41 JST, n=2) | wa + C1 confidence policy + P2 | greedy | 595 / 10.24 | 282 / 2.60 | – | 326 / 4.48 | – |
 | `runs/wa5prod0221-wa.jsonl` (2026-09-08 02:25 JST, n=2) | wa final (mtpft5 head, three widths) | greedy | 664 / 12.06 | 273 / 2.64 | – | 396 / 5.08 | – |
+## 6. 2026-10-01 stack, 8-start ABBA (2026-10-01 JST)
+
+A = the 2026-09-08 production code with every 2026-10 switch off; B = RT1 + SV1 + SV2 + FG1 + DG1 + the RQ2
+u2h FlashInfer build (min_p filtering off in both arms; see `docs/optimizations.md`). Profile `wa`, 16 prompts
+(4 per workload, `bench/prompts/`), one request each per arm and mode, 8 server starts in the order
+A1 B1 B2 A2 B3 A3 A4 B4. The effect sizes with confidence intervals come from `bench/stats/ancova_ab.py`
+(`runs-1002/stack8/ancova8.log`); the t/s cells below are plain means and move by several percent between
+server starts of the same arm. Cells: mean t/s / mean acceptance.
+
+LM Studio sampling (temperature 0.8, top_p 0.95, top_k 40, min_p 0.05):
+
+| arm (start order) | arm | code-edit | prose-en | prose-ja | agent-loop |
+|---|---|---|---|---|---|
+| 1. `runs-1002/stack8/A1-lmstudio.jsonl` (2026-10-01 13:46 JST) | A: all off | 496 / 9.99 | 198 / 2.14 | 207 / 2.15 | 283 / 3.54 |
+| 2. `runs-1002/stack8/B1-lmstudio.jsonl` (2026-10-01 14:07 JST) | B: stack on | 552 / 10.89 | 217 / 2.20 | 221 / 2.18 | 307 / 3.71 |
+| 3. `runs-1002/stack8/B2-lmstudio.jsonl` (2026-10-01 14:26 JST) | B: stack on | 615 / 11.43 | 217 / 2.17 | 235 / 2.31 | 300 / 3.58 |
+| 4. `runs-1002/stack8/A2-lmstudio.jsonl` (2026-10-01 14:45 JST) | A: all off | 536 / 10.77 | 201 / 2.14 | 210 / 2.17 | 281 / 3.56 |
+| 5. `runs-1002/stack8/B3-lmstudio.jsonl` (2026-10-01 15:05 JST) | B: stack on | 546 / 10.44 | 218 / 2.16 | 232 / 2.28 | 319 / 3.76 |
+| 6. `runs-1002/stack8/A3-lmstudio.jsonl` (2026-10-01 15:25 JST) | A: all off | 507 / 9.53 | 204 / 2.19 | 227 / 2.44 | 291 / 3.75 |
+| 7. `runs-1002/stack8/A4-lmstudio.jsonl` (2026-10-01 15:44 JST) | A: all off | 511 / 10.07 | 208 / 2.21 | 248 / 2.58 | 291 / 3.62 |
+| 8. `runs-1002/stack8/B4-lmstudio.jsonl` (2026-10-01 16:02 JST) | B: stack on | 615 / 10.90 | 236 / 2.17 | 282 / 2.57 | 343 / 3.86 |
+| **A mean -> B mean (equal-weight arm means, t/s)** | | 513 -> 582 (+13.5%) | 203 -> 222 (+9.4%) | 223 -> 243 (+8.9%) | 286 -> 317 (+10.8%) |
+
+Greedy:
+
+| arm (start order) | arm | code-edit | prose-en | prose-ja | agent-loop |
+|---|---|---|---|---|---|
+| 1. `runs-1002/stack8/A1-greedy.jsonl` (2026-10-01 13:54 JST) | A: all off | 529 / 10.71 | 222 / 2.42 | 225 / 2.38 | 316 / 4.23 |
+| 2. `runs-1002/stack8/B1-greedy.jsonl` (2026-10-01 14:14 JST) | B: stack on | 575 / 10.83 | 247 / 2.50 | 290 / 3.03 | 334 / 4.06 |
+| 3. `runs-1002/stack8/B2-greedy.jsonl` (2026-10-01 14:33 JST) | B: stack on | 556 / 9.93 | 243 / 2.41 | 273 / 2.71 | 347 / 4.36 |
+| 4. `runs-1002/stack8/A2-greedy.jsonl` (2026-10-01 14:53 JST) | A: all off | 543 / 10.33 | 238 / 2.45 | 277 / 2.86 | 317 / 4.11 |
+| 5. `runs-1002/stack8/B3-greedy.jsonl` (2026-10-01 15:12 JST) | B: stack on | 552 / 10.51 | 240 / 2.40 | 266 / 2.66 | 347 / 4.36 |
+| 6. `runs-1002/stack8/A3-greedy.jsonl` (2026-10-01 15:32 JST) | A: all off | 561 / 10.70 | 226 / 2.38 | 342 / 3.96 | 322 / 4.26 |
+| 7. `runs-1002/stack8/A4-greedy.jsonl` (2026-10-01 15:51 JST) | A: all off | 593 / 11.31 | 263 / 2.75 | 251 / 2.48 | 337 / 4.36 |
+| 8. `runs-1002/stack8/B4-greedy.jsonl` (2026-10-01 16:08 JST) | B: stack on | 605 / 10.89 | 265 / 2.53 | 280 / 2.60 | 370 / 4.34 |
+| **A mean -> B mean (equal-weight arm means, t/s)** | | 557 -> 572 (+2.8%) | 237 -> 249 (+4.8%) | 274 -> 277 (+1.2%) | 323 -> 349 (+8.2%) |
+
+## 7. Shipped build, single-prompt smokes per profile (2026-10-02 JST)
+
+One prompt per workload, one repeat, after the 2026-10-02 build was installed. Sanity check only, not a
+measurement; the shipped server ran mem fraction 0.925, chunked prefill 4096 and one running request.
+
+| run | profile | sampling | code-edit | prose-en | prose-ja | agent-loop |
+|---|---|---|---|---|---|---|
+| `runs-1002/ship/wa-lmstudio.jsonl` (2026-10-02 07:22 JST) | `wa` | lmstudio | 524 / 10.47 | 226 / 2.32 | 335 / 3.42 | 317 / 4.03 |
+| `runs-1002/ship/wa-greedy.jsonl` (2026-10-02 07:24 JST) | `wa` | greedy | 543 / 10.83 | 230 / 2.40 | 267 / 2.67 | 351 / 4.66 |
+| `runs-1002/ship/w4-lmstudio.jsonl` (2026-10-02 07:30 JST) | `w4` | lmstudio | 348 / 3.68 | 235 / 2.27 | 241 / 2.29 | 304 / 3.08 |
+| `runs-1002/ship/w4-greedy.jsonl` (2026-10-02 07:32 JST) | `w4` | greedy | 349 / 3.80 | 246 / 2.39 | 246 / 2.41 | 317 / 3.19 |
+| `runs-1002/ship/w16-lmstudio.jsonl` (2026-10-02 07:39 JST) | `w16` | lmstudio | 539 / 10.77 | 149 / 2.52 | 152 / 2.53 | 242 / 4.44 |
+| `runs-1002/ship/w16-greedy.jsonl` (2026-10-02 07:41 JST) | `w16` | greedy | 557 / 11.35 | 156 / 2.71 | 194 / 3.22 | 262 / 4.78 |

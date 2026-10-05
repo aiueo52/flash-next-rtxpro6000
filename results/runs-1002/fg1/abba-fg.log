@@ -1,0 +1,119 @@
+[abba-fg] A1 (off) queued 12:29:29
+[A1] MemAvailable 177G ok
+[A1] start 12:33:44 mode=off n=4 wt=/home/user/tools/sglang-fc-glue commit=dbf09dabe7 env=' '
+[A1] server up 12:39:04
+  => greedy prose-en.txt: median ms/step (unprofiled) 17.49  tok/step 4.35
+  => sampling code-edit.txt: median ms/step (unprofiled) 13.52  tok/step 6.45
+  => greedy code-edit.txt: median ms/step (unprofiled) 15.35  tok/step 6.76
+  => sampling code-edit.txt: median ms/step (unprofiled) 18.57  tok/step 7.11
+  => greedy prose-en.txt: median ms/step (unprofiled) 11.17  tok/step 2.83
+  => sampling prose-en.txt: median ms/step (unprofiled) 10.56  tok/step 2.42
+  => greedy prose-ja.txt: median ms/step (unprofiled) 10.26  tok/step 2.51
+  => sampling prose-ja.txt: median ms/step (unprofiled) 10.55  tok/step 2.54
+  => greedy agent-loop.txt: median ms/step (unprofiled) 13.04  tok/step 4.39
+  => sampling agent-loop.txt: median ms/step (unprofiled) 13.43  tok/step 3.80
+  start_profile: 200
+  greedy   code-edit.txt  #0 chunks= 120 tokens= 600 tok/step=5.00 ms/step= 26.30 (profiled)
+[A1] error lines in server log: 0
+[A1] hc_combine_gate_kernel   per stream: {13: 2000, 164: 40}
+[A1] _w8a16_gemv_kernel       per stream: {13: 4080, 160: 40, 162: 20, 164: 80, 165: 1680}
+[A1] _hc_down_kernel          per stream: {13: 2080, 164: 40}
+[A1] _hc_up_kernel            per stream: {13: 2080, 164: 40}
+[A1] main stream 13, GDN alt stream 165: gates on the alt stream 0 of 2040, overlapping main K1/K2 0
+bench/fg1/arm_fg.sh: 30 行: 213545 強制終了            env PORT=$PORT PYTHONPATH=$WT/python SERVE_DISPLAY_HZ= $ARM_ENV ${SERVER_ENV:-} setsid ./serve-fast.sh wa > "$LOG" 2>&1 < /dev/null
+[A1] stopped 12:40:45; gpu mem: 1997 MiB
+[abba-fg] B1 (on) queued 12:41:15
+[B1] MemAvailable 183G ok
+[B1] start 12:41:15 mode=on n=4 wt=/home/user/tools/sglang-fc-glue commit=dbf09dabe7 env='SGLANG_OPT_GDN_FRONT_OVERLAP=1 '
+[B1] server up 12:46:31
+  => greedy prose-en.txt: median ms/step (unprofiled) 15.66  tok/step 4.26
+  => sampling code-edit.txt: median ms/step (unprofiled) 13.90  tok/step 5.71
+  => greedy code-edit.txt: median ms/step (unprofiled) 18.33  tok/step 7.51
+  => sampling code-edit.txt: median ms/step (unprofiled) 18.52  tok/step 7.29
+  => greedy prose-en.txt: median ms/step (unprofiled) 11.31  tok/step 2.80
+  => sampling prose-en.txt: median ms/step (unprofiled) 10.64  tok/step 2.45
+  => greedy prose-ja.txt: median ms/step (unprofiled) 10.34  tok/step 2.61
+  => sampling prose-ja.txt: median ms/step (unprofiled) 10.60  tok/step 2.42
+  => greedy agent-loop.txt: median ms/step (unprofiled) 13.10  tok/step 4.22
+  => sampling agent-loop.txt: median ms/step (unprofiled) 13.58  tok/step 3.90
+  start_profile: 200
+  greedy   code-edit.txt  #0 chunks=  97 tokens= 600 tok/step=6.19 ms/step= 34.57 (profiled)
+[B1] error lines in server log: 0
+[B1] hc_combine_gate_kernel   per stream: {13: 736, 145: 50, 146: 24, 173: 950, 174: 456}
+[B1] _w8a16_gemv_kernel       per stream: {13: 2340, 145: 124, 146: 73, 154: 14, 158: 1, 169: 114, 171: 19, 173: 2356, 174: 1387}
+[B1] _hc_down_kernel          per stream: {13: 904, 145: 49, 146: 25, 173: 931, 174: 475}
+[B1] _hc_up_kernel            per stream: {13: 904, 145: 49, 146: 25, 173: 931, 174: 475}
+[B1] main stream 173, GDN alt stream 13: gates on the alt stream 736 of 2216, overlapping main K1/K2 209
+bench/fg1/arm_fg.sh: 30 行: 218159 強制終了            env PORT=$PORT PYTHONPATH=$WT/python SERVE_DISPLAY_HZ= $ARM_ENV ${SERVER_ENV:-} setsid ./serve-fast.sh wa > "$LOG" 2>&1 < /dev/null
+[B1] stopped 12:48:11; gpu mem: 1969 MiB
+[abba-fg] B2 (on) queued 12:48:41
+[B2] MemAvailable 181G ok
+[B2] start 12:48:41 mode=on n=4 wt=/home/user/tools/sglang-fc-glue commit=dbf09dabe7 env='SGLANG_OPT_GDN_FRONT_OVERLAP=1 '
+[B2] server up 12:53:21
+  => greedy prose-en.txt: median ms/step (unprofiled) 15.59  tok/step 4.65
+  => sampling code-edit.txt: median ms/step (unprofiled) 13.53  tok/step 5.88
+  => greedy code-edit.txt: median ms/step (unprofiled) 14.04  tok/step 7.02
+  => sampling code-edit.txt: median ms/step (unprofiled) 16.82  tok/step 6.64
+  => greedy prose-en.txt: median ms/step (unprofiled) 10.69  tok/step 2.87
+  => sampling prose-en.txt: median ms/step (unprofiled) 10.66  tok/step 2.59
+  => greedy prose-ja.txt: median ms/step (unprofiled) 10.03  tok/step 2.55
+  => sampling prose-ja.txt: median ms/step (unprofiled) 10.39  tok/step 2.44
+  => greedy agent-loop.txt: median ms/step (unprofiled) 12.52  tok/step 3.91
+  => sampling agent-loop.txt: median ms/step (unprofiled) 13.25  tok/step 4.07
+  start_profile: 200
+  greedy   code-edit.txt  #0 chunks=  90 tokens= 600 tok/step=6.67 ms/step= 35.26 (profiled)
+[B2] error lines in server log: 0
+[B2] hc_combine_gate_kernel   per stream: {13: 720, 173: 1000, 174: 480}
+[B2] _w8a16_gemv_kernel       per stream: {13: 2300, 169: 120, 171: 20, 173: 2480, 174: 1460}
+[B2] _hc_down_kernel          per stream: {13: 880, 173: 980, 174: 500}
+[B2] _hc_up_kernel            per stream: {13: 880, 173: 980, 174: 500}
+[B2] main stream 173, GDN alt stream 13: gates on the alt stream 720 of 2200, overlapping main K1/K2 220
+bench/fg1/arm_fg.sh: 30 行: 223176 強制終了            env PORT=$PORT PYTHONPATH=$WT/python SERVE_DISPLAY_HZ= $ARM_ENV ${SERVER_ENV:-} setsid ./serve-fast.sh wa > "$LOG" 2>&1 < /dev/null
+[B2] stopped 12:55:00; gpu mem: 1970 MiB
+[abba-fg] A2 (off) queued 12:55:30
+[A2] MemAvailable 184G ok
+[A2] start 12:55:30 mode=off n=4 wt=/home/user/tools/sglang-fc-glue commit=dbf09dabe7 env=' '
+[A2] server up 12:59:38
+  => greedy prose-en.txt: median ms/step (unprofiled) 16.93  tok/step 4.17
+  => sampling code-edit.txt: median ms/step (unprofiled) 13.50  tok/step 6.25
+  => greedy code-edit.txt: median ms/step (unprofiled) 18.01  tok/step 8.26
+  => sampling code-edit.txt: median ms/step (unprofiled) 18.46  tok/step 7.24
+  => greedy prose-en.txt: median ms/step (unprofiled) 11.32  tok/step 2.96
+  => sampling prose-en.txt: median ms/step (unprofiled) 10.30  tok/step 2.47
+  => greedy prose-ja.txt: median ms/step (unprofiled) 10.06  tok/step 2.57
+  => sampling prose-ja.txt: median ms/step (unprofiled) 10.37  tok/step 2.35
+  => greedy agent-loop.txt: median ms/step (unprofiled) 12.85  tok/step 4.10
+  => sampling agent-loop.txt: median ms/step (unprofiled) 13.29  tok/step 4.13
+  start_profile: 200
+  greedy   code-edit.txt  #0 chunks=  96 tokens= 600 tok/step=6.25 ms/step= 29.92 (profiled)
+[A2] error lines in server log: 0
+[A2] hc_combine_gate_kernel   per stream: {13: 2160, 173: 40}
+[A2] _w8a16_gemv_kernel       per stream: {13: 4480, 169: 120, 171: 20, 173: 80, 174: 1680}
+[A2] _hc_down_kernel          per stream: {13: 2320, 173: 40}
+[A2] _hc_up_kernel            per stream: {13: 2320, 173: 40}
+[A2] main stream 13, GDN alt stream 174: gates on the alt stream 0 of 2200, overlapping main K1/K2 0
+bench/fg1/arm_fg.sh: 30 行: 227616 強制終了            env PORT=$PORT PYTHONPATH=$WT/python SERVE_DISPLAY_HZ= $ARM_ENV ${SERVER_ENV:-} setsid ./serve-fast.sh wa > "$LOG" 2>&1 < /dev/null
+[A2] stopped 13:01:16; gpu mem: 1970 MiB
+== ms_per_step: B/A change, 95% CI over requests; blocks B1/A1, B2/A2; A2/A1 drift
+  greedy   agent-loop.txt   -2.42%  [ -7.72 ..  +2.05]  blocks +0.57 / -5.45  A2/A1 -1.53%  A 12.90  n 4/4/4/4
+  greedy   code-edit.txt    +0.10%  [ -6.99 ..  +8.25]  blocks +19.15 / -16.28  A2/A1 +16.22%  A 15.08  n 4/4/4/4
+  greedy   prose-en.txt     -1.43%  [ -8.74 ..  +6.88]  blocks -0.15 / -2.70  A2/A1 +0.67%  A 11.18  n 4/4/4/4
+  greedy   prose-ja.txt     +0.40%  [ +0.05 ..  +0.77]  blocks +0.83 / -0.04  A2/A1 -1.86%  A 10.24  n 4/4/4/4
+  greedy   pooled           -0.84%  [ -5.91 ..  +4.44]
+  sampling agent-loop.txt   +0.61%  [ -0.04 ..  +1.28]  blocks +1.42 / -0.20  A2/A1 -0.76%  A 13.39  n 4/4/4/4
+  sampling code-edit.txt    -1.99%  [-12.57 .. +10.07]  blocks +0.80 / -4.79  A2/A1 -0.11%  A 17.34  n 4/4/4/4
+  sampling prose-en.txt     +2.41%  [ -2.01 ..  +7.07]  blocks +0.89 / +3.97  A2/A1 -2.64%  A 10.79  n 4/4/4/4
+  sampling prose-ja.txt     -1.01%  [ -3.76 ..  +0.63]  blocks -2.13 / +0.15  A2/A1 -4.22%  A 10.83  n 4/4/4/4
+  sampling pooled           -0.01%  [ -4.72 ..  +4.69]
+== tok_per_step: B/A change, 95% CI over requests; blocks B1/A1, B2/A2; A2/A1 drift
+  greedy   agent-loop.txt   -4.18%  [-14.02 ..  +5.55]  blocks -3.88 / -4.51  A2/A1 -6.59%  A 4.39  n 4/4/4/4
+  greedy   code-edit.txt    -3.23%  [-13.32 ..  +8.30]  blocks +11.10 / -14.96  A2/A1 +22.09%  A 6.76  n 4/4/4/4
+  greedy   prose-en.txt     -1.86%  [ -9.95 ..  +6.69]  blocks -0.74 / -2.93  A2/A1 +4.71%  A 2.83  n 4/4/4/4
+  greedy   prose-ja.txt     +1.45%  [ -1.35 ..  +4.65]  blocks +3.98 / -1.02  A2/A1 +2.53%  A 2.51  n 4/4/4/4
+  greedy   pooled           -1.98%  [ -9.80 ..  +6.29]
+  sampling agent-loop.txt   +0.50%  [ -5.61 ..  +6.61]  blocks +2.64 / -1.46  A2/A1 +8.85%  A 3.80  n 4/4/4/4
+  sampling code-edit.txt    -2.96%  [-19.46 .. +19.49]  blocks +2.55 / -8.36  A2/A1 +1.88%  A 7.11  n 4/4/4/4
+  sampling prose-en.txt     +3.04%  [ -1.20 ..  +7.40]  blocks +1.32 / +4.74  A2/A1 +2.10%  A 2.42  n 4/4/4/4
+  sampling prose-ja.txt     -0.63%  [ -4.01 ..  +2.90]  blocks -4.67 / +3.73  A2/A1 -7.28%  A 2.54  n 4/4/4/4
+  sampling pooled           -0.03%  [ -7.85 ..  +8.92]
+[abba-fg] done 13:01:46

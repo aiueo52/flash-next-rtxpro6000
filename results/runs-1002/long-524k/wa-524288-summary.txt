@@ -1,0 +1,14 @@
+[long] SUMMARY wa ctx=524288 ready=1
+[long] needle sanity: target=16000 tokens=14936 seconds=8.06 PASS
+[long] needle 200k: target=200000 tokens=185181 seconds=17.49 PASS
+[long] needle long-d25: target=519045 tokens=480448 seconds=70.71 PASS
+[long] needle long-d75: target=519045 tokens=480448 seconds=71.35 PASS
+[long] decode-long: prompt_tokens=480444 TTFT=2.7091827139956877s decode_tokens=399 decode_tps=185.51
+[long] decode-short: prompt_tokens=2100 TTFT=0.20085788701544516s decode_tokens=399 decode_tps=284.40
+[long] fnbench lmstudio rc=0; greedy rc=0
+[long] KV tokens allocated=[524288, 524288]
+[long] [2026-10-02 21:53:28] KV Cache is allocated. dtype: torch.float8_e4m3fn, #tokens: 524288, K size: 3.00 GB, V size: 3.00 GB
+[long] [2026-10-02 21:53:28] KV Cache is allocated. dtype: torch.float8_e4m3fn, #tokens: 524288, K size: 0.25 GB, V size: 0.25 GB
+[long] max GPU used=96220.0 MiB / min GPU free=1667.0 MiB (2s samples)
+[long] server_alive=1 (before stop)
+[long] DONE wa 524288

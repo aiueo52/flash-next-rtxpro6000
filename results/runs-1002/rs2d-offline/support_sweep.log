@@ -1,0 +1,40 @@
+agent-loop: verifies=5986 RS2 E_bv tok/step=3.972348
+  K'=64: IS E_bv' tok/step=3.991169  vs K'=64 +0.000%  ESS=4319  kept ranks/position=9.829 (summed over positions)
+  K'=32: IS E_bv' tok/step=3.991169  vs K'=64 +0.000%  ESS=4319  kept ranks/position=9.829 (summed over positions)
+  K'=24: IS E_bv' tok/step=3.991150  vs K'=64 -0.000%  ESS=4318  kept ranks/position=9.825 (summed over positions)
+  K'=16: IS E_bv' tok/step=3.990370  vs K'=64 -0.020%  ESS=4314  kept ranks/position=9.799 (summed over positions)
+  K'=12: IS E_bv' tok/step=3.991465  vs K'=64 +0.007%  ESS=4300  kept ranks/position=9.747 (summed over positions)
+  K'= 8: IS E_bv' tok/step=3.990692  vs K'=64 -0.012%  ESS=4233  kept ranks/position=9.586 (summed over positions)
+  K'= 4: IS E_bv' tok/step=3.998282  vs K'=64 +0.178%  ESS=3851  kept ranks/position=8.964 (summed over positions)
+code-edit: verifies=3600 RS2 E_bv tok/step=10.249338
+  K'=64: IS E_bv' tok/step=10.361525  vs K'=64 +0.000%  ESS=3086  kept ranks/position=15.051 (summed over positions)
+  K'=32: IS E_bv' tok/step=10.361525  vs K'=64 +0.000%  ESS=3086  kept ranks/position=15.051 (summed over positions)
+  K'=24: IS E_bv' tok/step=10.361530  vs K'=64 +0.000%  ESS=3086  kept ranks/position=15.049 (summed over positions)
+  K'=16: IS E_bv' tok/step=10.361440  vs K'=64 -0.001%  ESS=3085  kept ranks/position=15.041 (summed over positions)
+  K'=12: IS E_bv' tok/step=10.362228  vs K'=64 +0.007%  ESS=3083  kept ranks/position=15.026 (summed over positions)
+  K'= 8: IS E_bv' tok/step=10.358138  vs K'=64 -0.033%  ESS=3076  kept ranks/position=14.988 (summed over positions)
+  K'= 4: IS E_bv' tok/step=10.362963  vs K'=64 +0.014%  ESS=3017  kept ranks/position=14.853 (summed over positions)
+prose-en: verifies=7771 RS2 E_bv tok/step=2.388057
+  K'=64: IS E_bv' tok/step=2.365988  vs K'=64 +0.000%  ESS=5857  kept ranks/position=7.031 (summed over positions)
+  K'=32: IS E_bv' tok/step=2.365988  vs K'=64 +0.000%  ESS=5857  kept ranks/position=7.029 (summed over positions)
+  K'=24: IS E_bv' tok/step=2.365966  vs K'=64 -0.001%  ESS=5857  kept ranks/position=7.022 (summed over positions)
+  K'=16: IS E_bv' tok/step=2.366168  vs K'=64 +0.008%  ESS=5849  kept ranks/position=6.982 (summed over positions)
+  K'=12: IS E_bv' tok/step=2.365647  vs K'=64 -0.014%  ESS=5836  kept ranks/position=6.911 (summed over positions)
+  K'= 8: IS E_bv' tok/step=2.365134  vs K'=64 -0.036%  ESS=5764  kept ranks/position=6.709 (summed over positions)
+  K'= 4: IS E_bv' tok/step=2.362741  vs K'=64 -0.137%  ESS=5375  kept ranks/position=6.004 (summed over positions)
+prose-ja: verifies=7366 RS2 E_bv tok/step=2.387549
+  K'=64: IS E_bv' tok/step=2.365646  vs K'=64 +0.000%  ESS=5672  kept ranks/position=6.809 (summed over positions)
+  K'=32: IS E_bv' tok/step=2.365629  vs K'=64 -0.001%  ESS=5672  kept ranks/position=6.806 (summed over positions)
+  K'=24: IS E_bv' tok/step=2.365856  vs K'=64 +0.009%  ESS=5668  kept ranks/position=6.784 (summed over positions)
+  K'=16: IS E_bv' tok/step=2.365328  vs K'=64 -0.013%  ESS=5655  kept ranks/position=6.698 (summed over positions)
+  K'=12: IS E_bv' tok/step=2.364606  vs K'=64 -0.044%  ESS=5622  kept ranks/position=6.572 (summed over positions)
+  K'= 8: IS E_bv' tok/step=2.363150  vs K'=64 -0.106%  ESS=5530  kept ranks/position=6.289 (summed over positions)
+  K'= 4: IS E_bv' tok/step=2.360490  vs K'=64 -0.218%  ESS=5091  kept ranks/position=5.510 (summed over positions)
+pooled (unweighted mean over workloads):
+  K'=64: 4.771082  vs K'=64 +0.000%
+  K'=32: 4.771078  vs K'=64 -0.000%
+  K'=24: 4.771126  vs K'=64 +0.001%
+  K'=16: 4.770827  vs K'=64 -0.005%
+  K'=12: 4.770987  vs K'=64 -0.002%
+  K'= 8: 4.769278  vs K'=64 -0.038%
+  K'= 4: 4.771119  vs K'=64 +0.001%

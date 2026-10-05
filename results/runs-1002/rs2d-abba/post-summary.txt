@@ -1,0 +1,70 @@
+ancova lmstudio / pooled           t/s        +6.53 [ +4.60 ..  +8.51]  arm  +6.53 [ +1.36 .. +11.97]
+ancova lmstudio / pooled           tok/step   +6.79 [ +4.50 ..  +9.12]  arm  +6.79 [ +4.62 ..  +9.00]
+ancova lmstudio / pooled           ms/step|a  -2.00 [ -3.46 ..  -0.53]  arm  -1.62 [ -5.83 ..  +2.77]
+ancova greedy / pooled             t/s        +1.87 [ -0.39 ..  +4.19]  arm  +1.87 [ -4.73 ..  +8.93]
+ancova greedy / pooled             tok/step   -0.34 [ -3.00 ..  +2.39]  arm  -0.34 [ -3.10 ..  +2.49]
+ancova greedy / pooled             ms/step|a  -2.18 [ -3.30 ..  -1.04]  arm  -2.15 [ -8.05 ..  +4.12]
+ancova lmstudio / agent-loop       t/s        +6.17 [ +2.72 ..  +9.73]  arm  +6.17 [ -0.38 .. +13.16]
+ancova lmstudio / agent-loop       tok/step   +9.60 [ +4.75 .. +14.67]  arm  +9.60 [ +4.56 .. +14.88]
+ancova lmstudio / agent-loop       ms/step|a  -1.86 [ -4.76 ..  +1.14]  arm  -1.96 [ -7.41 ..  +3.81]
+ancova lmstudio / code-edit        t/s        +1.63 [ -2.49 ..  +5.90]  arm  +1.63 [ -6.12 .. +10.00]
+ancova lmstudio / code-edit        tok/step   +0.23 [ -4.52 ..  +5.23]  arm  +0.23 [ -6.85 ..  +7.85]
+ancova lmstudio / code-edit        ms/step|a  -1.44 [ -3.99 ..  +1.17]  arm  -1.44 [ -4.65 ..  +1.88]
+ancova lmstudio / prose-en         t/s        +8.52 [ +5.78 .. +11.33]  arm  +8.52 [ +4.22 .. +12.99]
+ancova lmstudio / prose-en         tok/step   +7.21 [ +6.29 ..  +8.12]  arm  +7.21 [ +6.10 ..  +8.32]
+ancova lmstudio / prose-en         ms/step|a  -2.56 [ -8.31 ..  +3.54]  arm  -0.29 [ -4.37 ..  +3.95]
+ancova lmstudio / prose-ja         t/s       +10.01 [ +5.33 .. +14.90]  arm +10.01 [ +3.01 .. +17.50]
+ancova lmstudio / prose-ja         tok/step  +10.42 [ +4.63 .. +16.52]  arm +10.42 [ +1.68 .. +19.91]
+ancova lmstudio / prose-ja         ms/step|a  -2.82 [ -5.42 ..  -0.15]  arm  -2.78 [ -7.28 ..  +1.93]
+ancova greedy / agent-loop         t/s        +4.62 [ -0.14 ..  +9.61]  arm  +4.62 [ -2.18 .. +11.91]
+ancova greedy / agent-loop         tok/step   +1.35 [ -4.75 ..  +7.84]  arm  +1.35 [ -5.59 ..  +8.80]
+ancova greedy / agent-loop         ms/step|a  -3.59 [ -5.91 ..  -1.22]  arm  -3.57 [ -9.94 ..  +3.25]
+ancova greedy / code-edit          t/s        +1.06 [ -3.07 ..  +5.37]  arm  +1.06 [ -5.12 ..  +7.67]
+ancova greedy / code-edit          tok/step   +0.59 [ -4.64 ..  +6.12]  arm  +0.59 [ -3.22 ..  +4.56]
+ancova greedy / code-edit          ms/step|a  -0.68 [ -3.08 ..  +1.78]  arm  -0.68 [ -5.64 ..  +4.54]
+ancova greedy / prose-en           t/s        +2.13 [ -0.83 ..  +5.19]  arm  +2.13 [ -6.23 .. +11.23]
+ancova greedy / prose-en           tok/step   -0.20 [ -2.54 ..  +2.20]  arm  -0.20 [ -3.45 ..  +3.16]
+ancova greedy / prose-en           ms/step|a  -2.26 [ -4.28 ..  -0.20]  arm  -2.26 [ -8.20 ..  +4.05]
+ancova greedy / prose-ja           t/s        -0.26 [ -6.14 ..  +5.99]  arm  -0.26 [ -6.95 ..  +6.92]
+ancova greedy / prose-ja           tok/step   -3.06 [ -9.70 ..  +4.07]  arm  -3.06 [ -6.62 ..  +0.64]
+ancova greedy / prose-ja           ms/step|a  -2.16 [ -4.53 ..  +0.26]  arm  -2.07 [ -9.13 ..  +5.53]
+clock ancova lmstudio / pooled     B-A clock  -0.06 [ -0.71 ..  +0.61]
+clock ancova lmstudio / pooled     t/s        +6.36 [ +4.57 ..  +8.18]  arm  +6.32 [ +3.23 ..  +9.49]  elasticity +2.76 (se 0.44)
+clock ancova lmstudio / pooled     tok/step   +6.66 [ +4.44 ..  +8.93]  arm  +6.68 [ +4.49 ..  +8.91]  elasticity -1.98 (se 0.55)
+clock ancova lmstudio / pooled     ms/step|a  -1.91 [ -3.28 ..  -0.52]  arm  -1.47 [ -4.34 ..  +1.48]  elasticity +1.72 (se 0.33)
+clock ancova lmstudio / agent-loop B-A clock  +0.04 [ -0.32 ..  +0.41]
+clock ancova lmstudio / agent-loop t/s        +6.67 [ +3.55 ..  +9.87]  arm  +6.71 [ +2.12 .. +11.50]  elasticity +10.27 (se 2.67)
+clock ancova lmstudio / agent-loop tok/step   +9.83 [ +4.98 .. +14.91]  arm  +9.61 [ +4.57 .. +14.90]  elasticity -4.78 (se 4.08)
+clock ancova lmstudio / agent-loop ms/step|a  -2.62 [ -5.21 ..  +0.05]  arm  -2.48 [ -5.56 ..  +0.71]  elasticity +8.34 (se 2.14)
+clock ancova lmstudio / code-edit  B-A clock  -0.33 [ -2.66 ..  +2.05]
+clock ancova lmstudio / code-edit  t/s        +0.70 [ -2.46 ..  +3.97]  arm  +0.56 [ -2.45 ..  +3.67]  elasticity +2.75 (se 0.45)
+clock ancova lmstudio / code-edit  tok/step   -0.42 [ -4.83 ..  +4.19]  arm  -0.32 [ -4.67 ..  +4.22]  elasticity -1.99 (se 0.63)
+clock ancova lmstudio / code-edit  ms/step|a  -0.92 [ -3.03 ..  +1.23]  arm  -0.72 [ -2.66 ..  +1.27]  elasticity +1.70 (se 0.33)
+clock ancova lmstudio / prose-en   B-A clock  +0.07 [ -0.05 ..  +0.19]
+clock ancova lmstudio / prose-en   t/s        +8.71 [ +5.92 .. +11.58]  arm  +8.77 [ +4.58 .. +13.11]  elasticity +2.54 (se 2.90)
+clock ancova lmstudio / prose-en   tok/step   +7.24 [ +6.31 ..  +8.18]  arm  +7.07 [ +5.82 ..  +8.34]  elasticity -0.48 (se 0.97)
+clock ancova lmstudio / prose-en   ms/step|a  -2.85 [ -8.65 ..  +3.31]  arm  -0.43 [ -4.45 ..  +3.76]  elasticity +2.17 (se 2.83)
+clock ancova lmstudio / prose-ja   B-A clock  -0.02 [ -0.11 ..  +0.06]
+clock ancova lmstudio / prose-ja   t/s        +8.59 [ +4.69 .. +12.64]  arm  +8.35 [ +3.64 .. +13.29]  elasticity +52.09 (se 10.43)
+clock ancova lmstudio / prose-ja   tok/step   +8.86 [ +3.80 .. +14.16]  arm  +8.79 [ +4.00 .. +13.81]  elasticity -56.89 (se 13.56)
+clock ancova lmstudio / prose-ja   ms/step|a  -3.15 [ -5.65 ..  -0.58]  arm  -3.07 [ -7.68 ..  +1.76]  elasticity +18.32 (se 7.73)
+clock ancova greedy / pooled       B-A clock  -0.22 [ -1.01 ..  +0.58]
+clock ancova greedy / pooled       t/s        +1.16 [ -0.94 ..  +3.31]  arm  +1.01 [ -2.66 ..  +4.82]  elasticity +3.15 (se 0.53)
+clock ancova greedy / pooled       tok/step   -0.98 [ -3.53 ..  +1.64]  arm  -0.89 [ -3.94 ..  +2.25]  elasticity -2.86 (se 0.66)
+clock ancova greedy / pooled       ms/step|a  -1.89 [ -2.98 ..  -0.79]  arm  -1.65 [ -5.89 ..  +2.78]  elasticity +1.27 (se 0.29)
+clock ancova greedy / agent-loop   B-A clock  -0.35 [ -0.91 ..  +0.21]
+clock ancova greedy / agent-loop   t/s        +2.32 [ -1.85 ..  +6.68]  arm  +2.00 [ -1.57 ..  +5.71]  elasticity +6.36 (se 1.46)
+clock ancova greedy / agent-loop   tok/step   -1.05 [ -6.70 ..  +4.94]  arm  -0.63 [ -7.59 ..  +6.85]  elasticity -6.86 (se 2.06)
+clock ancova greedy / agent-loop   ms/step|a  -2.87 [ -5.16 ..  -0.53]  arm  -2.30 [ -6.95 ..  +2.57]  elasticity +2.35 (se 0.92)
+clock ancova greedy / code-edit    B-A clock  -0.60 [ -3.05 ..  +1.91]
+clock ancova greedy / code-edit    t/s        -0.39 [ -4.01 ..  +3.37]  arm  -0.43 [ -3.92 ..  +3.20]  elasticity +2.41 (se 0.57)
+clock ancova greedy / code-edit    tok/step   -0.35 [ -5.50 ..  +5.08]  arm  -0.05 [ -3.65 ..  +3.68]  elasticity -1.57 (se 0.81)
+clock ancova greedy / code-edit    ms/step|a  +0.19 [ -1.93 ..  +2.36]  arm  +0.40 [ -2.40 ..  +3.28]  elasticity +1.51 (se 0.34)
+clock ancova greedy / prose-en     B-A clock  -0.08 [ -0.40 ..  +0.25]
+clock ancova greedy / prose-en     t/s        +1.63 [ -1.22 ..  +4.55]  arm  +1.72 [ -5.41 ..  +9.39]  elasticity +6.54 (se 2.57)
+clock ancova greedy / prose-en     tok/step   -0.33 [ -2.70 ..  +2.10]  arm  -0.32 [ -3.26 ..  +2.71]  elasticity -1.72 (se 2.18)
+clock ancova greedy / prose-en     ms/step|a  -1.87 [ -3.80 ..  +0.09]  arm  -1.96 [ -7.13 ..  +3.49]  elasticity +5.08 (se 1.80)
+clock ancova greedy / prose-ja     B-A clock  +0.13 [ -0.01 ..  +0.27]
+clock ancova greedy / prose-ja     t/s        +2.62 [ -1.67 ..  +7.10]  arm  +2.61 [ -2.30 ..  +7.77]  elasticity +21.45 (se 2.78)
+clock ancova greedy / prose-ja     tok/step   +0.23 [ -4.64 ..  +5.33]  arm  +0.16 [ -3.55 ..  +4.01]  elasticity -25.11 (se 3.23)
+clock ancova greedy / prose-ja     ms/step|a  -2.40 [ -4.75 ..  +0.01]  arm  -2.44 [ -8.92 ..  +4.49]  elasticity +3.64 (se 2.31)

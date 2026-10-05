@@ -1,0 +1,5 @@
+[min_p ignored, seed 21] N=20000 kernel 77.2s  accept@0 emp 0.6171 theory 0.6183  mean acc 1.196
+   pos 0: n=  20000  TV=0.0140  chi2 dof= 34 p=0.664
+   pos 1: n=  12342  TV=0.0167  chi2 dof= 34 p=0.903
+   pos 2: n=   7381  TV=0.0199  chi2 dof= 30 p=0.344
+   pos 3: n=   4203  TV=0.0357  chi2 dof= 30 p=0.033

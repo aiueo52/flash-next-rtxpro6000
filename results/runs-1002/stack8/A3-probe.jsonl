@@ -1,0 +1,4 @@
+{"mode": "sampling", "workload": "code-edit.txt", "i": 0, "chunks": 101, "completion_tokens": 600, "tok_per_step": 5.9405940594059405, "ms_per_step": 29.929650866467018, "profiled": true}
+{"mode": "sampling", "workload": "code-edit.txt", "i": 1, "chunks": 110, "completion_tokens": 600, "tok_per_step": 5.454545454545454, "ms_per_step": 13.415997571284228, "profiled": false}
+{"mode": "sampling", "workload": "prose-en.txt", "i": 0, "chunks": 200, "completion_tokens": 600, "tok_per_step": 3.0, "ms_per_step": 20.08947901700804, "profiled": true}
+{"mode": "sampling", "workload": "prose-en.txt", "i": 1, "chunks": 256, "completion_tokens": 600, "tok_per_step": 2.34375, "ms_per_step": 10.3800615318391, "profiled": false}

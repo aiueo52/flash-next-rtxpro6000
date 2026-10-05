@@ -1,0 +1,15 @@
+[no top-k, top_p 0.9, T1.0 seed11] N=20000 kernel 75.2s  accept@0 emp 0.5401 theory 0.5402  mean acc 0.997
+   pos 0: n=  20000  TV=0.0302  chi2 dof=161 p=0.679
+   pos 1: n=  10802  TV=0.0355  chi2 dof=162 p=0.771
+   pos 2: n=   5606  TV=0.0432  chi2 dof=122 p=0.625
+   pos 3: n=   3522  TV=0.0631  chi2 dof=111 p=0.632
+[no top-k, top_p 0.9, T1.0 seed12] N=20000 kernel 74.7s  accept@0 emp 0.5353 theory 0.5386  mean acc 1.052
+   pos 0: n=  20000  TV=0.0318  chi2 dof=171 p=0.572
+   pos 1: n=  10707  TV=0.0456  chi2 dof=178 p=0.235
+   pos 2: n=   6743  TV=0.0543  chi2 dof=165 p=0.273
+   pos 3: n=   3592  TV=0.0680  chi2 dof=139 p=0.734
+[no top-k, top_p 0.9, T1.0 seed13] N=20000 kernel 73.5s  accept@0 emp 0.5428 theory 0.5422  mean acc 1.024
+   pos 0: n=  20000  TV=0.0305  chi2 dof=154 p=0.140
+   pos 1: n=  10856  TV=0.0324  chi2 dof=138 p=0.977
+   pos 2: n=   6154  TV=0.0560  chi2 dof=146 p=0.149
+   pos 3: n=   3462  TV=0.0627  chi2 dof=106 p=0.144

@@ -1,0 +1,651 @@
+[abba-xa-st1] A1 (a) queued 18:01:15
+[A1] MemAvailable 202G ok
+[A1] start 18:01:15 mode=on samplings=lmstudio,greedy wt=/home/user/tools/sglang-xa-st1 commit=47d1b4e8ab env='SGLANG_ROUTER_FAST_TOPK=1 SGLANG_OPT_SPEC_SPARSE_VERIFY=1 SGLANG_OPT_SPEC_SPARSE_TOPK=1 SGLANG_OPT_GDN_FRONT_OVERLAP=1 SGLANG_OPT_DRAFT_MOE_GEMV=1 SGLANG_ENABLE_QSA_SHARED_TAIL_PREFIX=1 PYTHONPATH=/home/user/tools/flashinfer-p3:/home/user/tools/sglang-xa-st1/python FLASHINFER_WORKSPACE_BASE=/home/user/.cache/sglang-rq2u2h FLASHINFER_P2_NO_NINJA=1 '
+[A1] server up 18:04:27
+[A1] mapped: /home/user/.cache/sglang-rq2u2h/.cache/flashinfer/0.6.17/120f/cached_ops/fused_moe_120/fused_moe_120.so
+  => greedy prose-en.txt: median ms/step (unprofiled) 15.29  tok/step 4.08
+  => sampling code-edit.txt: median ms/step (unprofiled) 12.96  tok/step 5.56
+measured bn1-code-edit-01 1/1: 503.65 t/s
+measured bn1-prose-en-01 1/1: 215.61 t/s
+measured bn1-prose-ja-01 1/1: 226.82 t/s
+measured bn1-agent-loop-01 1/1: 276.58 t/s
+measured bn1-code-edit-02 1/1: 576.06 t/s
+measured bn1-prose-en-02 1/1: 204.38 t/s
+measured bn1-prose-ja-02 1/1: 213.85 t/s
+measured bn1-agent-loop-02 1/1: 289.69 t/s
+measured bn1-code-edit-03 1/1: 638.99 t/s
+measured bn1-prose-en-03 1/1: 205.30 t/s
+measured bn1-prose-ja-03 1/1: 216.95 t/s
+measured bn1-agent-loop-03 1/1: 270.12 t/s
+measured bn1-code-edit-04 1/1: 520.20 t/s
+measured bn1-prose-en-04 1/1: 222.32 t/s
+measured bn1-prose-ja-04 1/1: 226.75 t/s
+measured bn1-agent-loop-04 1/1: 319.89 t/s
+[A1] fnbench lmstudio rc=0 18:11:36
+measured bn1-code-edit-01 1/1: 519.04 t/s
+measured bn1-prose-en-01 1/1: 257.49 t/s
+measured bn1-prose-ja-01 1/1: 306.82 t/s
+measured bn1-agent-loop-01 1/1: 366.39 t/s
+measured bn1-code-edit-02 1/1: 621.99 t/s
+measured bn1-prose-en-02 1/1: 251.48 t/s
+measured bn1-prose-ja-02 1/1: 291.71 t/s
+measured bn1-agent-loop-02 1/1: 355.55 t/s
+measured bn1-code-edit-03 1/1: 574.03 t/s
+measured bn1-prose-en-03 1/1: 257.25 t/s
+measured bn1-prose-ja-03 1/1: 275.86 t/s
+measured bn1-agent-loop-03 1/1: 369.53 t/s
+measured bn1-code-edit-04 1/1: 657.36 t/s
+measured bn1-prose-en-04 1/1: 292.96 t/s
+measured bn1-prose-ja-04 1/1: 326.94 t/s
+measured bn1-agent-loop-04 1/1: 346.65 t/s
+[A1] fnbench greedy rc=0 18:17:32
+  start_profile: 200
+  greedy   code-edit.txt  #0 chunks=  97 tokens= 600 tok/step=6.19 ms/step= 27.29 (profiled)
+  sampling code-edit.txt  #0 chunks=  97 tokens= 600 tok/step=6.19 ms/step= 26.42 (profiled)
+  sampling code-edit.txt  #1 chunks=  93 tokens= 600 tok/step=6.45 ms/step= 13.73
+  => sampling code-edit.txt: median ms/step (unprofiled) 13.73  tok/step 6.32
+  sampling prose-en.txt   #0 chunks= 230 tokens= 600 tok/step=2.61 ms/step= 15.62 (profiled)
+  sampling prose-en.txt   #1 chunks= 202 tokens= 600 tok/step=2.97 ms/step= 11.31
+  => sampling prose-en.txt: median ms/step (unprofiled) 11.31  tok/step 2.79
+[A1] error lines in server log: 0
+[A1] draft MoE GEMV enabled lines: 1
+[A1] GEMV fallback warnings: 0
+[A1] rt1 _router_triton_kernel: n=0 median=-
+[A1] rt1 _router_softmax_fast_kernel: n=0 median=-
+[A1] rt1 _router_softmax_fast32_kernel: n=1100 median=3.23 us
+[A1] rt1 _w8a16_gemv_kernel: n=6380 median=7.07 us
+[A1] dg1 gemv_k1           count    120  median  16.35 us
+[A1] dg1 gemv_k2           count    120  median   9.84 us
+[A1] dg1 cutlass_prologue  count    980  median   8.42 us
+[A1] dg1 cutlass_act       count    980  median   3.58 us
+[A1] fg1 hc_combine_gate_kernel   per stream: {13: 720, 173: 1000, 174: 480}
+[A1] fg1 _w8a16_gemv_kernel       per stream: {13: 2300, 169: 120, 171: 20, 173: 2480, 174: 1460}
+[A1] fg1 _hc_down_kernel          per stream: {13: 880, 173: 980, 174: 500}
+[A1] fg1 _hc_up_kernel            per stream: {13: 880, 173: 980, 174: 500}
+[A1] fg1 main stream 173, GDN alt stream 13: gates on the alt stream 720 of 2200, overlapping main K1/K2 220
+[A1] rq A1-g-code-edit grid   96 (T=8): n=  980 p10   8.06 p50   8.42 p90   9.02 fast  98.8%
+[A1] sv1 code-edit sparse-verify kernels in trace:  120 "name": "_mtp_shared_sparse_indices_lookup_prefix_kernel; 20 "name": "_sparse_target_probs_kernel; 20 "name": "_tree_sampling_target_only_sparse_kernel;
+[A1] sv2 code-edit top-k kernels in trace:  20 flashinfer::sampling::RadixTopKKernel; 20 flashinfer::sampling::StableSortTopKByValueKernel;
+[A1] sv1 prose-en sparse-verify kernels in trace:  120 "name": "_mtp_shared_sparse_indices_lookup_prefix_kernel; 20 "name": "_sparse_target_probs_kernel; 20 "name": "_tree_sampling_target_only_sparse_kernel;
+[A1] sv2 prose-en top-k kernels in trace:  20 flashinfer::sampling::RadixTopKKernel; 20 flashinfer::sampling::StableSortTopKByValueKernel;
+bench/stack/arm_stack.sh: 46 行: 401821 強制終了            env PORT=$PORT SERVE_DISPLAY_HZ= $ARM_ENV ${SERVER_ENV:-} setsid ./serve-fast.sh wa > "$LOG" 2>&1 < /dev/null  (wd: ~/tools/sglang-xa-st1)
+[A1] stopped 18:17:53; gpu mem: 3184 MiB
+[abba-xa-st1] A1 ST1 log lines: 3, XA1 fallback warnings: 0
+[abba-xa-st1] A1 triton_decode  count      0  median      -  grids 
+[abba-xa-st1] A1 xqa_mha        count    380  median  16.18 us  grids [9, 2, 8] x260, [9, 2, 1] x120
+[abba-xa-st1] A1 compact_kv     count    380  median   7.71 us  grids [8, 2, 129] x260, [1, 2, 129] x120
+[abba-xa-st1] A1 valid_counts   count    380  median   1.15 us  grids [8, 1, 1] x260, [1, 1, 1] x120
+[abba-xa-st1] B1 (b) queued 18:18:24
+[B1] MemAvailable 203G ok
+[B1] start 18:18:24 mode=on samplings=lmstudio,greedy wt=/home/user/tools/sglang-xa-st1 commit=47d1b4e8ab env='SGLANG_ROUTER_FAST_TOPK=1 SGLANG_OPT_SPEC_SPARSE_VERIFY=1 SGLANG_OPT_SPEC_SPARSE_TOPK=1 SGLANG_OPT_GDN_FRONT_OVERLAP=1 SGLANG_OPT_DRAFT_MOE_GEMV=1 SGLANG_ENABLE_QSA_SHARED_TAIL_PREFIX=1 SGLANG_OPT_TRITON_DECODE_ATTN=1 PYTHONPATH=/home/user/tools/flashinfer-p3:/home/user/tools/sglang-xa-st1/python FLASHINFER_WORKSPACE_BASE=/home/user/.cache/sglang-rq2u2h FLASHINFER_P2_NO_NINJA=1 '
+[B1] server up 18:22:08
+[B1] mapped: /home/user/.cache/sglang-rq2u2h/.cache/flashinfer/0.6.17/120f/cached_ops/fused_moe_120/fused_moe_120.so
+  => greedy prose-en.txt: median ms/step (unprofiled) 15.33  tok/step 4.08
+  => sampling code-edit.txt: median ms/step (unprofiled) 12.78  tok/step 5.88
+measured bn1-code-edit-01 1/1: 500.05 t/s
+measured bn1-prose-en-01 1/1: 195.02 t/s
+measured bn1-prose-ja-01 1/1: 219.64 t/s
+measured bn1-agent-loop-01 1/1: 299.28 t/s
+measured bn1-code-edit-02 1/1: 587.27 t/s
+measured bn1-prose-en-02 1/1: 214.30 t/s
+measured bn1-prose-ja-02 1/1: 221.66 t/s
+measured bn1-agent-loop-02 1/1: 317.45 t/s
+measured bn1-code-edit-03 1/1: 589.60 t/s
+measured bn1-prose-en-03 1/1: 213.28 t/s
+measured bn1-prose-ja-03 1/1: 386.05 t/s
+measured bn1-agent-loop-03 1/1: 293.22 t/s
+measured bn1-code-edit-04 1/1: 551.47 t/s
+measured bn1-prose-en-04 1/1: 219.71 t/s
+measured bn1-prose-ja-04 1/1: 233.33 t/s
+measured bn1-agent-loop-04 1/1: 322.60 t/s
+[B1] fnbench lmstudio rc=0 18:29:10
+measured bn1-code-edit-01 1/1: 541.94 t/s
+measured bn1-prose-en-01 1/1: 248.04 t/s
+measured bn1-prose-ja-01 1/1: 288.81 t/s
+measured bn1-agent-loop-01 1/1: 374.61 t/s
+measured bn1-code-edit-02 1/1: 642.06 t/s
+measured bn1-prose-en-02 1/1: 247.43 t/s
+measured bn1-prose-ja-02 1/1: 246.48 t/s
+measured bn1-agent-loop-02 1/1: 332.43 t/s
+measured bn1-code-edit-03 1/1: 597.37 t/s
+measured bn1-prose-en-03 1/1: 241.77 t/s
+measured bn1-prose-ja-03 1/1: 268.30 t/s
+measured bn1-agent-loop-03 1/1: 372.83 t/s
+measured bn1-code-edit-04 1/1: 592.28 t/s
+measured bn1-prose-en-04 1/1: 242.33 t/s
+measured bn1-prose-ja-04 1/1: 284.29 t/s
+measured bn1-agent-loop-04 1/1: 359.89 t/s
+[B1] fnbench greedy rc=0 18:35:19
+  start_profile: 200
+  greedy   code-edit.txt  #0 chunks=  93 tokens= 600 tok/step=6.45 ms/step= 28.27 (profiled)
+  sampling code-edit.txt  #0 chunks= 100 tokens= 600 tok/step=6.00 ms/step= 27.13 (profiled)
+  sampling code-edit.txt  #1 chunks= 105 tokens= 600 tok/step=5.71 ms/step= 14.42
+  => sampling code-edit.txt: median ms/step (unprofiled) 14.42  tok/step 5.86
+  sampling prose-en.txt   #0 chunks= 227 tokens= 600 tok/step=2.64 ms/step= 17.91 (profiled)
+  sampling prose-en.txt   #1 chunks= 229 tokens= 600 tok/step=2.62 ms/step= 10.86
+  => sampling prose-en.txt: median ms/step (unprofiled) 10.86  tok/step 2.63
+[B1] error lines in server log: 0
+[B1] draft MoE GEMV enabled lines: 1
+[B1] GEMV fallback warnings: 0
+[B1] rt1 _router_triton_kernel: n=0 median=-
+[B1] rt1 _router_softmax_fast_kernel: n=0 median=-
+[B1] rt1 _router_softmax_fast32_kernel: n=1100 median=3.20 us
+[B1] rt1 _w8a16_gemv_kernel: n=6380 median=7.07 us
+[B1] dg1 gemv_k1           count    120  median  16.26 us
+[B1] dg1 gemv_k2           count    120  median   9.74 us
+[B1] dg1 cutlass_prologue  count    980  median   8.35 us
+[B1] dg1 cutlass_act       count    980  median   3.62 us
+[B1] fg1 hc_combine_gate_kernel   per stream: {13: 720, 173: 1000, 174: 480}
+[B1] fg1 _w8a16_gemv_kernel       per stream: {13: 2300, 169: 120, 171: 20, 173: 2480, 174: 1460}
+[B1] fg1 _hc_down_kernel          per stream: {13: 880, 173: 980, 174: 500}
+[B1] fg1 _hc_up_kernel            per stream: {13: 880, 173: 980, 174: 500}
+[B1] fg1 main stream 173, GDN alt stream 13: gates on the alt stream 720 of 2200, overlapping main K1/K2 220
+[B1] rq B1-g-code-edit grid   96 (T=8): n=  980 p10   7.90 p50   8.35 p90   9.02 fast  99.0%
+[B1] sv1 code-edit sparse-verify kernels in trace:  120 "name": "_mtp_shared_sparse_indices_lookup_prefix_kernel; 20 "name": "_sparse_target_probs_kernel; 20 "name": "_tree_sampling_target_only_sparse_kernel;
+[B1] sv2 code-edit top-k kernels in trace:  20 flashinfer::sampling::RadixTopKKernel; 20 flashinfer::sampling::StableSortTopKByValueKernel;
+[B1] sv1 prose-en sparse-verify kernels in trace:  120 "name": "_mtp_shared_sparse_indices_lookup_prefix_kernel; 20 "name": "_sparse_target_probs_kernel; 20 "name": "_tree_sampling_target_only_sparse_kernel;
+[B1] sv2 prose-en top-k kernels in trace:  20 flashinfer::sampling::RadixTopKKernel; 20 flashinfer::sampling::StableSortTopKByValueKernel;
+bench/stack/arm_stack.sh: 46 行: 410144 強制終了            env PORT=$PORT SERVE_DISPLAY_HZ= $ARM_ENV ${SERVER_ENV:-} setsid ./serve-fast.sh wa > "$LOG" 2>&1 < /dev/null  (wd: ~/tools/sglang-xa-st1)
+[B1] stopped 18:35:41; gpu mem: 3803 MiB
+[abba-xa-st1] B1 ST1 log lines: 3, XA1 fallback warnings: 0
+[abba-xa-st1] B1 triton_decode  count    380  median  12.19 us  grids [11, 2, 8] x260, [22, 2, 1] x120
+[abba-xa-st1] B1 xqa_mha        count      0  median      -  grids 
+[abba-xa-st1] B1 compact_kv     count      0  median      -  grids 
+[abba-xa-st1] B1 valid_counts   count      0  median      -  grids 
+[abba-xa-st1] B2 (b) queued 18:47:54
+[B2] MemAvailable 197G ok
+[B2] start 18:47:55 mode=on samplings=lmstudio,greedy wt=/home/user/tools/sglang-xa-st1 commit=47d1b4e8ab env='SGLANG_ROUTER_FAST_TOPK=1 SGLANG_OPT_SPEC_SPARSE_VERIFY=1 SGLANG_OPT_SPEC_SPARSE_TOPK=1 SGLANG_OPT_GDN_FRONT_OVERLAP=1 SGLANG_OPT_DRAFT_MOE_GEMV=1 SGLANG_ENABLE_QSA_SHARED_TAIL_PREFIX=1 SGLANG_OPT_TRITON_DECODE_ATTN=1 PYTHONPATH=/home/user/tools/flashinfer-p3:/home/user/tools/sglang-xa-st1/python FLASHINFER_WORKSPACE_BASE=/home/user/.cache/sglang-rq2u2h FLASHINFER_P2_NO_NINJA=1 '
+[B2] server up 18:51:52
+[B2] mapped: /home/user/.cache/sglang-rq2u2h/.cache/flashinfer/0.6.17/120f/cached_ops/fused_moe_120/fused_moe_120.so
+  => greedy prose-en.txt: median ms/step (unprofiled) 15.99  tok/step 5.00
+  => sampling code-edit.txt: median ms/step (unprofiled) 11.67  tok/step 4.17
+measured bn1-code-edit-01 1/1: 439.00 t/s
+measured bn1-prose-en-01 1/1: 214.51 t/s
+measured bn1-prose-ja-01 1/1: 234.46 t/s
+measured bn1-agent-loop-01 1/1: 308.96 t/s
+measured bn1-code-edit-02 1/1: 655.51 t/s
+measured bn1-prose-en-02 1/1: 224.48 t/s
+measured bn1-prose-ja-02 1/1: 236.55 t/s
+measured bn1-agent-loop-02 1/1: 322.84 t/s
+measured bn1-code-edit-03 1/1: 567.89 t/s
+measured bn1-prose-en-03 1/1: 224.15 t/s
+measured bn1-prose-ja-03 1/1: 221.84 t/s
+measured bn1-agent-loop-03 1/1: 276.12 t/s
+measured bn1-code-edit-04 1/1: 518.88 t/s
+measured bn1-prose-en-04 1/1: 218.27 t/s
+measured bn1-prose-ja-04 1/1: 223.78 t/s
+measured bn1-agent-loop-04 1/1: 304.59 t/s
+[B2] fnbench lmstudio rc=0 18:58:54
+measured bn1-code-edit-01 1/1: 495.60 t/s
+measured bn1-prose-en-01 1/1: 229.83 t/s
+measured bn1-prose-ja-01 1/1: 265.29 t/s
+measured bn1-agent-loop-01 1/1: 334.92 t/s
+measured bn1-code-edit-02 1/1: 573.30 t/s
+measured bn1-prose-en-02 1/1: 242.04 t/s
+measured bn1-prose-ja-02 1/1: 268.67 t/s
+measured bn1-agent-loop-02 1/1: 312.40 t/s
+measured bn1-code-edit-03 1/1: 589.93 t/s
+measured bn1-prose-en-03 1/1: 241.35 t/s
+measured bn1-prose-ja-03 1/1: 264.42 t/s
+measured bn1-agent-loop-03 1/1: 358.17 t/s
+measured bn1-code-edit-04 1/1: 594.83 t/s
+measured bn1-prose-en-04 1/1: 275.78 t/s
+measured bn1-prose-ja-04 1/1: 263.51 t/s
+measured bn1-agent-loop-04 1/1: 343.25 t/s
+[B2] fnbench greedy rc=0 19:05:14
+  start_profile: 200
+  greedy   code-edit.txt  #0 chunks=  98 tokens= 600 tok/step=6.12 ms/step= 27.29 (profiled)
+  sampling code-edit.txt  #0 chunks= 104 tokens= 600 tok/step=5.77 ms/step= 24.57 (profiled)
+  sampling code-edit.txt  #1 chunks= 112 tokens= 600 tok/step=5.36 ms/step= 12.71
+  => sampling code-edit.txt: median ms/step (unprofiled) 12.71  tok/step 5.56
+  sampling prose-en.txt   #0 chunks= 218 tokens= 600 tok/step=2.75 ms/step= 16.88 (profiled)
+  sampling prose-en.txt   #1 chunks= 238 tokens= 600 tok/step=2.52 ms/step=  9.78
+  => sampling prose-en.txt: median ms/step (unprofiled) 9.78  tok/step 2.64
+[B2] error lines in server log: 0
+[B2] draft MoE GEMV enabled lines: 1
+[B2] GEMV fallback warnings: 0
+[B2] rt1 _router_triton_kernel: n=0 median=-
+[B2] rt1 _router_softmax_fast_kernel: n=0 median=-
+[B2] rt1 _router_softmax_fast32_kernel: n=1100 median=3.26 us
+[B2] rt1 _w8a16_gemv_kernel: n=6380 median=7.09 us
+[B2] dg1 gemv_k1           count    120  median  16.38 us
+[B2] dg1 gemv_k2           count    120  median   9.78 us
+[B2] dg1 cutlass_prologue  count    980  median   8.35 us
+[B2] dg1 cutlass_act       count    980  median   3.62 us
+[B2] fg1 hc_combine_gate_kernel   per stream: {13: 720, 173: 1000, 174: 480}
+[B2] fg1 _w8a16_gemv_kernel       per stream: {13: 2300, 169: 120, 171: 20, 173: 2480, 174: 1460}
+[B2] fg1 _hc_down_kernel          per stream: {13: 880, 173: 980, 174: 500}
+[B2] fg1 _hc_up_kernel            per stream: {13: 880, 173: 980, 174: 500}
+[B2] fg1 main stream 173, GDN alt stream 13: gates on the alt stream 720 of 2200, overlapping main K1/K2 220
+[B2] rq B2-g-code-edit grid   96 (T=8): n=  980 p10   7.94 p50   8.35 p90   8.93 fast  99.0%
+[B2] sv1 code-edit sparse-verify kernels in trace:  120 "name": "_mtp_shared_sparse_indices_lookup_prefix_kernel; 20 "name": "_sparse_target_probs_kernel; 20 "name": "_tree_sampling_target_only_sparse_kernel;
+[B2] sv2 code-edit top-k kernels in trace:  20 flashinfer::sampling::RadixTopKKernel; 20 flashinfer::sampling::StableSortTopKByValueKernel;
+[B2] sv1 prose-en sparse-verify kernels in trace:  120 "name": "_mtp_shared_sparse_indices_lookup_prefix_kernel; 20 "name": "_sparse_target_probs_kernel; 20 "name": "_tree_sampling_target_only_sparse_kernel;
+[B2] sv2 prose-en top-k kernels in trace:  20 flashinfer::sampling::RadixTopKKernel; 20 flashinfer::sampling::StableSortTopKByValueKernel;
+bench/stack/arm_stack.sh: 47 行: 427541 強制終了            env PORT=$PORT SERVE_DISPLAY_HZ= $ARM_ENV ${SERVER_ENV:-} setsid ./serve-fast.sh wa > "$LOG" 2>&1 < /dev/null  (wd: ~/tools/sglang-xa-st1)
+[B2] stopped 19:05:36; gpu mem: 3834 MiB
+[abba-xa-st1] B2 ST1 log lines: 3, XA1 fallback warnings: 0
+[abba-xa-st1] B2 triton_decode  count    380  median  12.19 us  grids [11, 2, 8] x260, [22, 2, 1] x120
+[abba-xa-st1] B2 xqa_mha        count      0  median      -  grids 
+[abba-xa-st1] B2 compact_kv     count      0  median      -  grids 
+[abba-xa-st1] B2 valid_counts   count      0  median      -  grids 
+[abba-xa-st1] A2 (a) queued 23:34:58
+[A2] MemAvailable 192G ok
+[A2] start 23:44:48 mode=on samplings=lmstudio,greedy wt=/home/user/tools/sglang-xa-st1 commit=47d1b4e8ab env='SGLANG_ROUTER_FAST_TOPK=1 SGLANG_OPT_SPEC_SPARSE_VERIFY=1 SGLANG_OPT_SPEC_SPARSE_TOPK=1 SGLANG_OPT_GDN_FRONT_OVERLAP=1 SGLANG_OPT_DRAFT_MOE_GEMV=1 SGLANG_ENABLE_QSA_SHARED_TAIL_PREFIX=1 PYTHONPATH=/home/user/tools/flashinfer-p3:/home/user/tools/sglang-xa-st1/python FLASHINFER_WORKSPACE_BASE=/home/user/.cache/sglang-rq2u2h FLASHINFER_P2_NO_NINJA=1 '
+[A2] server up 23:48:16
+[A2] mapped: /home/user/.cache/sglang-rq2u2h/.cache/flashinfer/0.6.17/120f/cached_ops/fused_moe_120/fused_moe_120.so
+  => greedy prose-en.txt: median ms/step (unprofiled) 17.04  tok/step 5.00
+  => sampling code-edit.txt: median ms/step (unprofiled) 12.57  tok/step 6.25
+measured bn1-code-edit-01 1/1: 521.14 t/s
+measured bn1-prose-en-01 1/1: 216.17 t/s
+measured bn1-prose-ja-01 1/1: 236.41 t/s
+measured bn1-agent-loop-01 1/1: 323.77 t/s
+measured bn1-code-edit-02 1/1: 635.89 t/s
+measured bn1-prose-en-02 1/1: 219.86 t/s
+measured bn1-prose-ja-02 1/1: 220.60 t/s
+measured bn1-agent-loop-02 1/1: 315.83 t/s
+measured bn1-code-edit-03 1/1: 485.96 t/s
+measured bn1-prose-en-03 1/1: 213.84 t/s
+measured bn1-prose-ja-03 1/1: 309.05 t/s
+measured bn1-agent-loop-03 1/1: 308.34 t/s
+measured bn1-code-edit-04 1/1: 528.20 t/s
+measured bn1-prose-en-04 1/1: 217.42 t/s
+measured bn1-prose-ja-04 1/1: 242.27 t/s
+measured bn1-agent-loop-04 1/1: 314.25 t/s
+[A2] fnbench lmstudio rc=0 23:55:20
+measured bn1-code-edit-01 1/1: 540.48 t/s
+measured bn1-prose-en-01 1/1: 243.06 t/s
+measured bn1-prose-ja-01 1/1: 276.51 t/s
+measured bn1-agent-loop-01 1/1: 336.91 t/s
+measured bn1-code-edit-02 1/1: 594.28 t/s
+measured bn1-prose-en-02 1/1: 251.14 t/s
+measured bn1-prose-ja-02 1/1: 241.77 t/s
+measured bn1-agent-loop-02 1/1: 327.42 t/s
+measured bn1-code-edit-03 1/1: 587.23 t/s
+measured bn1-prose-en-03 1/1: 232.73 t/s
+measured bn1-prose-ja-03 1/1: 268.62 t/s
+measured bn1-agent-loop-03 1/1: 366.48 t/s
+measured bn1-code-edit-04 1/1: 519.41 t/s
+measured bn1-prose-en-04 1/1: 230.76 t/s
+measured bn1-prose-ja-04 1/1: 289.86 t/s
+measured bn1-agent-loop-04 1/1: 360.41 t/s
+[A2] fnbench greedy rc=0 00:01:43
+  start_profile: 200
+  greedy   code-edit.txt  #0 chunks=  96 tokens= 600 tok/step=6.25 ms/step= 26.52 (profiled)
+  sampling code-edit.txt  #0 chunks= 103 tokens= 600 tok/step=5.83 ms/step= 25.46 (profiled)
+  sampling code-edit.txt  #1 chunks=  86 tokens= 600 tok/step=6.98 ms/step= 15.29
+  => sampling code-edit.txt: median ms/step (unprofiled) 15.29  tok/step 6.40
+  sampling prose-en.txt   #0 chunks= 241 tokens= 600 tok/step=2.49 ms/step= 15.76 (profiled)
+  sampling prose-en.txt   #1 chunks= 254 tokens= 600 tok/step=2.36 ms/step=  9.56
+  => sampling prose-en.txt: median ms/step (unprofiled) 9.56  tok/step 2.43
+[A2] error lines in server log: 0
+[A2] draft MoE GEMV enabled lines: 1
+[A2] GEMV fallback warnings: 0
+[A2] rt1 _router_triton_kernel: n=0 median=-
+[A2] rt1 _router_softmax_fast_kernel: n=0 median=-
+[A2] rt1 _router_softmax_fast32_kernel: n=1100 median=3.20 us
+[A2] rt1 _w8a16_gemv_kernel: n=6380 median=7.07 us
+[A2] dg1 gemv_k1           count    120  median  16.37 us
+[A2] dg1 gemv_k2           count    120  median   9.71 us
+[A2] dg1 cutlass_prologue  count    980  median   8.35 us
+[A2] dg1 cutlass_act       count    980  median   3.55 us
+[A2] fg1 hc_combine_gate_kernel   per stream: {13: 720, 173: 1000, 174: 480}
+[A2] fg1 _w8a16_gemv_kernel       per stream: {13: 2300, 169: 120, 171: 20, 173: 2480, 174: 1460}
+[A2] fg1 _hc_down_kernel          per stream: {13: 880, 173: 980, 174: 500}
+[A2] fg1 _hc_up_kernel            per stream: {13: 880, 173: 980, 174: 500}
+[A2] fg1 main stream 173, GDN alt stream 13: gates on the alt stream 720 of 2200, overlapping main K1/K2 220
+[A2] rq A2-g-code-edit grid   96 (T=8): n=  980 p10   7.97 p50   8.35 p90   8.99 fast  98.8%
+[A2] sv1 code-edit sparse-verify kernels in trace:  120 "name": "_mtp_shared_sparse_indices_lookup_prefix_kernel; 20 "name": "_sparse_target_probs_kernel; 20 "name": "_tree_sampling_target_only_sparse_kernel;
+[A2] sv2 code-edit top-k kernels in trace:  20 flashinfer::sampling::RadixTopKKernel; 20 flashinfer::sampling::StableSortTopKByValueKernel;
+[A2] sv1 prose-en sparse-verify kernels in trace:  120 "name": "_mtp_shared_sparse_indices_lookup_prefix_kernel; 20 "name": "_sparse_target_probs_kernel; 20 "name": "_tree_sampling_target_only_sparse_kernel;
+[A2] sv2 prose-en top-k kernels in trace:  20 flashinfer::sampling::RadixTopKKernel; 20 flashinfer::sampling::StableSortTopKByValueKernel;
+bench/stack/arm_stack.sh: 47 行: 614738 強制終了            env PORT=$PORT SERVE_DISPLAY_HZ= $ARM_ENV ${SERVER_ENV:-} setsid ./serve-fast.sh wa > "$LOG" 2>&1 < /dev/null  (wd: ~/tools/sglang-xa-st1)
+[A2] stopped 00:02:05; gpu mem: 3203 MiB
+[abba-xa-st1] A2 ST1 log lines: 3, XA1 fallback warnings: 0
+[abba-xa-st1] A2 triton_decode  count      0  median      -  grids 
+[abba-xa-st1] A2 xqa_mha        count    380  median  16.32 us  grids [9, 2, 8] x260, [9, 2, 1] x120
+[abba-xa-st1] A2 compact_kv     count    380  median   7.71 us  grids [8, 2, 129] x260, [1, 2, 129] x120
+[abba-xa-st1] A2 valid_counts   count    380  median   1.19 us  grids [8, 1, 1] x260, [1, 1, 1] x120
+[abba-xa-st1] B3 (b) queued 00:02:36
+[B3] MemAvailable 194G ok
+[B3] start 00:07:39 mode=on samplings=lmstudio,greedy wt=/home/user/tools/sglang-xa-st1 commit=47d1b4e8ab env='SGLANG_ROUTER_FAST_TOPK=1 SGLANG_OPT_SPEC_SPARSE_VERIFY=1 SGLANG_OPT_SPEC_SPARSE_TOPK=1 SGLANG_OPT_GDN_FRONT_OVERLAP=1 SGLANG_OPT_DRAFT_MOE_GEMV=1 SGLANG_ENABLE_QSA_SHARED_TAIL_PREFIX=1 SGLANG_OPT_TRITON_DECODE_ATTN=1 PYTHONPATH=/home/user/tools/flashinfer-p3:/home/user/tools/sglang-xa-st1/python FLASHINFER_WORKSPACE_BASE=/home/user/.cache/sglang-rq2u2h FLASHINFER_P2_NO_NINJA=1 '
+[B3] server up 00:11:03
+[B3] mapped: /home/user/.cache/sglang-rq2u2h/.cache/flashinfer/0.6.17/120f/cached_ops/fused_moe_120/fused_moe_120.so
+  => greedy prose-en.txt: median ms/step (unprofiled) 16.20  tok/step 5.41
+  => sampling code-edit.txt: median ms/step (unprofiled) 13.22  tok/step 6.67
+measured bn1-code-edit-01 1/1: 534.02 t/s
+measured bn1-prose-en-01 1/1: 227.18 t/s
+measured bn1-prose-ja-01 1/1: 241.45 t/s
+measured bn1-agent-loop-01 1/1: 305.36 t/s
+measured bn1-code-edit-02 1/1: 657.55 t/s
+measured bn1-prose-en-02 1/1: 245.10 t/s
+measured bn1-prose-ja-02 1/1: 292.11 t/s
+measured bn1-agent-loop-02 1/1: 302.35 t/s
+measured bn1-code-edit-03 1/1: 649.61 t/s
+measured bn1-prose-en-03 1/1: 239.93 t/s
+measured bn1-prose-ja-03 1/1: 239.04 t/s
+measured bn1-agent-loop-03 1/1: 329.62 t/s
+measured bn1-code-edit-04 1/1: 627.11 t/s
+measured bn1-prose-en-04 1/1: 243.11 t/s
+measured bn1-prose-ja-04 1/1: 243.33 t/s
+measured bn1-agent-loop-04 1/1: 317.67 t/s
+[B3] fnbench lmstudio rc=0 00:17:30
+measured bn1-code-edit-01 1/1: 557.52 t/s
+measured bn1-prose-en-01 1/1: 256.82 t/s
+measured bn1-prose-ja-01 1/1: 374.87 t/s
+measured bn1-agent-loop-01 1/1: 374.70 t/s
+measured bn1-code-edit-02 1/1: 646.14 t/s
+measured bn1-prose-en-02 1/1: 259.15 t/s
+measured bn1-prose-ja-02 1/1: 301.18 t/s
+measured bn1-agent-loop-02 1/1: 352.33 t/s
+measured bn1-code-edit-03 1/1: 684.78 t/s
+measured bn1-prose-en-03 1/1: 253.13 t/s
+measured bn1-prose-ja-03 1/1: 278.24 t/s
+measured bn1-agent-loop-03 1/1: 401.45 t/s
+measured bn1-code-edit-04 1/1: 527.58 t/s
+measured bn1-prose-en-04 1/1: 263.35 t/s
+measured bn1-prose-ja-04 1/1: 282.49 t/s
+measured bn1-agent-loop-04 1/1: 418.00 t/s
+[B3] fnbench greedy rc=0 00:23:12
+  start_profile: 200
+  greedy   code-edit.txt  #0 chunks=  82 tokens= 600 tok/step=7.32 ms/step= 31.71 (profiled)
+  sampling code-edit.txt  #0 chunks=  71 tokens= 600 tok/step=8.45 ms/step= 38.18 (profiled)
+  sampling code-edit.txt  #1 chunks=  72 tokens= 600 tok/step=8.33 ms/step= 15.97
+  => sampling code-edit.txt: median ms/step (unprofiled) 15.97  tok/step 8.39
+  sampling prose-en.txt   #0 chunks= 235 tokens= 600 tok/step=2.55 ms/step= 16.26 (profiled)
+  sampling prose-en.txt   #1 chunks= 230 tokens= 600 tok/step=2.61 ms/step=  8.98
+  => sampling prose-en.txt: median ms/step (unprofiled) 8.98  tok/step 2.58
+[B3] error lines in server log: 0
+[B3] draft MoE GEMV enabled lines: 1
+[B3] GEMV fallback warnings: 0
+[B3] rt1 _router_triton_kernel: n=0 median=-
+[B3] rt1 _router_softmax_fast_kernel: n=0 median=-
+[B3] rt1 _router_softmax_fast32_kernel: n=1148 median=3.33 us
+[B3] rt1 _w8a16_gemv_kernel: n=6668 median=7.23 us
+[B3] dg1 gemv_k1           count    168  median  16.38 us
+[B3] dg1 gemv_k2           count    168  median   9.73 us
+[B3] dg1 cutlass_prologue  count    980  median   8.42 us
+[B3] dg1 cutlass_act       count    980  median   3.62 us
+[B3] fg1 hc_combine_gate_kernel   per stream: {13: 816, 145: 300, 146: 144, 173: 700, 174: 336}
+[B3] fg1 _w8a16_gemv_kernel       per stream: {13: 2540, 145: 744, 146: 438, 154: 84, 158: 6, 169: 84, 171: 14, 173: 1736, 174: 1022}
+[B3] fg1 _hc_down_kernel          per stream: {13: 1024, 145: 294, 146: 150, 173: 686, 174: 350}
+[B3] fg1 _hc_up_kernel            per stream: {13: 1024, 145: 294, 146: 150, 173: 686, 174: 350}
+[B3] fg1 main stream 13, GDN alt stream 173: gates on the alt stream 700 of 2296, overlapping main K1/K2 0
+[B3] rq B3-g-code-edit grid   96 (T=8): n=  686 p10   7.89 p50   8.35 p90   8.96 fast  99.1%
+[B3] rq B3-g-code-edit grid  176 (T=16): n=  294 p10   8.22 p50   8.48 p90   8.85 fast  97.6%
+[B3] sv1 code-edit sparse-verify kernels in trace:  280 "name": "_mtp_shared_sparse_indices_lookup_prefix_kernel; 20 "name": "_sparse_target_probs_kernel; 20 "name": "_tree_sampling_target_only_sparse_kernel;
+[B3] sv2 code-edit top-k kernels in trace:  20 flashinfer::sampling::RadixTopKKernel; 20 flashinfer::sampling::StableSortTopKByValueKernel;
+[B3] sv1 prose-en sparse-verify kernels in trace:  268 "name": "_mtp_shared_sparse_indices_lookup_prefix_kernel; 20 "name": "_sparse_target_probs_kernel; 20 "name": "_tree_sampling_target_only_sparse_kernel;
+[B3] sv2 prose-en top-k kernels in trace:  20 flashinfer::sampling::RadixTopKKernel; 20 flashinfer::sampling::StableSortTopKByValueKernel;
+bench/stack/arm_stack.sh: 47 行: 625614 強制終了            env PORT=$PORT SERVE_DISPLAY_HZ= $ARM_ENV ${SERVER_ENV:-} setsid ./serve-fast.sh wa > "$LOG" 2>&1 < /dev/null  (wd: ~/tools/sglang-xa-st1)
+[B3] stopped 00:23:33; gpu mem: 3206 MiB
+[abba-xa-st1] B3 ST1 log lines: 3, XA1 fallback warnings: 0
+[abba-xa-st1] B3 triton_decode  count    428  median  12.29 us  grids [11, 2, 8] x182, [22, 2, 1] x168, [11, 2, 16] x78
+[abba-xa-st1] B3 xqa_mha        count      0  median      -  grids 
+[abba-xa-st1] B3 compact_kv     count      0  median      -  grids 
+[abba-xa-st1] B3 valid_counts   count      0  median      -  grids 
+[abba-xa-st1] A3 (a) queued 00:24:03
+[A3] MemAvailable 194G ok
+[A3] start 00:24:03 mode=on samplings=lmstudio,greedy wt=/home/user/tools/sglang-xa-st1 commit=47d1b4e8ab env='SGLANG_ROUTER_FAST_TOPK=1 SGLANG_OPT_SPEC_SPARSE_VERIFY=1 SGLANG_OPT_SPEC_SPARSE_TOPK=1 SGLANG_OPT_GDN_FRONT_OVERLAP=1 SGLANG_OPT_DRAFT_MOE_GEMV=1 SGLANG_ENABLE_QSA_SHARED_TAIL_PREFIX=1 PYTHONPATH=/home/user/tools/flashinfer-p3:/home/user/tools/sglang-xa-st1/python FLASHINFER_WORKSPACE_BASE=/home/user/.cache/sglang-rq2u2h FLASHINFER_P2_NO_NINJA=1 '
+[A3] server up 00:26:56
+[A3] mapped: /home/user/.cache/sglang-rq2u2h/.cache/flashinfer/0.6.17/120f/cached_ops/fused_moe_120/fused_moe_120.so
+  => greedy prose-en.txt: median ms/step (unprofiled) 13.83  tok/step 4.26
+  => sampling code-edit.txt: median ms/step (unprofiled) 12.02  tok/step 5.71
+measured bn1-code-edit-01 1/1: 485.66 t/s
+measured bn1-prose-en-01 1/1: 227.17 t/s
+measured bn1-prose-ja-01 1/1: 248.07 t/s
+measured bn1-agent-loop-01 1/1: 347.75 t/s
+measured bn1-code-edit-02 1/1: 639.78 t/s
+measured bn1-prose-en-02 1/1: 238.82 t/s
+measured bn1-prose-ja-02 1/1: 234.38 t/s
+measured bn1-agent-loop-02 1/1: 301.70 t/s
+measured bn1-code-edit-03 1/1: 521.40 t/s
+measured bn1-prose-en-03 1/1: 232.71 t/s
+measured bn1-prose-ja-03 1/1: 232.38 t/s
+measured bn1-agent-loop-03 1/1: 303.14 t/s
+measured bn1-code-edit-04 1/1: 625.56 t/s
+measured bn1-prose-en-04 1/1: 231.96 t/s
+measured bn1-prose-ja-04 1/1: 227.79 t/s
+measured bn1-agent-loop-04 1/1: 315.72 t/s
+[A3] fnbench lmstudio rc=0 00:33:39
+measured bn1-code-edit-01 1/1: 557.10 t/s
+measured bn1-prose-en-01 1/1: 255.67 t/s
+measured bn1-prose-ja-01 1/1: 285.81 t/s
+measured bn1-agent-loop-01 1/1: 364.61 t/s
+measured bn1-code-edit-02 1/1: 611.45 t/s
+measured bn1-prose-en-02 1/1: 252.91 t/s
+measured bn1-prose-ja-02 1/1: 260.57 t/s
+measured bn1-agent-loop-02 1/1: 336.41 t/s
+measured bn1-code-edit-03 1/1: 581.28 t/s
+measured bn1-prose-en-03 1/1: 250.32 t/s
+measured bn1-prose-ja-03 1/1: 261.70 t/s
+measured bn1-agent-loop-03 1/1: 357.03 t/s
+measured bn1-code-edit-04 1/1: 634.25 t/s
+measured bn1-prose-en-04 1/1: 258.47 t/s
+measured bn1-prose-ja-04 1/1: 292.51 t/s
+measured bn1-agent-loop-04 1/1: 370.60 t/s
+[A3] fnbench greedy rc=0 00:39:44
+  start_profile: 200
+  greedy   code-edit.txt  #0 chunks= 130 tokens= 600 tok/step=4.62 ms/step= 19.46 (profiled)
+  sampling code-edit.txt  #0 chunks= 108 tokens= 600 tok/step=5.56 ms/step= 24.06 (profiled)
+  sampling code-edit.txt  #1 chunks= 105 tokens= 600 tok/step=5.71 ms/step= 12.03
+  => sampling code-edit.txt: median ms/step (unprofiled) 12.03  tok/step 5.63
+  sampling prose-en.txt   #0 chunks= 232 tokens= 600 tok/step=2.59 ms/step= 15.70 (profiled)
+  sampling prose-en.txt   #1 chunks= 251 tokens= 600 tok/step=2.39 ms/step=  9.22
+  => sampling prose-en.txt: median ms/step (unprofiled) 9.22  tok/step 2.49
+[A3] error lines in server log: 0
+[A3] draft MoE GEMV enabled lines: 1
+[A3] GEMV fallback warnings: 0
+[A3] rt1 _router_triton_kernel: n=0 median=-
+[A3] rt1 _router_softmax_fast_kernel: n=0 median=-
+[A3] rt1 _router_softmax_fast32_kernel: n=1020 median=2.88 us
+[A3] rt1 _w8a16_gemv_kernel: n=5900 median=5.94 us
+[A3] dg1 gemv_k1           count     40  median  16.45 us
+[A3] dg1 gemv_k2           count     40  median   9.87 us
+[A3] dg1 cutlass_prologue  count    980  median   8.45 us
+[A3] dg1 cutlass_act       count    980  median   3.58 us
+[A3] fg1 hc_combine_gate_kernel   per stream: {13: 560, 164: 1000, 165: 480}
+[A3] fg1 _w8a16_gemv_kernel       per stream: {13: 1900, 160: 40, 162: 20, 164: 2480, 165: 1460}
+[A3] fg1 _hc_down_kernel          per stream: {13: 640, 164: 980, 165: 500}
+[A3] fg1 _hc_up_kernel            per stream: {13: 640, 164: 980, 165: 500}
+[A3] fg1 main stream 164, GDN alt stream 13: gates on the alt stream 560 of 2040, overlapping main K1/K2 220
+[A3] rq A3-g-code-edit grid   56 (T=4): n=  980 p10   7.10 p50   8.45 p90   9.22 fast  98.9%
+[A3] sv1 code-edit sparse-verify kernels in trace:  120 "name": "_mtp_shared_sparse_indices_lookup_prefix_kernel; 20 "name": "_sparse_target_probs_kernel; 20 "name": "_tree_sampling_target_only_sparse_kernel;
+[A3] sv2 code-edit top-k kernels in trace:  20 flashinfer::sampling::RadixTopKKernel; 20 flashinfer::sampling::StableSortTopKByValueKernel;
+[A3] sv1 prose-en sparse-verify kernels in trace:  120 "name": "_mtp_shared_sparse_indices_lookup_prefix_kernel; 20 "name": "_sparse_target_probs_kernel; 20 "name": "_tree_sampling_target_only_sparse_kernel;
+[A3] sv2 prose-en top-k kernels in trace:  20 flashinfer::sampling::RadixTopKKernel; 20 flashinfer::sampling::StableSortTopKByValueKernel;
+bench/stack/arm_stack.sh: 47 行: 635499 強制終了            env PORT=$PORT SERVE_DISPLAY_HZ= $ARM_ENV ${SERVER_ENV:-} setsid ./serve-fast.sh wa > "$LOG" 2>&1 < /dev/null  (wd: ~/tools/sglang-xa-st1)
+[A3] stopped 00:40:06; gpu mem: 3191 MiB
+[abba-xa-st1] A3 ST1 log lines: 3, XA1 fallback warnings: 0
+[abba-xa-st1] A3 triton_decode  count      0  median      -  grids 
+[abba-xa-st1] A3 xqa_mha        count    300  median  16.26 us  grids [9, 2, 4] x260, [9, 2, 1] x40
+[abba-xa-st1] A3 compact_kv     count    300  median   4.90 us  grids [4, 2, 129] x260, [1, 2, 129] x40
+[abba-xa-st1] A3 valid_counts   count    300  median   1.25 us  grids [4, 1, 1] x260, [1, 1, 1] x40
+[abba-xa-st1] A4 (a) queued 00:40:36
+[A4] MemAvailable 196G ok
+[A4] start 00:40:36 mode=on samplings=lmstudio,greedy wt=/home/user/tools/sglang-xa-st1 commit=47d1b4e8ab env='SGLANG_ROUTER_FAST_TOPK=1 SGLANG_OPT_SPEC_SPARSE_VERIFY=1 SGLANG_OPT_SPEC_SPARSE_TOPK=1 SGLANG_OPT_GDN_FRONT_OVERLAP=1 SGLANG_OPT_DRAFT_MOE_GEMV=1 SGLANG_ENABLE_QSA_SHARED_TAIL_PREFIX=1 PYTHONPATH=/home/user/tools/flashinfer-p3:/home/user/tools/sglang-xa-st1/python FLASHINFER_WORKSPACE_BASE=/home/user/.cache/sglang-rq2u2h FLASHINFER_P2_NO_NINJA=1 '
+[A4] server up 00:43:24
+[A4] mapped: /home/user/.cache/sglang-rq2u2h/.cache/flashinfer/0.6.17/120f/cached_ops/fused_moe_120/fused_moe_120.so
+  => greedy prose-en.txt: median ms/step (unprofiled) 13.45  tok/step 3.77
+  => sampling code-edit.txt: median ms/step (unprofiled) 11.34  tok/step 4.55
+measured bn1-code-edit-01 1/1: 463.77 t/s
+measured bn1-prose-en-01 1/1: 235.48 t/s
+measured bn1-prose-ja-01 1/1: 256.33 t/s
+measured bn1-agent-loop-01 1/1: 313.17 t/s
+measured bn1-code-edit-02 1/1: 564.05 t/s
+measured bn1-prose-en-02 1/1: 243.27 t/s
+measured bn1-prose-ja-02 1/1: 246.60 t/s
+measured bn1-agent-loop-02 1/1: 321.58 t/s
+measured bn1-code-edit-03 1/1: 543.14 t/s
+measured bn1-prose-en-03 1/1: 231.95 t/s
+measured bn1-prose-ja-03 1/1: 225.18 t/s
+measured bn1-agent-loop-03 1/1: 358.60 t/s
+measured bn1-code-edit-04 1/1: 597.79 t/s
+measured bn1-prose-en-04 1/1: 234.34 t/s
+measured bn1-prose-ja-04 1/1: 236.84 t/s
+measured bn1-agent-loop-04 1/1: 337.61 t/s
+[A4] fnbench lmstudio rc=0 00:50:10
+measured bn1-code-edit-01 1/1: 544.92 t/s
+measured bn1-prose-en-01 1/1: 260.50 t/s
+measured bn1-prose-ja-01 1/1: 277.56 t/s
+measured bn1-agent-loop-01 1/1: 366.66 t/s
+measured bn1-code-edit-02 1/1: 645.76 t/s
+measured bn1-prose-en-02 1/1: 276.53 t/s
+measured bn1-prose-ja-02 1/1: 256.92 t/s
+measured bn1-agent-loop-02 1/1: 340.06 t/s
+measured bn1-code-edit-03 1/1: 702.20 t/s
+measured bn1-prose-en-03 1/1: 256.67 t/s
+measured bn1-prose-ja-03 1/1: 325.52 t/s
+measured bn1-agent-loop-03 1/1: 353.70 t/s
+measured bn1-code-edit-04 1/1: 633.64 t/s
+measured bn1-prose-en-04 1/1: 249.50 t/s
+measured bn1-prose-ja-04 1/1: 261.05 t/s
+measured bn1-agent-loop-04 1/1: 379.92 t/s
+[A4] fnbench greedy rc=0 00:56:04
+  start_profile: 200
+  greedy   code-edit.txt  #0 chunks=  96 tokens= 600 tok/step=6.25 ms/step= 26.30 (profiled)
+  sampling code-edit.txt  #0 chunks=  97 tokens= 600 tok/step=6.19 ms/step= 26.29 (profiled)
+  sampling code-edit.txt  #1 chunks=  82 tokens= 600 tok/step=7.32 ms/step= 16.49
+  => sampling code-edit.txt: median ms/step (unprofiled) 16.49  tok/step 6.75
+  sampling prose-en.txt   #0 chunks= 232 tokens= 600 tok/step=2.59 ms/step= 16.81 (profiled)
+  sampling prose-en.txt   #1 chunks= 221 tokens= 600 tok/step=2.71 ms/step= 10.11
+  => sampling prose-en.txt: median ms/step (unprofiled) 10.11  tok/step 2.65
+[A4] error lines in server log: 0
+[A4] draft MoE GEMV enabled lines: 1
+[A4] GEMV fallback warnings: 0
+[A4] rt1 _router_triton_kernel: n=0 median=-
+[A4] rt1 _router_softmax_fast_kernel: n=0 median=-
+[A4] rt1 _router_softmax_fast32_kernel: n=1100 median=3.27 us
+[A4] rt1 _w8a16_gemv_kernel: n=6380 median=7.04 us
+[A4] dg1 gemv_k1           count    120  median  16.37 us
+[A4] dg1 gemv_k2           count    120  median   9.92 us
+[A4] dg1 cutlass_prologue  count    980  median   8.35 us
+[A4] dg1 cutlass_act       count    980  median   3.63 us
+[A4] fg1 hc_combine_gate_kernel   per stream: {13: 720, 173: 1000, 174: 480}
+[A4] fg1 _w8a16_gemv_kernel       per stream: {13: 2300, 169: 120, 171: 20, 173: 2480, 174: 1460}
+[A4] fg1 _hc_down_kernel          per stream: {13: 880, 173: 980, 174: 500}
+[A4] fg1 _hc_up_kernel            per stream: {13: 880, 173: 980, 174: 500}
+[A4] fg1 main stream 173, GDN alt stream 13: gates on the alt stream 720 of 2200, overlapping main K1/K2 220
+[A4] rq A4-g-code-edit grid   96 (T=8): n=  980 p10   7.94 p50   8.35 p90   8.99 fast  98.8%
+[A4] sv1 code-edit sparse-verify kernels in trace:  120 "name": "_mtp_shared_sparse_indices_lookup_prefix_kernel; 20 "name": "_sparse_target_probs_kernel; 20 "name": "_tree_sampling_target_only_sparse_kernel;
+[A4] sv2 code-edit top-k kernels in trace:  20 flashinfer::sampling::RadixTopKKernel; 20 flashinfer::sampling::StableSortTopKByValueKernel;
+[A4] sv1 prose-en sparse-verify kernels in trace:  120 "name": "_mtp_shared_sparse_indices_lookup_prefix_kernel; 20 "name": "_sparse_target_probs_kernel; 20 "name": "_tree_sampling_target_only_sparse_kernel;
+[A4] sv2 prose-en top-k kernels in trace:  20 flashinfer::sampling::RadixTopKKernel; 20 flashinfer::sampling::StableSortTopKByValueKernel;
+bench/stack/arm_stack.sh: 47 行: 642197 強制終了            env PORT=$PORT SERVE_DISPLAY_HZ= $ARM_ENV ${SERVER_ENV:-} setsid ./serve-fast.sh wa > "$LOG" 2>&1 < /dev/null  (wd: ~/tools/sglang-xa-st1)
+[A4] stopped 00:56:26; gpu mem: 3210 MiB
+[abba-xa-st1] A4 ST1 log lines: 3, XA1 fallback warnings: 0
+[abba-xa-st1] A4 triton_decode  count      0  median      -  grids 
+[abba-xa-st1] A4 xqa_mha        count    380  median  16.43 us  grids [9, 2, 8] x260, [9, 2, 1] x120
+[abba-xa-st1] A4 compact_kv     count    380  median   7.78 us  grids [8, 2, 129] x260, [1, 2, 129] x120
+[abba-xa-st1] A4 valid_counts   count    380  median   1.18 us  grids [8, 1, 1] x260, [1, 1, 1] x120
+[abba-xa-st1] B4 (b) queued 00:56:56
+[B4] MemAvailable 195G ok
+[B4] start 00:56:56 mode=on samplings=lmstudio,greedy wt=/home/user/tools/sglang-xa-st1 commit=47d1b4e8ab env='SGLANG_ROUTER_FAST_TOPK=1 SGLANG_OPT_SPEC_SPARSE_VERIFY=1 SGLANG_OPT_SPEC_SPARSE_TOPK=1 SGLANG_OPT_GDN_FRONT_OVERLAP=1 SGLANG_OPT_DRAFT_MOE_GEMV=1 SGLANG_ENABLE_QSA_SHARED_TAIL_PREFIX=1 SGLANG_OPT_TRITON_DECODE_ATTN=1 PYTHONPATH=/home/user/tools/flashinfer-p3:/home/user/tools/sglang-xa-st1/python FLASHINFER_WORKSPACE_BASE=/home/user/.cache/sglang-rq2u2h FLASHINFER_P2_NO_NINJA=1 '
+[B4] server up 00:59:36
+[B4] mapped: /home/user/.cache/sglang-rq2u2h/.cache/flashinfer/0.6.17/120f/cached_ops/fused_moe_120/fused_moe_120.so
+  => greedy prose-en.txt: median ms/step (unprofiled) 13.51  tok/step 4.26
+  => sampling code-edit.txt: median ms/step (unprofiled) 11.70  tok/step 6.06
+measured bn1-code-edit-01 1/1: 556.46 t/s
+measured bn1-prose-en-01 1/1: 236.67 t/s
+measured bn1-prose-ja-01 1/1: 240.24 t/s
+measured bn1-agent-loop-01 1/1: 327.57 t/s
+measured bn1-code-edit-02 1/1: 604.11 t/s
+measured bn1-prose-en-02 1/1: 236.68 t/s
+measured bn1-prose-ja-02 1/1: 241.86 t/s
+measured bn1-agent-loop-02 1/1: 324.01 t/s
+measured bn1-code-edit-03 1/1: 674.44 t/s
+measured bn1-prose-en-03 1/1: 228.20 t/s
+measured bn1-prose-ja-03 1/1: 243.58 t/s
+measured bn1-agent-loop-03 1/1: 344.61 t/s
+measured bn1-code-edit-04 1/1: 637.38 t/s
+measured bn1-prose-en-04 1/1: 235.92 t/s
+measured bn1-prose-ja-04 1/1: 254.52 t/s
+measured bn1-agent-loop-04 1/1: 381.62 t/s
+[B4] fnbench lmstudio rc=0 01:06:12
+measured bn1-code-edit-01 1/1: 578.28 t/s
+measured bn1-prose-en-01 1/1: 271.29 t/s
+measured bn1-prose-ja-01 1/1: 267.16 t/s
+measured bn1-agent-loop-01 1/1: 361.85 t/s
+measured bn1-code-edit-02 1/1: 545.47 t/s
+measured bn1-prose-en-02 1/1: 278.41 t/s
+measured bn1-prose-ja-02 1/1: 286.61 t/s
+measured bn1-agent-loop-02 1/1: 357.37 t/s
+measured bn1-code-edit-03 1/1: 593.93 t/s
+measured bn1-prose-en-03 1/1: 268.55 t/s
+measured bn1-prose-ja-03 1/1: 322.09 t/s
+measured bn1-agent-loop-03 1/1: 383.50 t/s
+measured bn1-code-edit-04 1/1: 694.68 t/s
+measured bn1-prose-en-04 1/1: 336.13 t/s
+measured bn1-prose-ja-04 1/1: 305.86 t/s
+measured bn1-agent-loop-04 1/1: 411.37 t/s
+[B4] fnbench greedy rc=0 01:11:47
+  start_profile: 200
+  greedy   code-edit.txt  #0 chunks=  89 tokens= 600 tok/step=6.74 ms/step= 28.11 (profiled)
+  sampling code-edit.txt  #0 chunks=  77 tokens= 600 tok/step=7.79 ms/step= 37.39 (profiled)
+  sampling code-edit.txt  #1 chunks= 118 tokens= 600 tok/step=5.08 ms/step= 12.26
+  => sampling code-edit.txt: median ms/step (unprofiled) 12.26  tok/step 6.44
+  sampling prose-en.txt   #0 chunks= 229 tokens= 600 tok/step=2.62 ms/step= 15.70 (profiled)
+  sampling prose-en.txt   #1 chunks= 256 tokens= 600 tok/step=2.34 ms/step=  8.98
+  => sampling prose-en.txt: median ms/step (unprofiled) 8.98  tok/step 2.48
+[B4] error lines in server log: 0
+[B4] draft MoE GEMV enabled lines: 1
+[B4] GEMV fallback warnings: 0
+[B4] rt1 _router_triton_kernel: n=0 median=-
+[B4] rt1 _router_softmax_fast_kernel: n=0 median=-
+[B4] rt1 _router_softmax_fast32_kernel: n=1100 median=3.26 us
+[B4] rt1 _w8a16_gemv_kernel: n=6380 median=7.09 us
+[B4] dg1 gemv_k1           count    120  median  16.24 us
+[B4] dg1 gemv_k2           count    120  median   9.82 us
+[B4] dg1 cutlass_prologue  count    980  median   8.32 us
+[B4] dg1 cutlass_act       count    980  median   3.62 us
+[B4] fg1 hc_combine_gate_kernel   per stream: {13: 720, 173: 1000, 174: 480}
+[B4] fg1 _w8a16_gemv_kernel       per stream: {13: 2300, 169: 120, 171: 20, 173: 2480, 174: 1460}
+[B4] fg1 _hc_down_kernel          per stream: {13: 880, 173: 980, 174: 500}
+[B4] fg1 _hc_up_kernel            per stream: {13: 880, 173: 980, 174: 500}
+[B4] fg1 main stream 173, GDN alt stream 13: gates on the alt stream 720 of 2200, overlapping main K1/K2 220
+[B4] rq B4-g-code-edit grid   96 (T=8): n=  980 p10   7.94 p50   8.32 p90   8.93 fast  99.0%
+[B4] sv1 code-edit sparse-verify kernels in trace:  280 "name": "_mtp_shared_sparse_indices_lookup_prefix_kernel; 20 "name": "_sparse_target_probs_kernel; 20 "name": "_tree_sampling_target_only_sparse_kernel;
+[B4] sv2 code-edit top-k kernels in trace:  20 flashinfer::sampling::RadixTopKKernel; 20 flashinfer::sampling::StableSortTopKByValueKernel;
+[B4] sv1 prose-en sparse-verify kernels in trace:  120 "name": "_mtp_shared_sparse_indices_lookup_prefix_kernel; 20 "name": "_sparse_target_probs_kernel; 20 "name": "_tree_sampling_target_only_sparse_kernel;
+[B4] sv2 prose-en top-k kernels in trace:  20 flashinfer::sampling::RadixTopKKernel; 20 flashinfer::sampling::StableSortTopKByValueKernel;
+bench/stack/arm_stack.sh: 47 行: 648140 強制終了            env PORT=$PORT SERVE_DISPLAY_HZ= $ARM_ENV ${SERVER_ENV:-} setsid ./serve-fast.sh wa > "$LOG" 2>&1 < /dev/null  (wd: ~/tools/sglang-xa-st1)
+[B4] stopped 01:12:10; gpu mem: 3187 MiB
+[abba-xa-st1] B4 ST1 log lines: 3, XA1 fallback warnings: 0
+[abba-xa-st1] B4 triton_decode  count    380  median  12.19 us  grids [11, 2, 8] x260, [22, 2, 1] x120
+[abba-xa-st1] B4 xqa_mha        count      0  median      -  grids 
+[abba-xa-st1] B4 compact_kv     count      0  median      -  grids 
+[abba-xa-st1] B4 valid_counts   count      0  median      -  grids 
+== ancova lmstudio
+== lmstudio: 80 requests, 16 prompts, 4 workloads, 5 arms
+  ms/token  B effect  -4.43%  [ -7.52 ..  -1.24]  resid sd 6.89%
+            arm means (%): A2 +3.39  B3 -2.45  A3 +1.90  A4 +0.82  B4 -3.50
+            arm level B effect  -4.43%  [ -6.41 ..  -2.42]  (2 dof, arm sd 0.51%)
+  tok/step  B effect  +1.25%  [ -3.60 ..  +6.34]  resid sd 10.29%
+            arm means (%): A2 +3.99  B3 -1.05  A3 -2.93  A4 -1.81  B4 +1.96
+            arm level B effect  +1.25%  [-13.28 .. +18.21]  (2 dof, arm sd 3.77%)
+  ms/step|a B effect  -3.76%  [ -5.14 ..  -2.35]  resid sd 2.91%  slopes 0.53 0.50 -0.42 0.18
+            arm means (%): A2 +5.62  B3 -2.36  A3 +0.08  A4 -0.11  B4 -3.01
+            arm level B effect  -3.54%  [-11.52 ..  +5.16]  (2 dof, arm sd 2.10%)
+== ancova greedy
+== greedy: 80 requests, 16 prompts, 4 workloads, 5 arms
+  ms/token  B effect  -5.20%  [ -8.41 ..  -1.88]  resid sd 7.23%
+            arm means (%): A2 +6.52  B3 -3.25  A3 +2.02  A4 -0.57  B4 -4.36
+            arm level B effect  -5.20%  [-12.78 ..  +3.04]  (2 dof, arm sd 2.03%)
+  tok/step  B effect  +2.20%  [ -2.21 ..  +6.81]  resid sd 9.26%
+            arm means (%): A2 +0.54  B3 +0.46  A3 -3.05  A4 -0.11  B4 +2.24
+            arm level B effect  +2.20%  [ -6.34 .. +11.52]  (2 dof, arm sd 2.13%)
+  ms/step|a B effect  -3.90%  [ -5.30 ..  -2.49]  resid sd 2.83%  slopes 0.40 0.25 0.27 0.29
+            arm means (%): A2 +6.70  B3 -3.20  A3 -0.33  A4 -0.61  B4 -2.26
+            arm level B effect  -3.62%  [-15.67 .. +10.17]  (2 dof, arm sd 3.26%)
+== clipped R.eager (us/step, sampling traces)
+A2-code-edit                     steps  20  R.eager clipped  118.9 us/step (raw  118.9)  top: flashinfer::sampling::Radi 26, at::index_elementwise_kern 16, _fused_conv_window_scatter 12, at::unrolled_elementwise_k 11, _tree_sampling_target_only 7, at::index_elementwise_kern 6
+B3-code-edit                     steps  20  R.eager clipped  132.2 us/step (raw  144.8)  top: flashinfer::sampling::Radi 33, at::index_elementwise_kern 15, _fused_conv_window_scatter 11, at::unrolled_elementwise_k 10, _tree_sampling_target_only 10, Memcpy DtoD 6
+A3-code-edit                     steps  20  R.eager clipped  121.0 us/step (raw  121.0)  top: flashinfer::sampling::Radi 26, at::index_elementwise_kern 16, _fused_conv_window_scatter 11, at::unrolled_elementwise_k 11, _tree_sampling_target_only 8, at::index_elementwise_kern 7
+A4-code-edit                     steps  20  R.eager clipped  113.3 us/step (raw  113.3)  top: flashinfer::sampling::Radi 27, at::index_elementwise_kern 15, _fused_conv_window_scatter 11, at::unrolled_elementwise_k 9, _tree_sampling_target_only 6, at::index_elementwise_kern 6
+B4-code-edit                     steps  20  R.eager clipped  127.1 us/step (raw  142.2)  top: flashinfer::sampling::Radi 33, at::index_elementwise_kern 16, _fused_conv_window_scatter 11, at::unrolled_elementwise_k 9, _tree_sampling_target_only 8, Memcpy DtoD 6
+A2-prose-en                      steps  20  R.eager clipped  114.6 us/step (raw  114.6)  top: flashinfer::sampling::Radi 26, at::index_elementwise_kern 15, _fused_conv_window_scatter 12, at::unrolled_elementwise_k 10, at::index_elementwise_kern 6, _tree_sampling_target_only 5
+B3-prose-en                      steps  20  R.eager clipped  129.6 us/step (raw  160.0)  top: flashinfer::sampling::Radi 33, at::index_elementwise_kern 15, _fused_conv_window_scatter 12, at::unrolled_elementwise_k 10, at::index_elementwise_kern 8, Memcpy DtoD 6
+A3-prose-en                      steps  20  R.eager clipped  120.3 us/step (raw  120.3)  top: flashinfer::sampling::Radi 26, at::index_elementwise_kern 16, at::unrolled_elementwise_k 12, _fused_conv_window_scatter 11, at::index_elementwise_kern 7, _tree_sampling_target_only 5
+A4-prose-en                      steps  20  R.eager clipped  111.5 us/step (raw  111.5)  top: flashinfer::sampling::Radi 27, at::index_elementwise_kern 15, _fused_conv_window_scatter 11, at::unrolled_elementwise_k 9, at::index_elementwise_kern 5, _tree_sampling_target_only 5
+B4-prose-en                      steps  20  R.eager clipped  112.8 us/step (raw  124.0)  top: flashinfer::sampling::Radi 27, at::index_elementwise_kern 15, _fused_conv_window_scatter 11, at::unrolled_elementwise_k 9, _tree_sampling_target_only 6, at::index_elementwise_kern 6
+[abba-xa-st1] done 01:12:50

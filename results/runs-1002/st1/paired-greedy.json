@@ -1,0 +1,765 @@
+{
+  "schedule": "ABBA",
+  "cycles": 1,
+  "alpha": 0.05,
+  "bootstrap_draws": 20000,
+  "seed": 20260908,
+  "files": [
+    {
+      "path": "runs/st1/A1-greedy.jsonl",
+      "sha256": "3535c691396fbca22240771d20f02fb2b9a19a17329695c102f5529030410e5e"
+    },
+    {
+      "path": "runs/st1/B1-greedy.jsonl",
+      "sha256": "e3972a9cc44b033c70d4e0d9277141ab8bb5f2d2fc7bc02db007e55c950c35b1"
+    },
+    {
+      "path": "runs/st1/B2-greedy.jsonl",
+      "sha256": "25a087cb1b00ba0a4e2dfb63537bf1f41d89e4f51741e4d4d2fb61ab9212cd6b"
+    },
+    {
+      "path": "runs/st1/A2-greedy.jsonl",
+      "sha256": "0e4e7f7b27f6754f1340e7d07461a3ba2d7537e5209d377008b52833a2cc1a6f"
+    }
+  ],
+  "estimand": "equal-weight mean per-prompt log B/A, averaged over all adjacent blocks",
+  "uncertainty_scope": "Bootstrap resamples prompts, preserving all blocks and collapsed repeats. Conditional on the observed restarts; common restart shifts are not independent prompts. Inspect drift and variance-study restart-aware MDE.",
+  "domains": {
+    "agent-loop": {
+      "tps": {
+        "log_mean": 0.029103767134845193,
+        "change_pct": 2.9531420458255924,
+        "ci_pct": [
+          -3.2705935081920607,
+          12.95934944645864
+        ],
+        "lower_one_sided_pct": -3.130358689880064,
+        "upper_one_sided_pct": 12.182254073719328,
+        "n_prompts": 4,
+        "block_means": [
+          {
+            "block": 1,
+            "log_ratio": 0.058400536935853564,
+            "change_pct": 6.013953572384976
+          },
+          {
+            "block": 2,
+            "log_ratio": -0.00019300266616317785,
+            "change_pct": -0.019298404234677283
+          }
+        ],
+        "per_prompt": [
+          {
+            "prompt_id": "bn1-agent-loop-01",
+            "log_ratios": [
+              0.14625665301983926,
+              -0.11833403062788772
+            ],
+            "mean_log_ratio": 0.013961311195975767
+          },
+          {
+            "prompt_id": "bn1-agent-loop-02",
+            "log_ratios": [
+              -0.0653333854907645,
+              -0.028784862914496223
+            ],
+            "mean_log_ratio": -0.047059124202630365
+          },
+          {
+            "prompt_id": "bn1-agent-loop-03",
+            "log_ratios": [
+              0.23415521535849937,
+              0.10376321745800166
+            ],
+            "mean_log_ratio": 0.1689592164082505
+          },
+          {
+            "prompt_id": "bn1-agent-loop-04",
+            "log_ratios": [
+              -0.08147633514415986,
+              0.04258366541972958
+            ],
+            "mean_log_ratio": -0.019446334862215142
+          }
+        ],
+        "mde_pct_80_power": 17.26039574655531,
+        "power_at_3pct_plugin": 0.12353459485136563,
+        "A2_over_A1_drift": {
+          "cycle": 1,
+          "log_mean": 0.043083881619084385,
+          "change_pct": 4.402546572419819,
+          "ci_pct": [
+            -2.631294700295435,
+            11.402123309480068
+          ],
+          "lower_one_sided_pct": -2.511783326128112,
+          "upper_one_sided_pct": 11.265554795908708,
+          "n_prompts": 4,
+          "flag": true
+        },
+        "control_drift_by_cycle": [
+          {
+            "cycle": 1,
+            "log_mean": 0.043083881619084385,
+            "change_pct": 4.402546572419819,
+            "ci_pct": [
+              -2.631294700295435,
+              11.402123309480068
+            ],
+            "lower_one_sided_pct": -2.511783326128112,
+            "upper_one_sided_pct": 11.265554795908708,
+            "n_prompts": 4,
+            "flag": true
+          }
+        ],
+        "cycle_mean_log_ratios": [
+          0.029103767134845193
+        ],
+        "crossed_cycle_prompt_interval": null
+      },
+      "acceptance": {
+        "log_mean": -0.02919400120945309,
+        "change_pct": -2.8771973223223464,
+        "ci_pct": [
+          -7.736953730762933,
+          6.137237168923986
+        ],
+        "lower_one_sided_pct": -7.3276749030868435,
+        "upper_one_sided_pct": 5.6518596339595355,
+        "n_prompts": 4,
+        "block_means": [
+          {
+            "block": 1,
+            "log_ratio": -0.03350631313582225,
+            "change_pct": -3.295119389832799
+          },
+          {
+            "block": 2,
+            "log_ratio": -0.02488168928308393,
+            "change_pct": -2.4574691530576676
+          }
+        ],
+        "per_prompt": [
+          {
+            "prompt_id": "bn1-agent-loop-01",
+            "log_ratios": [
+              -0.027831508971062124,
+              -0.10603468728207921
+            ],
+            "mean_log_ratio": -0.06693309812657067
+          },
+          {
+            "prompt_id": "bn1-agent-loop-02",
+            "log_ratios": [
+              -0.06427295215446738,
+              -0.06833394976225193
+            ],
+            "mean_log_ratio": -0.06630345095835966
+          },
+          {
+            "prompt_id": "bn1-agent-loop-03",
+            "log_ratios": [
+              0.15373907068348935,
+              0.04971702408912315
+            ],
+            "mean_log_ratio": 0.10172804738630625
+          },
+          {
+            "prompt_id": "bn1-agent-loop-04",
+            "log_ratios": [
+              -0.19565986210124886,
+              0.025124855822872272
+            ],
+            "mean_log_ratio": -0.0852675031391883
+          }
+        ],
+        "mde_pct_80_power": 15.571523818781676,
+        "power_at_3pct_plugin": 0.13364652953856512,
+        "A2_over_A1_drift": {
+          "cycle": 1,
+          "log_mean": 0.011568780343003848,
+          "change_pct": 1.1635957484913206,
+          "ci_pct": [
+            -7.063617831565,
+            10.119125212086008
+          ],
+          "lower_one_sided_pct": -5.677378802829125,
+          "upper_one_sided_pct": 10.047050939749935,
+          "n_prompts": 4,
+          "flag": false
+        },
+        "control_drift_by_cycle": [
+          {
+            "cycle": 1,
+            "log_mean": 0.011568780343003848,
+            "change_pct": 1.1635957484913206,
+            "ci_pct": [
+              -7.063617831565,
+              10.119125212086008
+            ],
+            "lower_one_sided_pct": -5.677378802829125,
+            "upper_one_sided_pct": 10.047050939749935,
+            "n_prompts": 4,
+            "flag": false
+          }
+        ],
+        "cycle_mean_log_ratios": [
+          -0.02919400120945309
+        ],
+        "crossed_cycle_prompt_interval": null
+      }
+    },
+    "code-edit": {
+      "tps": {
+        "log_mean": 0.007830939417032945,
+        "change_pct": 0.786168141696162,
+        "ci_pct": [
+          -6.898369521178468,
+          10.141955817389567
+        ],
+        "lower_one_sided_pct": -6.892444568389617,
+        "upper_one_sided_pct": 10.134946870744319,
+        "n_prompts": 4,
+        "block_means": [
+          {
+            "block": 1,
+            "log_ratio": -0.05734783809529609,
+            "change_pct": -5.573443929816675
+          },
+          {
+            "block": 2,
+            "log_ratio": 0.07300971692936198,
+            "change_pct": 7.574098976312792
+          }
+        ],
+        "per_prompt": [
+          {
+            "prompt_id": "bn1-code-edit-01",
+            "log_ratios": [
+              0.0340197423733688,
+              0.27114734725676204
+            ],
+            "mean_log_ratio": 0.15258354481506542
+          },
+          {
+            "prompt_id": "bn1-code-edit-02",
+            "log_ratios": [
+              0.10257156735628392,
+              -0.05917718701222352
+            ],
+            "mean_log_ratio": 0.0216971901720302
+          },
+          {
+            "prompt_id": "bn1-code-edit-03",
+            "log_ratios": [
+              -0.2241235288244976,
+              0.08142110190322249
+            ],
+            "mean_log_ratio": -0.07135121346063755
+          },
+          {
+            "prompt_id": "bn1-code-edit-04",
+            "log_ratios": [
+              -0.14185913328633948,
+              -0.0013523944303130975
+            ],
+            "mean_log_ratio": -0.07160576385832629
+          }
+        ],
+        "mde_pct_80_power": 19.114667211432256,
+        "power_at_3pct_plugin": 0.11493145589971043,
+        "A2_over_A1_drift": {
+          "cycle": 1,
+          "log_mean": -0.029192089430911894,
+          "change_pct": -2.8770116448548393,
+          "ci_pct": [
+            -12.137588391392146,
+            5.397357872945896
+          ],
+          "lower_one_sided_pct": -10.571213302937805,
+          "upper_one_sided_pct": 4.623514509266683,
+          "n_prompts": 4,
+          "flag": false
+        },
+        "control_drift_by_cycle": [
+          {
+            "cycle": 1,
+            "log_mean": -0.029192089430911894,
+            "change_pct": -2.8770116448548393,
+            "ci_pct": [
+              -12.137588391392146,
+              5.397357872945896
+            ],
+            "lower_one_sided_pct": -10.571213302937805,
+            "upper_one_sided_pct": 4.623514509266683,
+            "n_prompts": 4,
+            "flag": false
+          }
+        ],
+        "cycle_mean_log_ratios": [
+          0.007830939417032945
+        ],
+        "crossed_cycle_prompt_interval": null
+      },
+      "acceptance": {
+        "log_mean": -0.06934548220551437,
+        "change_pct": -6.699571198812913,
+        "ci_pct": [
+          -11.77684500913345,
+          -1.3300984828010591
+        ],
+        "lower_one_sided_pct": -11.006626501937989,
+        "upper_one_sided_pct": -1.54844847627539,
+        "n_prompts": 4,
+        "block_means": [
+          {
+            "block": 1,
+            "log_ratio": -0.10025173519039232,
+            "change_pct": -9.539033271610162
+          },
+          {
+            "block": 2,
+            "log_ratio": -0.03843922922063642,
+            "change_pct": -3.770981791271809
+          }
+        ],
+        "per_prompt": [
+          {
+            "prompt_id": "bn1-code-edit-01",
+            "log_ratios": [
+              -0.058670272769139054,
+              0.023028257143758557
+            ],
+            "mean_log_ratio": -0.017821007812690248
+          },
+          {
+            "prompt_id": "bn1-code-edit-02",
+            "log_ratios": [
+              0.07417344074518839,
+              -0.09209236600897475
+            ],
+            "mean_log_ratio": -0.008959462631893178
+          },
+          {
+            "prompt_id": "bn1-code-edit-03",
+            "log_ratios": [
+              -0.2205937803927407,
+              -0.06477749831638802
+            ],
+            "mean_log_ratio": -0.14268563935456435
+          },
+          {
+            "prompt_id": "bn1-code-edit-04",
+            "log_ratios": [
+              -0.19591632834487793,
+              -0.019915309700941464
+            ],
+            "mean_log_ratio": -0.1079158190229097
+          }
+        ],
+        "mde_pct_80_power": 11.549287582978966,
+        "power_at_3pct_plugin": 0.1738818789083825,
+        "A2_over_A1_drift": {
+          "cycle": 1,
+          "log_mean": -0.08614589802332284,
+          "change_pct": -8.2539634198809,
+          "ci_pct": [
+            -27.564230492800224,
+            8.37819234677434
+          ],
+          "lower_one_sided_pct": -25.283604626561136,
+          "upper_one_sided_pct": 5.478882021855165,
+          "n_prompts": 4,
+          "flag": true
+        },
+        "control_drift_by_cycle": [
+          {
+            "cycle": 1,
+            "log_mean": -0.08614589802332284,
+            "change_pct": -8.2539634198809,
+            "ci_pct": [
+              -27.564230492800224,
+              8.37819234677434
+            ],
+            "lower_one_sided_pct": -25.283604626561136,
+            "upper_one_sided_pct": 5.478882021855165,
+            "n_prompts": 4,
+            "flag": true
+          }
+        ],
+        "cycle_mean_log_ratios": [
+          -0.06934548220551437
+        ],
+        "crossed_cycle_prompt_interval": null
+      }
+    },
+    "prose-en": {
+      "tps": {
+        "log_mean": 0.05075920295435821,
+        "change_pct": 5.206952754552489,
+        "ci_pct": [
+          0.28714385986075913,
+          9.909315850169879
+        ],
+        "lower_one_sided_pct": 0.43109125756821287,
+        "upper_one_sided_pct": 9.751783358962916,
+        "n_prompts": 4,
+        "block_means": [
+          {
+            "block": 1,
+            "log_ratio": 0.01473510775312925,
+            "change_pct": 1.4844204646237886
+          },
+          {
+            "block": 2,
+            "log_ratio": 0.08678329815558716,
+            "change_pct": 9.066030600795346
+          }
+        ],
+        "per_prompt": [
+          {
+            "prompt_id": "bn1-prose-en-01",
+            "log_ratios": [
+              0.046678771340578074,
+              0.13655481226460786
+            ],
+            "mean_log_ratio": 0.09161679180259297
+          },
+          {
+            "prompt_id": "bn1-prose-en-02",
+            "log_ratios": [
+              -0.01966936261634178,
+              -0.03376230153562343
+            ],
+            "mean_log_ratio": -0.026715832075982604
+          },
+          {
+            "prompt_id": "bn1-prose-en-03",
+            "log_ratios": [
+              0.0014171033443108882,
+              0.19329106679670183
+            ],
+            "mean_log_ratio": 0.09735408507050636
+          },
+          {
+            "prompt_id": "bn1-prose-en-04",
+            "log_ratios": [
+              0.03051391894396982,
+              0.05104961509666239
+            ],
+            "mean_log_ratio": 0.040781767020316106
+          }
+        ],
+        "mde_pct_80_power": 9.962803745750087,
+        "power_at_3pct_plugin": 0.20193699611101182,
+        "A2_over_A1_drift": {
+          "cycle": 1,
+          "log_mean": -0.02094728134885049,
+          "change_pct": -2.0729410966774195,
+          "ci_pct": [
+            -10.359554336376624,
+            6.839297362910547
+          ],
+          "lower_one_sided_pct": -10.24174529264646,
+          "upper_one_sided_pct": 6.218399373996335,
+          "n_prompts": 4,
+          "flag": false
+        },
+        "control_drift_by_cycle": [
+          {
+            "cycle": 1,
+            "log_mean": -0.02094728134885049,
+            "change_pct": -2.0729410966774195,
+            "ci_pct": [
+              -10.359554336376624,
+              6.839297362910547
+            ],
+            "lower_one_sided_pct": -10.24174529264646,
+            "upper_one_sided_pct": 6.218399373996335,
+            "n_prompts": 4,
+            "flag": false
+          }
+        ],
+        "cycle_mean_log_ratios": [
+          0.05075920295435821
+        ],
+        "crossed_cycle_prompt_interval": null
+      },
+      "acceptance": {
+        "log_mean": -0.02020134178734488,
+        "change_pct": -1.9998661779515234,
+        "ci_pct": [
+          -4.166265362618101,
+          0.8686113578776213
+        ],
+        "lower_one_sided_pct": -3.8891025633582017,
+        "upper_one_sided_pct": 0.39699233270480755,
+        "n_prompts": 4,
+        "block_means": [
+          {
+            "block": 1,
+            "log_ratio": -0.03590578377101322,
+            "change_pct": -3.5268817464551643
+          },
+          {
+            "block": 2,
+            "log_ratio": -0.004496899803676541,
+            "change_pct": -0.44868038888629314
+          }
+        ],
+        "per_prompt": [
+          {
+            "prompt_id": "bn1-prose-en-01",
+            "log_ratios": [
+              -0.04579737183902688,
+              -0.00040265754520274477
+            ],
+            "mean_log_ratio": -0.023100014692114812
+          },
+          {
+            "prompt_id": "bn1-prose-en-02",
+            "log_ratios": [
+              -0.07302513501488983,
+              -0.02505599360918509
+            ],
+            "mean_log_ratio": -0.04904056431203746
+          },
+          {
+            "prompt_id": "bn1-prose-en-03",
+            "log_ratios": [
+              -0.04336722911512969,
+              -0.017221560650689915
+            ],
+            "mean_log_ratio": -0.030294394882909803
+          },
+          {
+            "prompt_id": "bn1-prose-en-04",
+            "log_ratios": [
+              0.01856660088499351,
+              0.024692612590371588
+            ],
+            "mean_log_ratio": 0.02162960673768255
+          }
+        ],
+        "mde_pct_80_power": 5.065789590708714,
+        "power_at_3pct_plugin": 0.4530122822089888,
+        "A2_over_A1_drift": {
+          "cycle": 1,
+          "log_mean": -0.01041728103658579,
+          "change_pct": -1.036320908826534,
+          "ci_pct": [
+            -1.5097296382919112,
+            -0.47045955774496434
+          ],
+          "lower_one_sided_pct": -1.4098813110036044,
+          "upper_one_sided_pct": -0.5923575702049426,
+          "n_prompts": 4,
+          "flag": true
+        },
+        "control_drift_by_cycle": [
+          {
+            "cycle": 1,
+            "log_mean": -0.01041728103658579,
+            "change_pct": -1.036320908826534,
+            "ci_pct": [
+              -1.5097296382919112,
+              -0.47045955774496434
+            ],
+            "lower_one_sided_pct": -1.4098813110036044,
+            "upper_one_sided_pct": -0.5923575702049426,
+            "n_prompts": 4,
+            "flag": true
+          }
+        ],
+        "cycle_mean_log_ratios": [
+          -0.02020134178734488
+        ],
+        "crossed_cycle_prompt_interval": null
+      }
+    },
+    "prose-ja": {
+      "tps": {
+        "log_mean": -0.11987936650510067,
+        "change_pct": -11.297256451717589,
+        "ci_pct": [
+          -19.443496325588548,
+          -1.655013803301204
+        ],
+        "lower_one_sided_pct": -18.23189803731777,
+        "upper_one_sided_pct": -3.774497339032301,
+        "n_prompts": 4,
+        "block_means": [
+          {
+            "block": 1,
+            "log_ratio": -0.0029276145119820907,
+            "change_pct": -0.29233332276192114
+          },
+          {
+            "block": 2,
+            "log_ratio": -0.23683111849821925,
+            "change_pct": -21.08754546967494
+          }
+        ],
+        "per_prompt": [
+          {
+            "prompt_id": "bn1-prose-ja-01",
+            "log_ratios": [
+              0.05299692712404003,
+              -0.2617851119957546
+            ],
+            "mean_log_ratio": -0.10439409243585729
+          },
+          {
+            "prompt_id": "bn1-prose-ja-02",
+            "log_ratios": [
+              -0.3372511685441033,
+              0.03908679707353713
+            ],
+            "mean_log_ratio": -0.1490821857352831
+          },
+          {
+            "prompt_id": "bn1-prose-ja-03",
+            "log_ratios": [
+              0.12974158650967116,
+              -0.6367090949859913
+            ],
+            "mean_log_ratio": -0.25348375423816005
+          },
+          {
+            "prompt_id": "bn1-prose-ja-04",
+            "log_ratios": [
+              0.14280219686246376,
+              -0.08791706408466826
+            ],
+            "mean_log_ratio": 0.02744256638889775
+          }
+        ],
+        "mde_pct_80_power": 21.170323497803846,
+        "power_at_3pct_plugin": 0.10751067110865735,
+        "A2_over_A1_drift": {
+          "cycle": 1,
+          "log_mean": 0.13829829994111242,
+          "change_pct": 14.831804239337378,
+          "ci_pct": [
+            -18.880765085926484,
+            66.95370568808676
+          ],
+          "lower_one_sided_pct": -10.624893391268753,
+          "upper_one_sided_pct": 50.3963092216986,
+          "n_prompts": 4,
+          "flag": true
+        },
+        "control_drift_by_cycle": [
+          {
+            "cycle": 1,
+            "log_mean": 0.13829829994111242,
+            "change_pct": 14.831804239337378,
+            "ci_pct": [
+              -18.880765085926484,
+              66.95370568808676
+            ],
+            "lower_one_sided_pct": -10.624893391268753,
+            "upper_one_sided_pct": 50.3963092216986,
+            "n_prompts": 4,
+            "flag": true
+          }
+        ],
+        "cycle_mean_log_ratios": [
+          -0.11987936650510067
+        ],
+        "crossed_cycle_prompt_interval": null
+      },
+      "acceptance": {
+        "log_mean": -0.22219744209303963,
+        "change_pct": -19.9242754461056,
+        "ci_pct": [
+          -30.197170513157058,
+          -7.253312198202187
+        ],
+        "lower_one_sided_pct": -27.687367267014313,
+        "upper_one_sided_pct": -10.957246683489204,
+        "n_prompts": 4,
+        "block_means": [
+          {
+            "block": 1,
+            "log_ratio": -0.11986544329324017,
+            "change_pct": -11.296021416028747
+          },
+          {
+            "block": 2,
+            "log_ratio": -0.32452944089283914,
+            "change_pct": -27.71325745258249
+          }
+        ],
+        "per_prompt": [
+          {
+            "prompt_id": "bn1-prose-ja-01",
+            "log_ratios": [
+              -0.13780982600625769,
+              -0.304062887873504
+            ],
+            "mean_log_ratio": -0.22093635693988084
+          },
+          {
+            "prompt_id": "bn1-prose-ja-02",
+            "log_ratios": [
+              -0.5011792467141852,
+              0.015858000079920442
+            ],
+            "mean_log_ratio": -0.2426606233171324
+          },
+          {
+            "prompt_id": "bn1-prose-ja-03",
+            "log_ratios": [
+              0.09877517324598684,
+              -0.9101393085676179
+            ],
+            "mean_log_ratio": -0.40568206766081555
+          },
+          {
+            "prompt_id": "bn1-prose-ja-04",
+            "log_ratios": [
+              0.0607521263014954,
+              -0.09977356721015496
+            ],
+            "mean_log_ratio": -0.019510720454329777
+          }
+        ],
+        "mde_pct_80_power": 29.84065892149105,
+        "power_at_3pct_plugin": 0.089113072610312,
+        "A2_over_A1_drift": {
+          "cycle": 1,
+          "log_mean": 0.11685316949046942,
+          "change_pct": 12.395438677886608,
+          "ci_pct": [
+            -32.64827590029359,
+            101.9773679285427
+          ],
+          "lower_one_sided_pct": -23.769126768481517,
+          "upper_one_sided_pct": 75.50750197443902,
+          "n_prompts": 4,
+          "flag": true
+        },
+        "control_drift_by_cycle": [
+          {
+            "cycle": 1,
+            "log_mean": 0.11685316949046942,
+            "change_pct": 12.395438677886608,
+            "ci_pct": [
+              -32.64827590029359,
+              101.9773679285427
+            ],
+            "lower_one_sided_pct": -23.769126768481517,
+            "upper_one_sided_pct": 75.50750197443902,
+            "n_prompts": 4,
+            "flag": true
+          }
+        ],
+        "cycle_mean_log_ratios": [
+          -0.22219744209303963
+        ],
+        "crossed_cycle_prompt_interval": null
+      }
+    }
+  }
+}

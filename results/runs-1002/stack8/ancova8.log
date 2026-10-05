@@ -1,0 +1,22 @@
+# regenerated from the stripped arm files in this directory (lmstudio and greedy rows concatenated per arm):
+# bench/stats/ancova_ab.py A1=A1 B1=B1 B2=B2 A2=A2 B3=B3 A3=A3 A4=A4 B4=B4
+== greedy: 128 requests, 16 prompts, 4 workloads, 8 arms
+  ms/token  B effect  -4.59%  [ -8.08 ..  -0.96]  resid sd 10.65%
+            arm means (%): A1 +10.40  B1 -2.00  B2 -0.65  A2 +2.21  B3 +0.40  A3 -1.27  A4 -1.40  B4 -6.86
+            arm level B effect  -4.59%  [ -8.89 ..  -0.08]  (5 dof, arm sd 2.54%)
+  tok/step  B effect  -1.18%  [ -5.79 ..  +3.66]  resid sd 13.65%
+            arm means (%): A1 -4.00  B1 +0.92  B2 -2.40  A2 -0.80  B3 -1.15  A3 +5.57  A4 +1.85  B4 +0.31
+            arm level B effect  -1.18%  [ -5.82 ..  +3.70]  (5 dof, arm sd 2.65%)
+  ms/step|a B effect  -5.43%  [ -6.59 ..  -4.24]  resid sd 3.53%  slopes 0.47 0.39 0.23 0.24
+            arm means (%): A1 +6.96  B1 -1.27  B2 -2.28  A2 +1.75  B3 -0.55  A3 +2.85  A4 -0.15  B4 -6.74
+            arm level B effect  -5.40%  [ -8.32 ..  -2.40]  (5 dof, arm sd 1.72%)
+== lmstudio: 128 requests, 16 prompts, 4 workloads, 8 arms
+  ms/token  B effect  -9.55%  [-12.27 ..  -6.75]  resid sd 8.71%
+            arm means (%): A1 +8.68  B1 -0.23  B2 -3.73  A2 +5.96  B3 -2.31  A3 +4.51  A4 +1.55  B4 -12.81
+            arm level B effect  -9.55%  [-13.63 ..  -5.27]  (5 dof, arm sd 2.54%)
+  tok/step  B effect  +3.13%  [ -0.84 ..  +7.26]  resid sd 11.20%
+            arm means (%): A1 -4.03  B1 +0.16  B2 +1.56  A2 -2.08  B3 +0.03  A3 -1.09  A4 +1.17  B4 +4.52
+            arm level B effect  +3.13%  [ +1.05 ..  +5.24]  (5 dof, arm sd 1.12%)
+  ms/step|a B effect  -7.92%  [ -9.22 ..  -6.60]  resid sd 3.97%  slopes 0.45 0.43 0.28 0.21
+            arm means (%): A1 +5.17  B1 -0.21  B2 -2.76  A2 +3.96  B3 -2.39  A3 +4.01  A4 +2.93  B4 -9.80
+            arm level B effect  -7.57%  [-11.19 ..  -3.80]  (5 dof, arm sd 2.20%)

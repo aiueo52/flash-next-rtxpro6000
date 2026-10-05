@@ -1,0 +1,376 @@
+[abba-sv] A1 (dense) queued 09:49:06
+[A1] MemAvailable 192G ok
+[A1] start 09:49:06 mode=dense samplings=lmstudio,greedy wt=/home/user/tools/sglang-sv env=' '
+[A1] server up 09:53:30
+  greedy   prose-en.txt   #0 chunks=  36 tokens= 200 tok/step=5.56 ms/step= 16.56
+  => greedy prose-en.txt: median ms/step (unprofiled) 16.56  tok/step 5.56
+  sampling code-edit.txt  #0 chunks=  37 tokens= 200 tok/step=5.41 ms/step= 13.01
+  => sampling code-edit.txt: median ms/step (unprofiled) 13.01  tok/step 5.41
+measured bn1-code-edit-01 1/1: 428.53 t/s
+measured bn1-prose-en-01 1/1: 202.40 t/s
+measured bn1-prose-ja-01 1/1: 213.24 t/s
+measured bn1-agent-loop-01 1/1: 262.93 t/s
+measured bn1-code-edit-02 1/1: 545.26 t/s
+measured bn1-prose-en-02 1/1: 209.66 t/s
+measured bn1-prose-ja-02 1/1: 212.70 t/s
+measured bn1-agent-loop-02 1/1: 291.91 t/s
+measured bn1-code-edit-03 1/1: 581.83 t/s
+measured bn1-prose-en-03 1/1: 200.04 t/s
+measured bn1-prose-ja-03 1/1: 214.14 t/s
+measured bn1-agent-loop-03 1/1: 300.76 t/s
+measured bn1-code-edit-04 1/1: 493.14 t/s
+measured bn1-prose-en-04 1/1: 206.75 t/s
+measured bn1-prose-ja-04 1/1: 217.72 t/s
+measured bn1-agent-loop-04 1/1: 266.06 t/s
+measured bn1-code-edit-05 1/1: 568.37 t/s
+measured bn1-prose-en-05 1/1: 208.10 t/s
+measured bn1-prose-ja-05 1/1: 229.45 t/s
+measured bn1-agent-loop-05 1/1: 279.51 t/s
+measured bn1-code-edit-06 1/1: 525.01 t/s
+measured bn1-prose-en-06 1/1: 204.54 t/s
+measured bn1-prose-ja-06 1/1: 204.80 t/s
+measured bn1-agent-loop-06 1/1: 291.53 t/s
+measured bn1-code-edit-07 1/1: 535.76 t/s
+measured bn1-prose-en-07 1/1: 211.82 t/s
+measured bn1-prose-ja-07 1/1: 212.38 t/s
+measured bn1-agent-loop-07 1/1: 267.20 t/s
+measured bn1-code-edit-08 1/1: 557.22 t/s
+measured bn1-prose-en-08 1/1: 204.82 t/s
+measured bn1-prose-ja-08 1/1: 219.01 t/s
+measured bn1-agent-loop-08 1/1: 318.21 t/s
+[A1] fnbench lmstudio rc=0 10:08:29
+measured bn1-code-edit-01 1/1: 501.98 t/s
+measured bn1-prose-en-01 1/1: 236.34 t/s
+measured bn1-prose-ja-01 1/1: 246.37 t/s
+measured bn1-agent-loop-01 1/1: 343.97 t/s
+measured bn1-code-edit-02 1/1: 513.60 t/s
+measured bn1-prose-en-02 1/1: 235.87 t/s
+measured bn1-prose-ja-02 1/1: 248.75 t/s
+measured bn1-agent-loop-02 1/1: 317.07 t/s
+measured bn1-code-edit-03 1/1: 592.05 t/s
+measured bn1-prose-en-03 1/1: 224.87 t/s
+measured bn1-prose-ja-03 1/1: 268.84 t/s
+measured bn1-agent-loop-03 1/1: 349.75 t/s
+measured bn1-code-edit-04 1/1: 587.71 t/s
+measured bn1-prose-en-04 1/1: 232.87 t/s
+measured bn1-prose-ja-04 1/1: 239.85 t/s
+measured bn1-agent-loop-04 1/1: 334.08 t/s
+measured bn1-code-edit-05 1/1: 584.30 t/s
+measured bn1-prose-en-05 1/1: 230.99 t/s
+measured bn1-prose-ja-05 1/1: 281.65 t/s
+measured bn1-agent-loop-05 1/1: 348.07 t/s
+measured bn1-code-edit-06 1/1: 494.75 t/s
+measured bn1-prose-en-06 1/1: 231.42 t/s
+measured bn1-prose-ja-06 1/1: 256.07 t/s
+measured bn1-agent-loop-06 1/1: 338.27 t/s
+measured bn1-code-edit-07 1/1: 580.73 t/s
+measured bn1-prose-en-07 1/1: 239.35 t/s
+measured bn1-prose-ja-07 1/1: 252.29 t/s
+measured bn1-agent-loop-07 1/1: 329.06 t/s
+measured bn1-code-edit-08 1/1: 584.20 t/s
+measured bn1-prose-en-08 1/1: 232.64 t/s
+measured bn1-prose-ja-08 1/1: 246.50 t/s
+measured bn1-agent-loop-08 1/1: 353.70 t/s
+[A1] fnbench greedy rc=0 10:21:36
+  sampling code-edit.txt  #0 chunks= 100 tokens= 600 tok/step=6.00 ms/step= 29.62 (profiled)
+  sampling code-edit.txt  #1 chunks= 110 tokens= 600 tok/step=5.45 ms/step= 13.39
+  => sampling code-edit.txt: median ms/step (unprofiled) 13.39  tok/step 5.73
+  sampling prose-en.txt   #0 chunks= 218 tokens= 600 tok/step=2.75 ms/step= 18.22 (profiled)
+  sampling prose-en.txt   #1 chunks= 234 tokens= 600 tok/step=2.56 ms/step= 11.31
+  => sampling prose-en.txt: median ms/step (unprofiled) 11.31  tok/step 2.66
+[A1] error lines in server log: 0
+[A1] code-edit sparse-verify kernels in trace:  120 "name": "_mtp_shared_sparse_indices_lookup_kernel;
+[A1] prose-en sparse-verify kernels in trace:  120 "name": "_mtp_shared_sparse_indices_lookup_kernel;
+bench/sv/arm_sv.sh: 30 行: 153551 強制終了            env PORT=$PORT PYTHONPATH=$WT/python SERVE_DISPLAY_HZ= $ARM_ENV ${SERVER_ENV:-} setsid ./serve-fast.sh wa > "$LOG" 2>&1 < /dev/null  (wd: ~/tools/sglang-sv)
+[A1] stopped 10:21:56; gpu mem: 2014 MiB
+[abba-sv] B1 (sparse) queued 10:22:26
+[B1] MemAvailable 197G ok
+[B1] start 10:24:04 mode=sparse samplings=lmstudio,greedy wt=/home/user/tools/sglang-sv env='SGLANG_OPT_SPEC_SPARSE_VERIFY=1 '
+[B1] server up 10:28:48
+  greedy   prose-en.txt   #0 chunks=  40 tokens= 200 tok/step=5.00 ms/step= 18.00
+  => greedy prose-en.txt: median ms/step (unprofiled) 18.00  tok/step 5.00
+  sampling code-edit.txt  #0 chunks=  34 tokens= 200 tok/step=5.88 ms/step= 13.57
+  => sampling code-edit.txt: median ms/step (unprofiled) 13.57  tok/step 5.88
+measured bn1-code-edit-01 1/1: 503.06 t/s
+measured bn1-prose-en-01 1/1: 203.87 t/s
+measured bn1-prose-ja-01 1/1: 220.12 t/s
+measured bn1-agent-loop-01 1/1: 328.30 t/s
+measured bn1-code-edit-02 1/1: 471.01 t/s
+measured bn1-prose-en-02 1/1: 215.85 t/s
+measured bn1-prose-ja-02 1/1: 278.02 t/s
+measured bn1-agent-loop-02 1/1: 294.88 t/s
+measured bn1-code-edit-03 1/1: 527.57 t/s
+measured bn1-prose-en-03 1/1: 201.95 t/s
+measured bn1-prose-ja-03 1/1: 230.58 t/s
+measured bn1-agent-loop-03 1/1: 310.58 t/s
+measured bn1-code-edit-04 1/1: 537.55 t/s
+measured bn1-prose-en-04 1/1: 212.05 t/s
+measured bn1-prose-ja-04 1/1: 217.35 t/s
+measured bn1-agent-loop-04 1/1: 292.60 t/s
+measured bn1-code-edit-05 1/1: 522.61 t/s
+measured bn1-prose-en-05 1/1: 203.87 t/s
+measured bn1-prose-ja-05 1/1: 231.33 t/s
+measured bn1-agent-loop-05 1/1: 285.73 t/s
+measured bn1-code-edit-06 1/1: 484.77 t/s
+measured bn1-prose-en-06 1/1: 204.36 t/s
+measured bn1-prose-ja-06 1/1: 211.16 t/s
+measured bn1-agent-loop-06 1/1: 293.38 t/s
+measured bn1-code-edit-07 1/1: 583.37 t/s
+measured bn1-prose-en-07 1/1: 210.04 t/s
+measured bn1-prose-ja-07 1/1: 227.88 t/s
+measured bn1-agent-loop-07 1/1: 287.44 t/s
+measured bn1-code-edit-08 1/1: 550.71 t/s
+measured bn1-prose-en-08 1/1: 223.44 t/s
+measured bn1-prose-ja-08 1/1: 228.90 t/s
+measured bn1-agent-loop-08 1/1: 329.58 t/s
+[B1] fnbench lmstudio rc=0 10:43:16
+measured bn1-code-edit-01 1/1: 481.54 t/s
+measured bn1-prose-en-01 1/1: 238.41 t/s
+measured bn1-prose-ja-01 1/1: 246.24 t/s
+measured bn1-agent-loop-01 1/1: 345.80 t/s
+measured bn1-code-edit-02 1/1: 543.10 t/s
+measured bn1-prose-en-02 1/1: 250.17 t/s
+measured bn1-prose-ja-02 1/1: 253.23 t/s
+measured bn1-agent-loop-02 1/1: 318.77 t/s
+measured bn1-code-edit-03 1/1: 599.40 t/s
+measured bn1-prose-en-03 1/1: 226.08 t/s
+measured bn1-prose-ja-03 1/1: 243.00 t/s
+measured bn1-agent-loop-03 1/1: 327.47 t/s
+measured bn1-code-edit-04 1/1: 598.73 t/s
+measured bn1-prose-en-04 1/1: 243.66 t/s
+measured bn1-prose-ja-04 1/1: 243.78 t/s
+measured bn1-agent-loop-04 1/1: 373.46 t/s
+measured bn1-code-edit-05 1/1: 615.62 t/s
+measured bn1-prose-en-05 1/1: 232.06 t/s
+measured bn1-prose-ja-05 1/1: 234.91 t/s
+measured bn1-agent-loop-05 1/1: 356.87 t/s
+measured bn1-code-edit-06 1/1: 478.69 t/s
+measured bn1-prose-en-06 1/1: 237.24 t/s
+measured bn1-prose-ja-06 1/1: 259.50 t/s
+measured bn1-agent-loop-06 1/1: 326.93 t/s
+measured bn1-code-edit-07 1/1: 607.90 t/s
+measured bn1-prose-en-07 1/1: 233.50 t/s
+measured bn1-prose-ja-07 1/1: 185.11 t/s
+measured bn1-agent-loop-07 1/1: 345.71 t/s
+measured bn1-code-edit-08 1/1: 570.57 t/s
+measured bn1-prose-en-08 1/1: 232.08 t/s
+measured bn1-prose-ja-08 1/1: 246.70 t/s
+measured bn1-agent-loop-08 1/1: 307.75 t/s
+[B1] fnbench greedy rc=0 10:56:26
+  sampling code-edit.txt  #0 chunks=  93 tokens= 600 tok/step=6.45 ms/step= 42.61 (profiled)
+  sampling code-edit.txt  #1 chunks= 102 tokens= 600 tok/step=5.88 ms/step= 13.12
+  => sampling code-edit.txt: median ms/step (unprofiled) 13.12  tok/step 6.17
+  sampling prose-en.txt   #0 chunks= 226 tokens= 600 tok/step=2.65 ms/step= 18.07 (profiled)
+  sampling prose-en.txt   #1 chunks= 231 tokens= 600 tok/step=2.60 ms/step= 11.14
+  => sampling prose-en.txt: median ms/step (unprofiled) 11.14  tok/step 2.63
+[B1] error lines in server log: 0
+[B1] code-edit sparse-verify kernels in trace:  208 "name": "_mtp_shared_sparse_indices_lookup_kernel; 20 "name": "_sparse_target_probs_kernel; 20 "name": "_tree_sampling_target_only_sparse_kernel;
+[B1] prose-en sparse-verify kernels in trace:  120 "name": "_mtp_shared_sparse_indices_lookup_kernel; 20 "name": "_sparse_target_probs_kernel; 20 "name": "_tree_sampling_target_only_sparse_kernel;
+bench/sv/arm_sv.sh: 30 行: 165305 強制終了            env PORT=$PORT PYTHONPATH=$WT/python SERVE_DISPLAY_HZ= $ARM_ENV ${SERVER_ENV:-} setsid ./serve-fast.sh wa > "$LOG" 2>&1 < /dev/null  (wd: ~/tools/sglang-sv)
+[B1] stopped 10:56:47; gpu mem: 2007 MiB
+[abba-sv] B2 (sparse) queued 10:57:17
+[B2] MemAvailable 221G ok
+[B2] start 11:02:30 mode=sparse samplings=lmstudio,greedy wt=/home/user/tools/sglang-sv env='SGLANG_OPT_SPEC_SPARSE_VERIFY=1 '
+[B2] server up 11:06:31
+  greedy   prose-en.txt   #0 chunks=  39 tokens= 200 tok/step=5.13 ms/step= 17.50
+  => greedy prose-en.txt: median ms/step (unprofiled) 17.50  tok/step 5.13
+  sampling code-edit.txt  #0 chunks=  28 tokens= 200 tok/step=7.14 ms/step= 13.69
+  => sampling code-edit.txt: median ms/step (unprofiled) 13.69  tok/step 7.14
+measured bn1-code-edit-01 1/1: 449.00 t/s
+measured bn1-prose-en-01 1/1: 207.22 t/s
+measured bn1-prose-ja-01 1/1: 222.83 t/s
+measured bn1-agent-loop-01 1/1: 269.40 t/s
+measured bn1-code-edit-02 1/1: 562.92 t/s
+measured bn1-prose-en-02 1/1: 200.42 t/s
+measured bn1-prose-ja-02 1/1: 219.78 t/s
+measured bn1-agent-loop-02 1/1: 293.84 t/s
+measured bn1-code-edit-03 1/1: 491.83 t/s
+measured bn1-prose-en-03 1/1: 214.49 t/s
+measured bn1-prose-ja-03 1/1: 223.55 t/s
+measured bn1-agent-loop-03 1/1: 288.54 t/s
+measured bn1-code-edit-04 1/1: 522.71 t/s
+measured bn1-prose-en-04 1/1: 202.77 t/s
+measured bn1-prose-ja-04 1/1: 219.77 t/s
+measured bn1-agent-loop-04 1/1: 314.99 t/s
+measured bn1-code-edit-05 1/1: 554.49 t/s
+measured bn1-prose-en-05 1/1: 212.47 t/s
+measured bn1-prose-ja-05 1/1: 219.26 t/s
+measured bn1-agent-loop-05 1/1: 281.12 t/s
+measured bn1-code-edit-06 1/1: 508.37 t/s
+measured bn1-prose-en-06 1/1: 213.82 t/s
+measured bn1-prose-ja-06 1/1: 215.51 t/s
+measured bn1-agent-loop-06 1/1: 281.05 t/s
+measured bn1-code-edit-07 1/1: 542.10 t/s
+measured bn1-prose-en-07 1/1: 212.51 t/s
+measured bn1-prose-ja-07 1/1: 432.93 t/s
+measured bn1-agent-loop-07 1/1: 276.29 t/s
+measured bn1-code-edit-08 1/1: 586.91 t/s
+measured bn1-prose-en-08 1/1: 200.83 t/s
+measured bn1-prose-ja-08 1/1: 225.67 t/s
+measured bn1-agent-loop-08 1/1: 300.05 t/s
+[B2] fnbench lmstudio rc=0 11:21:15
+measured bn1-code-edit-01 1/1: 484.82 t/s
+measured bn1-prose-en-01 1/1: 236.60 t/s
+measured bn1-prose-ja-01 1/1: 273.09 t/s
+measured bn1-agent-loop-01 1/1: 314.30 t/s
+measured bn1-code-edit-02 1/1: 588.08 t/s
+measured bn1-prose-en-02 1/1: 245.87 t/s
+measured bn1-prose-ja-02 1/1: 235.63 t/s
+measured bn1-agent-loop-02 1/1: 314.51 t/s
+measured bn1-code-edit-03 1/1: 574.94 t/s
+measured bn1-prose-en-03 1/1: 234.88 t/s
+measured bn1-prose-ja-03 1/1: 362.56 t/s
+measured bn1-agent-loop-03 1/1: 320.75 t/s
+measured bn1-code-edit-04 1/1: 579.61 t/s
+measured bn1-prose-en-04 1/1: 232.11 t/s
+measured bn1-prose-ja-04 1/1: 259.92 t/s
+measured bn1-agent-loop-04 1/1: 360.24 t/s
+measured bn1-code-edit-05 1/1: 588.37 t/s
+measured bn1-prose-en-05 1/1: 235.76 t/s
+measured bn1-prose-ja-05 1/1: 244.45 t/s
+measured bn1-agent-loop-05 1/1: 292.05 t/s
+measured bn1-code-edit-06 1/1: 486.61 t/s
+measured bn1-prose-en-06 1/1: 244.91 t/s
+measured bn1-prose-ja-06 1/1: 274.70 t/s
+measured bn1-agent-loop-06 1/1: 324.35 t/s
+measured bn1-code-edit-07 1/1: 575.66 t/s
+measured bn1-prose-en-07 1/1: 226.26 t/s
+measured bn1-prose-ja-07 1/1: 255.14 t/s
+measured bn1-agent-loop-07 1/1: 338.08 t/s
+measured bn1-code-edit-08 1/1: 555.78 t/s
+measured bn1-prose-en-08 1/1: 233.14 t/s
+measured bn1-prose-ja-08 1/1: 262.65 t/s
+measured bn1-agent-loop-08 1/1: 363.95 t/s
+[B2] fnbench greedy rc=0 11:34:03
+  sampling code-edit.txt  #0 chunks= 107 tokens= 600 tok/step=5.61 ms/step= 29.16 (profiled)
+  sampling code-edit.txt  #1 chunks=  91 tokens= 600 tok/step=6.59 ms/step= 13.19
+  => sampling code-edit.txt: median ms/step (unprofiled) 13.19  tok/step 6.10
+  sampling prose-en.txt   #0 chunks= 226 tokens= 600 tok/step=2.65 ms/step= 17.29 (profiled)
+  sampling prose-en.txt   #1 chunks= 252 tokens= 600 tok/step=2.38 ms/step= 10.09
+  => sampling prose-en.txt: median ms/step (unprofiled) 10.09  tok/step 2.52
+[B2] error lines in server log: 0
+[B2] code-edit sparse-verify kernels in trace:  120 "name": "_mtp_shared_sparse_indices_lookup_kernel; 20 "name": "_sparse_target_probs_kernel; 20 "name": "_tree_sampling_target_only_sparse_kernel;
+[B2] prose-en sparse-verify kernels in trace:  120 "name": "_mtp_shared_sparse_indices_lookup_kernel; 20 "name": "_sparse_target_probs_kernel; 20 "name": "_tree_sampling_target_only_sparse_kernel;
+bench/sv/arm_sv.sh: 30 行: 179954 強制終了            env PORT=$PORT PYTHONPATH=$WT/python SERVE_DISPLAY_HZ= $ARM_ENV ${SERVER_ENV:-} setsid ./serve-fast.sh wa > "$LOG" 2>&1 < /dev/null  (wd: ~/tools/sglang-sv)
+[B2] stopped 11:34:21; gpu mem: 2001 MiB
+[abba-sv] A2 (dense) queued 11:34:51
+[A2] MemAvailable 196G ok
+[A2] start 11:40:53 mode=dense samplings=lmstudio,greedy wt=/home/user/tools/sglang-sv env=' '
+[A2] server up 11:46:19
+  greedy   prose-en.txt   #0 chunks=  39 tokens= 200 tok/step=5.13 ms/step= 16.35
+  => greedy prose-en.txt: median ms/step (unprofiled) 16.35  tok/step 5.13
+  sampling code-edit.txt  #0 chunks=  32 tokens= 200 tok/step=6.25 ms/step= 13.46
+  => sampling code-edit.txt: median ms/step (unprofiled) 13.46  tok/step 6.25
+measured bn1-code-edit-01 1/1: 472.81 t/s
+measured bn1-prose-en-01 1/1: 203.73 t/s
+measured bn1-prose-ja-01 1/1: 209.49 t/s
+measured bn1-agent-loop-01 1/1: 284.12 t/s
+measured bn1-code-edit-02 1/1: 526.47 t/s
+measured bn1-prose-en-02 1/1: 203.83 t/s
+measured bn1-prose-ja-02 1/1: 223.35 t/s
+measured bn1-agent-loop-02 1/1: 258.14 t/s
+measured bn1-code-edit-03 1/1: 491.78 t/s
+measured bn1-prose-en-03 1/1: 198.71 t/s
+measured bn1-prose-ja-03 1/1: 224.23 t/s
+measured bn1-agent-loop-03 1/1: 271.36 t/s
+measured bn1-code-edit-04 1/1: 538.70 t/s
+measured bn1-prose-en-04 1/1: 203.24 t/s
+measured bn1-prose-ja-04 1/1: 207.70 t/s
+measured bn1-agent-loop-04 1/1: 297.30 t/s
+measured bn1-code-edit-05 1/1: 461.92 t/s
+measured bn1-prose-en-05 1/1: 203.78 t/s
+measured bn1-prose-ja-05 1/1: 199.52 t/s
+measured bn1-agent-loop-05 1/1: 277.68 t/s
+measured bn1-code-edit-06 1/1: 483.79 t/s
+measured bn1-prose-en-06 1/1: 208.61 t/s
+measured bn1-prose-ja-06 1/1: 212.81 t/s
+measured bn1-agent-loop-06 1/1: 260.35 t/s
+measured bn1-code-edit-07 1/1: 489.23 t/s
+measured bn1-prose-en-07 1/1: 206.57 t/s
+measured bn1-prose-ja-07 1/1: 245.04 t/s
+measured bn1-agent-loop-07 1/1: 291.57 t/s
+measured bn1-code-edit-08 1/1: 472.80 t/s
+measured bn1-prose-en-08 1/1: 205.32 t/s
+measured bn1-prose-ja-08 1/1: 255.68 t/s
+measured bn1-agent-loop-08 1/1: 276.61 t/s
+[A2] fnbench lmstudio rc=0 12:01:08
+measured bn1-code-edit-01 1/1: 508.15 t/s
+measured bn1-prose-en-01 1/1: 223.42 t/s
+measured bn1-prose-ja-01 1/1: 249.01 t/s
+measured bn1-agent-loop-01 1/1: 322.68 t/s
+measured bn1-code-edit-02 1/1: 562.98 t/s
+measured bn1-prose-en-02 1/1: 236.00 t/s
+measured bn1-prose-ja-02 1/1: 246.56 t/s
+measured bn1-agent-loop-02 1/1: 329.03 t/s
+measured bn1-code-edit-03 1/1: 620.56 t/s
+measured bn1-prose-en-03 1/1: 223.28 t/s
+measured bn1-prose-ja-03 1/1: 239.64 t/s
+measured bn1-agent-loop-03 1/1: 334.88 t/s
+measured bn1-code-edit-04 1/1: 520.94 t/s
+measured bn1-prose-en-04 1/1: 255.12 t/s
+measured bn1-prose-ja-04 1/1: 237.33 t/s
+measured bn1-agent-loop-04 1/1: 352.00 t/s
+measured bn1-code-edit-05 1/1: 581.02 t/s
+measured bn1-prose-en-05 1/1: 217.46 t/s
+measured bn1-prose-ja-05 1/1: 223.92 t/s
+measured bn1-agent-loop-05 1/1: 308.47 t/s
+measured bn1-code-edit-06 1/1: 482.65 t/s
+measured bn1-prose-en-06 1/1: 217.12 t/s
+measured bn1-prose-ja-06 1/1: 223.50 t/s
+measured bn1-agent-loop-06 1/1: 336.19 t/s
+measured bn1-code-edit-07 1/1: 545.11 t/s
+measured bn1-prose-en-07 1/1: 215.18 t/s
+measured bn1-prose-ja-07 1/1: 237.39 t/s
+measured bn1-agent-loop-07 1/1: 289.56 t/s
+measured bn1-code-edit-08 1/1: 553.30 t/s
+measured bn1-prose-en-08 1/1: 228.22 t/s
+measured bn1-prose-ja-08 1/1: 230.59 t/s
+measured bn1-agent-loop-08 1/1: 324.58 t/s
+[A2] fnbench greedy rc=0 12:14:33
+  sampling code-edit.txt  #0 chunks= 100 tokens= 600 tok/step=6.00 ms/step= 30.17 (profiled)
+  sampling code-edit.txt  #1 chunks= 109 tokens= 600 tok/step=5.50 ms/step= 14.16
+  => sampling code-edit.txt: median ms/step (unprofiled) 14.16  tok/step 5.75
+  sampling prose-en.txt   #0 chunks= 229 tokens= 600 tok/step=2.62 ms/step= 17.96 (profiled)
+  sampling prose-en.txt   #1 chunks= 243 tokens= 600 tok/step=2.47 ms/step= 12.16
+  => sampling prose-en.txt: median ms/step (unprofiled) 12.16  tok/step 2.54
+[A2] error lines in server log: 0
+[A2] code-edit sparse-verify kernels in trace:  120 "name": "_mtp_shared_sparse_indices_lookup_kernel;
+[A2] prose-en sparse-verify kernels in trace:  120 "name": "_mtp_shared_sparse_indices_lookup_kernel;
+bench/sv/arm_sv.sh: 30 行: 195118 強制終了            env PORT=$PORT PYTHONPATH=$WT/python SERVE_DISPLAY_HZ= $ARM_ENV ${SERVER_ENV:-} setsid ./serve-fast.sh wa > "$LOG" 2>&1 < /dev/null  (wd: ~/tools/sglang-sv)
+[A2] stopped 12:14:53; gpu mem: 2007 MiB
+== paired lmstudio
+== runs/sv/paired-lmstudio.json (ABBA, 1 cycle)
+ tps
+  agent-loop    +5.2%  [  +3.3 ..   +7.0]  blocks +6.4 / +4.0   A2/A1  -2.6%
+  code-edit     +2.8%  [  -1.0 ..   +6.7]  blocks -1.1 / +6.9   A2/A1  -6.8% DRIFT
+  prose-en      +1.7%  [  +1.0 ..   +2.7]  blocks +1.6 / +1.9   A2/A1  -0.9%
+  prose-ja      +7.6%  [  +1.5 ..  +16.7]  blocks +6.8 / +8.5   A2/A1  +2.9%
+ acceptance
+  agent-loop    +5.1%  [  +2.0 ..   +8.4]  blocks +8.0 / +2.3   A2/A1  -2.3%
+  code-edit     +4.0%  [  -3.5 ..  +11.5]  blocks -0.4 / +8.7   A2/A1  -8.0% DRIFT
+  prose-en      -0.4%  [  -1.1 ..   +0.4]  blocks +0.0 / -0.8   A2/A1  +0.2%
+  prose-ja      +5.5%  [  -1.3 ..  +15.8]  blocks +4.9 / +6.2   A2/A1  +5.1% DRIFT
+== paired greedy
+== runs/sv/paired-greedy.json (ABBA, 1 cycle)
+ tps
+  agent-loop    +0.3%  [  -2.8 ..   +4.0]  blocks -0.5 / +1.1   A2/A1  -4.4% DRIFT
+  code-edit     +1.2%  [  -1.5 ..   +3.9]  blocks +1.1 / +1.3   A2/A1  -1.5%
+  prose-en      +2.8%  [  +0.9 ..   +4.8]  blocks +1.5 / +4.2   A2/A1  -2.7%
+  prose-ja      +3.2%  [  -2.7 ..   +9.1]  blocks -6.6 / +14.0  A2/A1  -7.4% DRIFT
+ acceptance
+  agent-loop    -1.9%  [  -6.7 ..   +4.0]  blocks -2.0 / -1.9   A2/A1  -1.9%
+  code-edit     -0.4%  [  -2.8 ..   +2.0]  blocks -0.6 / -0.3   A2/A1  -1.7%
+  prose-en      +1.8%  [  -0.3 ..   +3.9]  blocks +2.0 / +1.5   A2/A1  +0.6%
+  prose-ja      +2.9%  [  -4.2 ..  +10.8]  blocks -7.3 / +14.4  A2/A1  -5.2% DRIFT
+== clipped R.eager (us/step)
+A1-code-edit                     steps  20  R.eager clipped  376.3 us/step (raw  414.1)  top: flashinfer::sampling::air_ 90, at::cunn_SoftMaxForward<So 63, flashinfer::sampling::Tree 48, flashinfer::sampling::air_ 46, flashinfer::sampling::Radi 25, at::index_elementwise_kern 16
+A1-prose-en                      steps  20  R.eager clipped  387.0 us/step (raw  412.3)  top: flashinfer::sampling::air_ 89, at::cunn_SoftMaxForward<So 63, flashinfer::sampling::Tree 59, flashinfer::sampling::air_ 44, flashinfer::sampling::Radi 25, at::index_elementwise_kern 15
+A2-code-edit                     steps  20  R.eager clipped  367.3 us/step (raw  437.7)  top: flashinfer::sampling::air_ 90, at::cunn_SoftMaxForward<So 62, flashinfer::sampling::Tree 48, flashinfer::sampling::air_ 46, flashinfer::sampling::Radi 25, at::index_elementwise_kern 15
+A2-prose-en                      steps  20  R.eager clipped  375.8 us/step (raw  377.5)  top: flashinfer::sampling::air_ 89, at::cunn_SoftMaxForward<So 62, flashinfer::sampling::Tree 59, flashinfer::sampling::air_ 43, flashinfer::sampling::Radi 26, at::index_elementwise_kern 15
+B1-code-edit                     steps  20  R.eager clipped  182.4 us/step (raw  182.4)  top: at::mbtopk 57, Memcpy DtoH 22, at::index_elementwise_kern 15, _fused_conv_window_scatter 11, at::mbtopk<mbtopk> 8, _tree_sampling_target_only 8
+B1-prose-en                      steps  20  R.eager clipped  165.1 us/step (raw  198.6)  top: at::mbtopk 53, Memcpy DtoH 17, at::index_elementwise_kern 15, _fused_conv_window_scatter 11, at::mbtopk<mbtopk> 8, at::unrolled_elementwise_k 8
+B2-code-edit                     steps  20  R.eager clipped  158.9 us/step (raw  170.6)  top: at::mbtopk 52, at::index_elementwise_kern 15, _fused_conv_window_scatter 11, at::unrolled_elementwise_k 9, at::mbtopk<mbtopk> 8, _tree_sampling_target_only 7
+B2-prose-en                      steps  20  R.eager clipped  156.6 us/step (raw  187.8)  top: at::mbtopk 53, at::index_elementwise_kern 15, _fused_conv_window_scatter 11, at::unrolled_elementwise_k 10, at::mbtopk<mbtopk> 8, at::index_elementwise_kern 6
+smoke-sv-code-edit               steps  20  R.eager clipped  184.3 us/step (raw  184.3)  top: at::mbtopk 59, Memcpy DtoH 18, at::index_elementwise_kern 15, _fused_conv_window_scatter 12, _tree_sampling_target_only 9, at::unrolled_elementwise_k 9
+smoke-sv-prose-en                steps  20  R.eager clipped  170.2 us/step (raw  170.2)  top: at::mbtopk 53, Memcpy DtoH 20, at::index_elementwise_kern 15, _fused_conv_window_scatter 11, at::unrolled_elementwise_k 9, at::mbtopk<mbtopk> 8
+[abba-sv] done 12:15:34
