@@ -1,0 +1,17 @@
+--- a/flashinfer/jit/core.py
++++ b/flashinfer/jit/core.py
+@@ -410,6 +410,14 @@
+         return None
+ 
+     def build(self, verbose: Optional[bool] = None, need_lock: bool = False) -> None:
++        # p2 private copy only: a copied cache keeps the old absolute paths, so ninja would rebuild
++        # every TU, inside a server too (the 2026-10-01 04:07 OOM). Load the cached .so as-is.
++        if os.environ.get("FLASHINFER_P2_NO_NINJA"):
++            if self.is_compiled:
++                return
++            raise MissingJITCacheError(
++                f"FLASHINFER_P2_NO_NINJA: {self.name} is not compiled in this cache", spec=self
++            )
+         if os.environ.get("FLASHINFER_DISABLE_JIT"):
+             raise MissingJITCacheError(
+                 "JIT compilation is disabled via FLASHINFER_DISABLE_JIT environment variable, "

@@ -1,0 +1,13 @@
+--- a/flashinfer/data/csrc/fused_moe/cutlass_backend/cutlass_fused_moe_kernels.cuh
++++ b/flashinfer/data/csrc/fused_moe/cutlass_backend/cutlass_fused_moe_kernels.cuh
+@@ -1550,8 +1550,9 @@
+ #define G2_EXPAND_QUANT_UNROLL 2
+ #endif
+ // RQ2h: 1 = compute the row's SF write address once instead of once per chunk (FC_fc-moe 1d).
++// Default 1: the shipped 2026-10-02 module ("u2h") was compiled with -DG2_EXPAND_SF_HOIST=1.
+ #ifndef G2_EXPAND_SF_HOIST
+-#define G2_EXPAND_SF_HOIST 0
++#define G2_EXPAND_SF_HOIST 1
+ #endif
+ 
+ // RQ2: one 16-byte global -> shared copy that holds no registers while in flight (cached in L2
