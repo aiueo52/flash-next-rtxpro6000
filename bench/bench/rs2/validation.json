@@ -1,0 +1,115 @@
+{
+  "worktree": "/home/user/tools/sglang-rs2",
+  "branch": "opus/rs2-sparse",
+  "base_commit": "c868f2ee86",
+  "device": "cpu",
+  "triton_interpret": true,
+  "GPU_and_server_executed": false,
+  "A": {
+    "status": "PASS",
+    "topk_impl": [
+      "triton",
+      "torch"
+    ],
+    "rows": 868,
+    "max_delta": 5.96e-08
+  },
+  "B": {
+    "status": "PASS",
+    "topk_impl": [
+      "triton",
+      "torch"
+    ],
+    "uniforms_per_row": 2048,
+    "chi_square_p": [
+      0.7434245737664917,
+      0.8090281092233413
+    ]
+  },
+  "C": {
+    "status": "PASS",
+    "real_dense_kernel": true,
+    "cases": 48,
+    "rows": 120,
+    "rounding_edge_mismatch_cases": 0,
+    "rounding_edge_mismatch_rows": 0
+  },
+  "D": {
+    "status": "PASS",
+    "trials": 4096,
+    "position_n": [
+      4096,
+      2878,
+      2082,
+      1683
+    ],
+    "position_p": [
+      0.312035,
+      0.024004,
+      0.876888,
+      0.879397
+    ],
+    "fisher_p": 0.244059,
+    "acceptance_empirical": 0.702637,
+    "acceptance_theoretical": 0.706068,
+    "standard_error": 0.007118
+  },
+  "E": {
+    "status": "SKIP",
+    "code_present": true,
+    "proposal_graph_calls": 14,
+    "n": [
+      1,
+      2,
+      4
+    ],
+    "Vd": 49152,
+    "dtypes": [
+      "float32",
+      "bfloat16"
+    ],
+    "comparisons": [
+      "triton",
+      "torch",
+      "RS1+scatter",
+      "greedy"
+    ],
+    "verify_shapes": [
+      [
+        1,
+        4
+      ],
+      [
+        1,
+        8
+      ],
+      [
+        1,
+        16
+      ],
+      [
+        4,
+        4
+      ]
+    ]
+  },
+  "F": {
+    "status": "SKIP",
+    "parent_run_required": true
+  },
+  "integration": {
+    "idle_filter_merge": "PASS",
+    "FutureMap_CPU_storage_and_gather": "PASS",
+    "CUDA_stream_ordering": "UNTESTED",
+    "dispatch_guards": "PASS",
+    "RS1_functions_and_dense_kernel_unchanged": "PASS",
+    "real_draft_forward_with_synthetic_logits": "PASS",
+    "flag_off_vs_base_equal_rng_tensors": "PASS"
+  },
+  "imports": "PASS with caches isolated to /tmp/rs2-import-cache",
+  "notes": [
+    "Tied RS1 reference canonicalizes only torch.topk; untied reference is unchanged.",
+    "Compensated fp32 prefix scan prevents a bf16 equal-logit top-p boundary shift.",
+    "GPU speed budget, graph capture, CUDA relay ordering and server greedy exactness remain unverified."
+  ]
+}

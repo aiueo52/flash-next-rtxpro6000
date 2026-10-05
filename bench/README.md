@@ -11,6 +11,16 @@
 > drivers, `adaptive/` adaptive-policy configs. The 12-task quality battery (`fnbench quality`,
 > `prof/battery12.py`) the lab notes mention is not included: its questions came from a set of unshown
 > origin, so it and every result on it were removed.
+>
+> **2026-10 additions.** The drivers and analysis scripts of the 2026-10-01/02 experiments were added
+> with the same omissions: `bench/stack/` (8-start ABBA of the shipped stack), `bench/st1`, `bench/xa1`,
+> `bench/rs1`, `bench/rs2`, `bench/rs2b`, `bench/rs2d`, `bench/rs3`, `bench/sv`, `bench/sv2`, `bench/fg1`,
+> `bench/rt1`, `bench/dg1`, `bench/dt1`, `bench/fc_moe` (RQ1/RQ2 prologue builds), `bench/fc_glue`,
+> `bench/rq1`, `bench/cand`, `bench/jitcache`, `bench/stats/ancova_ab.py` (the arm-level ANCOVA used for
+> every ABBA verdict) and `prof/fc_*` (fixed-cost map). `fnbench run --sampling lmstudio` sends LM Studio's
+> default sampler (temperature 0.8, top_p 0.95, top_k 40, min_p 0.05). Left out: the GPU queue scripts of
+> the development machine, and the shipping-smoke / long-context drivers, which read the configuration of
+> the author's desktop client; the long-context check itself is `prof/needle_test.py` + `prof/long_decode.py`.
 
 # flash-next-bench
 

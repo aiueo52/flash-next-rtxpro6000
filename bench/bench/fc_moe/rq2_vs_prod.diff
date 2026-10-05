@@ -1,0 +1,115 @@
+--- a/flashinfer/data/csrc/fused_moe/cutlass_backend/cutlass_fused_moe_kernels.cuh
++++ b/flashinfer/data/csrc/fused_moe/cutlass_backend/cutlass_fused_moe_kernels.cuh
+@@ -1545,6 +1545,31 @@
+ // G2-2: the maximum number of 8-element chunks one thread stages per row.  hidden_size /
+ // (8 * BLOCK_SIZE) must be <= this; the host gate refuses the fusion otherwise.
+ constexpr int G2_EXPAND_MAX_CHUNKS = 16;
++// RQ2: chunks per trip of the expand quantize loop (a build-time choice; FC_fc-moe 1d).
++#ifndef G2_EXPAND_QUANT_UNROLL
++#define G2_EXPAND_QUANT_UNROLL 2
++#endif
++// RQ2h: 1 = compute the row's SF write address once instead of once per chunk (FC_fc-moe 1d).
++#ifndef G2_EXPAND_SF_HOIST
++#define G2_EXPAND_SF_HOIST 0
++#endif
++
++// RQ2: one 16-byte global -> shared copy that holds no registers while in flight (cached in L2
++// only), and the wait for all of this thread's copies.
++__device__ __forceinline__ void g2CpAsync16(void* smem_dst, void const* gmem_src) {
++#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
++  uint32_t const dst = static_cast<uint32_t>(__cvta_generic_to_shared(smem_dst));
++  asm volatile("cp.async.cg.shared.global [%0], [%1], 16;\n" ::"r"(dst), "l"(gmem_src) : "memory");
++#else
++  *static_cast<uint4*>(smem_dst) = *static_cast<uint4 const*>(gmem_src);
++#endif
++}
++
++__device__ __forceinline__ void g2CpAsyncWaitAll() {
++#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
++  asm volatile("cp.async.wait_all;\n" ::: "memory");
++#endif
++}
+ 
+ template <class T, class WeightType, class OutputType, class ScaleBiasType, class InputAct,
+           int BLOCK_SIZE, int EXPERTS_PER_TOKEN, int LOG2_NUM_EXPERTS, bool FUSE_EXPAND>
+@@ -1800,24 +1825,73 @@
+         auto* dest_row_ptr = reinterpret_cast<OutputElem*>(expand_output) +
+                              permuted_row * num_elems_in_col;
+ 
+-        // Stage the whole row in registers first: with one warp per row the loads must all be in
+-        // flight at once, or the 10 dependent round trips cost more than the launch we deleted.
+-        DataElem staged[G2_EXPAND_MAX_CHUNKS];
++        // RQ2: stage the whole row in shared memory with cp.async. With one warp per row the loads
++        // must all be in flight at once, or the 10 dependent round trips cost more than the launch
++        // we deleted; cp.async does that without holding registers, so the quantize loop below can
++        // stay compact. Unrolled, that loop is ~20 KB of straight-line SASS whose instruction lines
++        // miss L2 after weight streaming (+3.8 us per call, FC_fc-moe 4b.1c).
++        __shared__ __align__(16) uint4 g2_stage[G2_EXPAND_MAX_CHUNKS * BLOCK_SIZE];
++        auto const* source_row_u4 = reinterpret_cast<uint4 const*>(source_row_ptr);
+ #pragma unroll
+         for (int chunk = 0; chunk < G2_EXPAND_MAX_CHUNKS; chunk++) {
+           if (chunk < trips) {
+-            staged[chunk] = source_row_ptr[threadIdx.x + chunk * BLOCK_SIZE];
++            g2CpAsync16(&g2_stage[threadIdx.x + chunk * BLOCK_SIZE],
++                        source_row_u4 + threadIdx.x + chunk * BLOCK_SIZE);
+           }
+         }
++        g2CpAsyncWaitAll();  // each thread reads back only its own slots
++#if G2_EXPAND_SF_HOIST
++        // quantizePackedFPXValue finds the SF byte inside an even-lanes-only branch, so every
++        // chunk carries a divergent branch the next chunk cannot be scheduled across. In the
++        // SWIZZLED_128x4 layout a chunk (32 lanes x 8 elements = 16 SF vectors) covers exactly 4
++        // K tiles of [32][4][4] = 512 bytes, so the byte moves by a constant per chunk and only
++        // the first one needs the full formula (same result as cvt_quant_get_sf_out_offset).
++        constexpr int SF_LANES = VecSize / ELEM_PER_THREAD;    // lanes per SF byte (2)
++        constexpr int SF_PER_CHUNK = BLOCK_SIZE / SF_LANES;   // 16
++        static_assert(VecSize % ELEM_PER_THREAD == 0 && SF_PER_CHUNK % 4 == 0,
++                      "a chunk must cover whole 128x4 K tiles");
++        constexpr int64_t SF_CHUNK_STRIDE = SF_PER_CHUNK / 4 * 512;  // 2048
++        uint8_t* const sf_row =
++            threadIdx.x % SF_LANES == 0
++                ? reinterpret_cast<uint8_t*>(
++                      expand_act_sf_flat +
++                      getOffsetActivationSF(
++                          row_expert, num_tokens_before_expert, padded_hidden_size,
++                          TmaWarpSpecializedGroupedGemmInput::FpXBlockScalingType::NVFP4)) +
++                      static_cast<uint32_t>(get_sf_out_offset_128x4(
++                          static_cast<int>(permuted_row - num_tokens_before_expert),
++                          static_cast<int>(threadIdx.x) / SF_LANES,
++                          static_cast<int>(padded_hidden_size / VecSize)))
++                : nullptr;
++#endif
++#pragma unroll 1
++        for (int chunk0 = 0; chunk0 < trips; chunk0 += G2_EXPAND_QUANT_UNROLL) {
+ #pragma unroll
+-        for (int chunk = 0; chunk < G2_EXPAND_MAX_CHUNKS; chunk++) {
+-          if (chunk < trips) {
++          for (int u = 0; u < G2_EXPAND_QUANT_UNROLL; u++) {
++            // An odd tail repeats the last chunk (the same bytes to the same places) instead of
++            // branching around the second body, so the bodies can interleave.
++            int const chunk = min(chunk0 + u, trips - 1);
+             int64_t const elem_index = threadIdx.x + chunk * BLOCK_SIZE;
++            DataElem staged;
++            *reinterpret_cast<uint4*>(&staged) = g2_stage[elem_index];
++#if G2_EXPAND_SF_HOIST
++            // quantizePackedFPXValue's NVFP4 path with the SF address from sf_row.
++            PackedVec<InputAct> packed_vec{};
++            for (int i = 0; i < CVT_ELTS_PER_THREAD / 2; i++) {
++              packed_vec.elts[i].x = static_cast<InputAct>(staged[i * 2 + 0]);
++              packed_vec.elts[i].y = static_cast<InputAct>(staged[i * 2 + 1]);
++            }
++            auto res = cvt_warp_fp16_to_fp4<InputAct, VecSize, CVT_ELTS_PER_THREAD, false, false,
++                                            std::false_type>(
++                packed_vec, global_scale_val,
++                sf_row ? sf_row + SF_CHUNK_STRIDE * chunk : nullptr, 0.0f);
++#else
+             auto res = quantizePackedFPXValue<InputAct, T, DataElem, VecSize, false,
+                                               std::false_type>(
+-                staged[chunk], global_scale_val, num_tokens_before_expert, row_expert, permuted_row,
++                staged, global_scale_val, num_tokens_before_expert, row_expert, permuted_row,
+                 elem_index, padded_hidden_size, expand_act_sf_flat,
+                 TmaWarpSpecializedGroupedGemmInput::FpXBlockScalingType::NVFP4);
++#endif
+             static_assert(sizeof(res) == sizeof(*dest_row_ptr),
+                           "Quantized value must be the same size as the output");
+             dest_row_ptr[elem_index] = res;

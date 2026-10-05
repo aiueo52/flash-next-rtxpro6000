@@ -44,7 +44,9 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="SUBSTRING",
         help="allow an additional GPU process path substring (repeatable)",
     )
-    run.add_argument("--sampling", choices=("greedy", "recommended"), default="greedy")
+    run.add_argument(
+        "--sampling", choices=("greedy", "recommended", "lmstudio"), default="greedy"
+    )
     run.add_argument(
         "--model",
         help="model field sent to the endpoint (default: first item from GET /models)",

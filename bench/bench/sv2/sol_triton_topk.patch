@@ -1,0 +1,175 @@
+diff --git a/python/sglang/kernels/ops/speculative/sparse_verify.py b/python/sglang/kernels/ops/speculative/sparse_verify.py
+index 2c3a30c925..c7d0632b0f 100644
+--- a/python/sglang/kernels/ops/speculative/sparse_verify.py
++++ b/python/sglang/kernels/ops/speculative/sparse_verify.py
+@@ -8,7 +8,7 @@ makes a full-row pass for the final draw. When every request has
+ top_k <= KP, only the KP largest logits of a row can end up non-zero, so this
+ path works on those:
+ 
+-1. torch.topk over the logits (sorted, KP >= max top_k + a margin for ties).
++1. Top-k over the logits (sorted, KP >= max top_k + a margin for ties).
+ 2. `_sparse_target_probs_kernel`, one program per row: temperature, softmax
+    over the kept entries, top-k keeping ties (FlashInfer: p >= pivot), top-p
+    keeping ties (AIR top-p: p >= the value where the cumulative mass reaches
+@@ -41,6 +41,145 @@ def sparse_verify_width(max_top_k: int) -> int:
+     return max(16, triton.next_power_of_2(max_top_k + _TIE_MARGIN))
+ 
+ 
++@triton.jit
++def _sparse_topk_bitonic_merge(keys, STAGE: tl.constexpr, ALTERNATING: tl.constexpr):
++    offs = tl.arange(start=0, end=keys.numel)
++    flip = (offs & (1 << STAGE)) != 0 if ALTERNATING else True
++    for i in tl.static_range(arg1=STAGE - 1, arg2=-1, step=-1):
++        # Static pair permutations avoid the interpreter's generic XOR reduction.
++        pairs = keys.reshape((keys.numel // (2 << i), 2, 1 << i)).permute((0, 2, 1))
++        left, right = tl.split(pairs)
++        partner = tl.join(a=right, b=left).permute((0, 2, 1)).reshape(keys.shape)
++        is_right = (offs & (1 << i)) != 0
++        keys = tl.where(condition=(keys > partner) != (flip ^ is_right), x=partner, y=keys)
++    return keys
++
++
++@triton.jit
++def _sparse_topk_select(keys, KP: tl.constexpr, LOG_K: tl.constexpr, LOG_BLOCK: tl.constexpr):
++    for stage in tl.static_range(arg1=1, arg2=LOG_K + 1):
++        keys = _sparse_topk_bitonic_merge(
++            keys=keys, STAGE=stage, ALTERNATING=stage < LOG_BLOCK
++        )
++    for stage in tl.static_range(arg1=LOG_K + 1, arg2=LOG_BLOCK + 1):
++        pairs = keys.reshape((keys.numel // (2 * KP), 2, KP))
++        keys = tl.max(input=pairs, axis=1).reshape((keys.numel // 2,))
++        keys = _sparse_topk_bitonic_merge(
++            keys=keys, STAGE=LOG_K, ALTERNATING=stage < LOG_BLOCK
++        )
++    return keys
++
++
++@triton.jit
++def _sparse_topk_chunks_kernel(
++    Logits,
++    Candidates,
++    stride_row,
++    VOCAB: tl.constexpr,
++    NUM_CHUNKS: tl.constexpr,
++    KP: tl.constexpr,
++    BLOCK: tl.constexpr,
++    LOG_K: tl.constexpr,
++    LOG_BLOCK: tl.constexpr,
++):
++    row = tl.program_id(0)
++    chunk = tl.program_id(1)
++    ids = chunk * BLOCK + tl.arange(start=0, end=BLOCK)
++    x = tl.load(
++        pointer=Logits + row * stride_row + ids, mask=ids < VOCAB, other=-float("inf")
++    ).to(tl.float32)
++    bits = x.to(dtype=tl.uint32, bitcast=True)
++    ordered = tl.where(
++        condition=(bits & 0x80000000) != 0, x=bits ^ 0xFFFFFFFF, y=bits ^ 0x80000000
++    )
++    # High bits order floats exactly; low bits prefer smaller ids, including -inf ties.
++    keys = (ordered.to(tl.uint64) << 32) | (0xFFFFFFFF - ids.to(tl.uint32)).to(tl.uint64)
++    keys = tl.where(condition=ids < VOCAB, x=keys, y=0)
++    top = _sparse_topk_select(keys=keys, KP=KP, LOG_K=LOG_K, LOG_BLOCK=LOG_BLOCK)
++    offs = (row * NUM_CHUNKS + chunk) * KP + tl.arange(start=0, end=KP)
++    tl.store(pointer=Candidates + offs, value=top)
++
++
++@triton.jit
++def _sparse_topk_merge_kernel(
++    Candidates,
++    Vals,
++    Idx,
++    NUM_CANDIDATES: tl.constexpr,
++    KP: tl.constexpr,
++    BLOCK: tl.constexpr,
++    LOG_K: tl.constexpr,
++    LOG_BLOCK: tl.constexpr,
++):
++    row = tl.program_id(0)
++    offs = tl.arange(start=0, end=BLOCK)
++    keys = tl.load(
++        pointer=Candidates + row * NUM_CANDIDATES + offs,
++        mask=offs < NUM_CANDIDATES,
++        other=0,
++    ).to(tl.uint64)
++    top = _sparse_topk_select(keys=keys, KP=KP, LOG_K=LOG_K, LOG_BLOCK=LOG_BLOCK)
++    ordered = (top >> 32).to(tl.uint32)
++    bits = tl.where(
++        condition=(ordered & 0x80000000) != 0,
++        x=ordered ^ 0x80000000,
++        y=ordered ^ 0xFFFFFFFF,
++    )
++    vals = bits.to(dtype=tl.float32, bitcast=True)
++    ids = 0xFFFFFFFF - (top & 0xFFFFFFFF).to(tl.uint32)
++    out = row * KP + tl.arange(start=0, end=KP)
++    tl.store(pointer=Vals + out, value=vals)
++    tl.store(pointer=Idx + out, value=ids.to(tl.int64))
++
++
++def sparse_topk(logits: torch.Tensor, kp: int) -> tuple[torch.Tensor, torch.Tensor]:
++    """Return sorted top-k logits and unique int64 token ids in two launches."""
++    if logits.ndim != 2 or logits.stride(1) != 1:
++        raise ValueError("logits must be a matrix with contiguous rows")
++    if logits.dtype not in (torch.float32, torch.bfloat16):
++        raise ValueError("logits must have dtype float32 or bfloat16")
++    if not isinstance(kp, int) or not 16 <= kp <= 256 or kp & (kp - 1):
++        raise ValueError("kp must be a power of two between 16 and 256")
++    num_rows, vocab = logits.shape
++    if kp > vocab:
++        raise ValueError("kp must not exceed the vocabulary size")
++    vals = torch.empty(size=(num_rows, kp), dtype=logits.dtype, device=logits.device)
++    idx = torch.empty(size=(num_rows, kp), dtype=torch.int64, device=logits.device)
++    if num_rows == 0:
++        return vals, idx
++    chunk_size = 4096
++    num_chunks = triton.cdiv(vocab, chunk_size)
++    num_candidates = num_chunks * kp
++    candidates = torch.empty(
++        size=(num_rows, num_candidates), dtype=torch.int64, device=logits.device
++    )
++    _sparse_topk_chunks_kernel[(num_rows, num_chunks)](
++        Logits=logits,
++        Candidates=candidates,
++        stride_row=logits.stride(0),
++        VOCAB=vocab,
++        NUM_CHUNKS=num_chunks,
++        KP=kp,
++        BLOCK=chunk_size,
++        LOG_K=kp.bit_length() - 1,
++        LOG_BLOCK=chunk_size.bit_length() - 1,
++        num_warps=4,
++    )
++    merge_block = triton.next_power_of_2(num_candidates)
++    _sparse_topk_merge_kernel[(num_rows,)](
++        Candidates=candidates,
++        Vals=vals,
++        Idx=idx,
++        NUM_CANDIDATES=num_candidates,
++        KP=kp,
++        BLOCK=merge_block,
++        LOG_K=kp.bit_length() - 1,
++        LOG_BLOCK=merge_block.bit_length() - 1,
++        num_warps=4 if merge_block <= 4096 else 8,
++    )
++    return vals, idx
++
++
+ @triton.jit
+ def _sparse_target_probs_kernel(
+     Vals,  # [N, KP] largest logits per row, sorted descending
+@@ -95,10 +234,14 @@ def sparse_target_probs(
+     kp: int,
+     apply_top_p: bool,
+     apply_min_p: bool,
++    use_sparse_topk: bool = False,
+ ):
+     """Returns (probs [N, kp] float32, token ids [N, kp] int64) for the
+     N = bs * num_draft_tokens rows of `logits`."""
+-    vals, idx = torch.topk(logits, kp, dim=-1, largest=True, sorted=True)
++    if use_sparse_topk:
++        vals, idx = sparse_topk(logits=logits, kp=kp)
++    else:
++        vals, idx = torch.topk(input=logits, k=kp, dim=-1, largest=True, sorted=True)
+     out = torch.empty((logits.shape[0], kp), dtype=torch.float32, device=logits.device)
+     _sparse_target_probs_kernel[(logits.shape[0],)](
+         vals,

@@ -1,0 +1,193 @@
+diff --git a/bench/rs2/check_integration_cpu.py b/bench/rs2/check_integration_cpu.py
+index d44c785..4693348 100644
+--- a/bench/rs2/check_integration_cpu.py
++++ b/bench/rs2/check_integration_cpu.py
+@@ -3,11 +3,14 @@
+ import ast
+ import contextlib
+ import importlib
++import importlib.util
++import itertools
+ import os
+ from pathlib import Path
+ import subprocess
+ import sys
+ import textwrap
++import tempfile
+ from unittest.mock import patch
+ 
+ import msgspec
+@@ -200,6 +203,85 @@ def check_dispatch(*, modules):
+     print("PASS CPU dispatch: invalid RS/cap/topk/multi-layer/other workers reject before model loading")
+ 
+ 
++def check_topk_flag(*, modules):
++    algorithm = modules["spec_info"].SpeculativeAlgorithm
++    worker_module = modules["eagle_worker_v2"]
++    config = GuardConfig()
++    source = (WT / "python/sglang/srt/speculative/eagle_worker_v2.py").read_text()
++    declaration = next(node for node in ast.parse(source).body if isinstance(node, ast.Assign)
++                       and any(isinstance(target, ast.Name) and target.id == "RS_DRAFT_TOPK_IMPL"
++                               for target in node.targets))
++    for value in (None, "triton", "flashinfer", "torch", "", "invalid"):
++        with patch.dict(in_dict=os.environ):
++            if value is None:
++                os.environ.pop("SGLANG_RS_DRAFT_TOPK_IMPL", None)
++            else:
++                os.environ["SGLANG_RS_DRAFT_TOPK_IMPL"] = value
++            namespace = {"envs": envs}
++            exec(compile(ast.Module(body=[declaration], type_ignores=[]), str(WT), "exec"), namespace)
++            expected = "triton" if value is None else value
++            assert namespace["RS_DRAFT_TOPK_IMPL"] == expected
++            with envs.SGLANG_OPT_SPEC_SPARSE_RS.override(True), envs.SGLANG_RS_DRAFT_TOPK.override(64), patch(
++                target="sglang.srt.arg_groups.overrides.resolving_view", return_value=config
++            ):
++                if expected in ("triton", "flashinfer"):
++                    assert algorithm.EAGLE.create_worker(server_args=config) is worker_module.EAGLEWorkerV2
++                else:
++                    try:
++                        algorithm.EAGLE.create_worker(server_args=config)
++                    except ValueError as error:
++                        assert "SGLANG_RS_DRAFT_TOPK_IMPL" in str(error)
++                    else:
++                        raise AssertionError(expected)
++    print("PASS CPU top-k flag: import-time unset=triton; triton/flashinfer accepted; torch/empty/invalid rejected")
++
++
++def check_default_proposal(*, modules):
++    path = "python/sglang/kernels/ops/speculative/sparse_rs.py"
++    original = subprocess.run(args=["git", "-C", str(WT), "show", "cf1e515722:" + path],
++                              check=True, capture_output=True, text=True).stdout
++    current = importlib.import_module("sglang.kernels.ops.speculative.sparse_rs")
++    comparisons = 0
++    with tempfile.TemporaryDirectory(prefix="rs2b-baseline-", dir="/tmp") as directory:
++        baseline_path = Path(directory) / "sparse_rs.py"
++        baseline_path.write_text(original)
++        spec = importlib.util.spec_from_file_location(name="rs2b_cf1_baseline", location=baseline_path)
++        baseline = importlib.util.module_from_spec(spec)
++        sys.modules[spec.name] = baseline
++        spec.loader.exec_module(baseline)
++        for vocab, dtype, n in itertools.product((7, 65, 117), (torch.float32, torch.bfloat16), (1, 2, 4, 7)):
++            logits = torch.randn(size=(n, vocab + 11), dtype=dtype)[:, :vocab]
++            if dtype == torch.bfloat16 and vocab >= 80:
++                logits[:, :80] = 8.0
++            hot = torch.randperm(n=vocab + 37)[:vocab].contiguous()
++            uniforms = torch.rand(size=(n, 2))[:, 0]
++            for min_p, mapping in itertools.product((None, 0.05, 0.2), (None, hot)):
++                kwargs = dict(
++                    next_token_logits=logits, temperatures=torch.tensor(data=[0.3, 0.8, 1.5, 0, 0.8, 0.3, 1.5][:n]),
++                    top_ks=torch.tensor(data=[1, 5, 40, 0, 40, 5, 0][:n], dtype=torch.int32),
++                    top_ps=torch.tensor(data=[1.0, 0.95, 0.5, 0, 0.95, 1, 0.5][:n]),
++                    min_ps=None if min_p is None else torch.full(size=(n,), fill_value=min_p),
++                    uniforms=uniforms, hot_token_id=mapping, k=64,
++                )
++                outputs = []
++                for operation, flag in ((baseline.rs_draft_proposal_sparse, {}),
++                                        (current.rs_draft_proposal_sparse, {}),
++                                        (current.rs_draft_proposal_sparse, {"topk_impl": "triton"})):
++                    positions = torch.arange(end=n, dtype=torch.int64)
++                    chain = torch.full(size=(n, 3), fill_value=-1, dtype=torch.int64)
++                    result = operation(positions=positions, draft_tokens=chain, draft_token_column=1, **kwargs, **flag)
++                    outputs.append((*result, positions, chain))
++                for result in outputs[1:]:
++                    for actual, reference in zip(result, outputs[0]):
++                        if actual.is_floating_point():
++                            actual = actual.contiguous().view(dtype=torch.int32)
++                            reference = reference.contiguous().view(dtype=torch.int32)
++                        assert torch.equal(input=actual, other=reference), (vocab, dtype, n, min_p)
++                    comparisons += 1
++        del sys.modules[spec.name]
++    print(f"PASS CPU RS2b default: {comparisons} unset/explicit-triton calls byte-identical to cf1e515722; all six outputs")
++
++
+ def function_source(*, source, name, class_name=None):
+     nodes = ast.parse(source).body
+     if class_name is not None:
+@@ -289,6 +371,48 @@ def check_draft_forward(*, modules):
+         assert torch.equal(input=batch.positions, other=torch.arange(bs) + steps - 1)
+         assert all(torch.equal(input=inputs, other=tokens[:, step])
+                    for step, inputs in enumerate(worker.draft_runner.inputs))
++        rs2_original = subprocess.run(
++            args=["git", "-C", str(WT), "show", "cf1e515722:python/sglang/srt/speculative/eagle_worker_v2.py"],
++            check=True, capture_output=True, text=True,
++        ).stdout
++        rs2_namespace = dict(worker_module.__dict__)
++        for name in ("_rs_sparse_proposal", "draft_forward"):
++            exec(textwrap.dedent(function_source(source=rs2_original, name=name, class_name="EagleDraftWorker")), rs2_namespace)
++        proposal_kernel = worker_module.rs_draft_proposal_sparse
++        baseline_results = []
++        for impl in (None, "triton", "flashinfer"):
++            def mocked_proposal(**kwargs):
++                assert kwargs["topk_impl"] == ("triton" if impl is None else impl)
++                return proposal_kernel(**dict(kwargs, topk_impl="triton"))
++
++            worker = make_worker(sparse=True)
++            torch.manual_seed(seed=707)
++            with patch.dict(in_dict=os.environ):
++                if impl is None:
++                    os.environ.pop("SGLANG_RS_DRAFT_TOPK_IMPL", None)
++                else:
++                    os.environ["SGLANG_RS_DRAFT_TOPK_IMPL"] = impl
++                with patch.object(target=worker_module, attribute="RS_DRAFT_TOPK_IMPL", new=envs.SGLANG_RS_DRAFT_TOPK_IMPL.get()), patch.object(
++                    target=worker_module, attribute="rs_draft_proposal_sparse", side_effect=mocked_proposal
++                ) as mock:
++                    q0, qi0, p0, x0 = worker._rs_sparse_proposal(next_token_logits=logits, sampling_info=sampling)
++                    initial = (q0, qi0, p0, x0)
++                    batch = make_batch(draft=cls(topk_p=p0, topk_index=x0, draft_support_probs=q0, draft_support_tokens=qi0))
++                    output = worker.draft_forward(forward_batch=batch)
++                    assert mock.call_count == steps
++                    assert "draft_token_column" not in mock.call_args_list[0].kwargs
++                    assert all(call.kwargs["draft_token_column"] == column
++                               for column, call in enumerate(mock.call_args_list[1:], start=1))
++                    baseline_results.append((*initial, *output, batch.positions))
++        worker = make_worker(sparse=True)
++        torch.manual_seed(seed=707)
++        q0, qi0, p0, x0 = rs2_namespace["_rs_sparse_proposal"](self=worker, next_token_logits=logits, sampling_info=sampling)
++        batch = make_batch(draft=cls(topk_p=p0, topk_index=x0, draft_support_probs=q0, draft_support_tokens=qi0))
++        reference = (q0, qi0, p0, x0, *rs2_namespace["draft_forward"](self=worker, forward_batch=batch), batch.positions)
++        for output in baseline_results:
++            assert all(actual is expected if actual is None else torch.equal(input=actual, other=expected)
++                       for actual, expected in zip(output, reference))
++        print("PASS CPU RS2b worker: unset/triton match cf1e515722 with equal RNG; flashinfer kwarg mocked at both call sites")
+         namespace = dict(worker_module.__dict__)
+         source = function_source(source=original, name="draft_forward", class_name="EagleDraftWorker")
+         exec(textwrap.dedent(source), namespace)
+@@ -317,6 +441,8 @@ if __name__ == "__main__":
+         check_support_constructors(modules=modules)
+         check_fields(modules=modules)
+         check_dispatch(modules=modules)
++        check_topk_flag(modules=modules)
++        check_default_proposal(modules=modules)
+         check_flag_off(modules=modules)
+         check_draft_forward(modules=modules)
+     print("PASS CPU integration checks; no model/server/CUDA graph started")
+diff --git a/bench/rs2/test_sparse_rs.py b/bench/rs2/test_sparse_rs.py
+index d045f70..03cefc8 100644
+--- a/bench/rs2/test_sparse_rs.py
++++ b/bench/rs2/test_sparse_rs.py
+@@ -17,6 +17,7 @@ from scipy.stats import chi2, combine_pvalues
+ 
+ WT = Path(os.environ.get("WT", "/home/user/tools/sglang-rs2"))
+ DEV = os.environ.get("DEV", "cpu")
++IMPLS = ("triton", "torch")
+ if DEV not in ("cpu", "cuda"):
+     raise ValueError("DEV must be cpu or cuda")
+ if DEV == "cpu":
+@@ -150,7 +151,7 @@ def test_a():
+     combinations = list(itertools.product((0.3, 0.8, 1.5), (1, 5, 40, 0), (1.0, 0.95, 0.5)))
+     rows_checked = 0
+     boundary_flips = 0
+-    for impl in ("triton", "torch"):
++    for impl in IMPLS:
+         max_delta = 0.0
+         for vocab, tied in ((117, False), (117, True), (49152, False), (49152, True)):
+             rows = combinations if vocab == 117 else [(0.8, 40, 0.95)]
+@@ -224,7 +225,7 @@ def test_b():
+                       top_ps=[0.95] * m + [1] * m, min_ps=[0.05] * m + [0.2] * m)
+     hot = torch.tensor(data=[17, 3, 13, 6, 9, 1, 20, 11], dtype=torch.int64, device=DEV)
+     uniforms = torch.rand(size=(2 * m,), device=DEV)
+-    for impl in ("triton", "torch"):
++    for impl in IMPLS:
+         positions = torch.arange(2 * m, device=DEV, dtype=torch.int64)
+         old_positions = positions.clone()
+         chain = torch.full(size=(2 * m, 4), fill_value=-1, dtype=torch.int64, device=DEV)

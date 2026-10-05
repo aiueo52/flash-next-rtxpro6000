@@ -14,7 +14,7 @@ import requests
 
 from .gpu_guard import check_gpu_guard, format_block_reason
 from .http_client import EndpointError, OpenAIStreamClient
-from .models import JsonObject, Sampling, Workload
+from .models import LMSTUDIO_SAMPLING, JsonObject, Sampling, Workload
 from .parsers import get_engine_parser, prometheus_delta, counter_acceptance
 
 
@@ -51,6 +51,8 @@ def fetch_metrics(session: requests.Session, endpoint: str) -> JsonObject:
 def _sampling(workload: Workload, mode: str) -> Sampling:
     if mode == "greedy":
         return Sampling(temperature=0.0)
+    if mode == "lmstudio":
+        return LMSTUDIO_SAMPLING
     return workload.sampling
 
 
