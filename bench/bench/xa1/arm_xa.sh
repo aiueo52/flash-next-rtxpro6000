@@ -36,12 +36,14 @@ env PORT=$PORT PYTHONPATH=$WT/python SERVE_DISPLAY_HZ= $ARM_ENV ${SERVER_ENV:-} 
     setsid ./serve-fast.sh $PRESET ${SERVE_ARGS:-} > "$LOG" 2>&1 < /dev/null &
 SPID=$!
 stop() {
-  local pg; pg=$(ps -o pgid= -p $SPID 2>/dev/null | tr -d ' ')
+  local pg=$SPID  # setsid in a script execs without forking: the server group id is its pid, and stays valid after it exits
   [ -n "$pg" ] && kill -TERM -- -$pg 2>/dev/null
   for i in $(seq 1 20); do kill -0 $SPID 2>/dev/null || break; sleep 1; done
   [ -n "$pg" ] && kill -KILL -- -$pg 2>/dev/null
-  # our own leftovers only: processes still listening on our port
-  for p in $(ss -ltnpH "sport = :$PORT" 2>/dev/null | grep -oP 'pid=\K[0-9]+' | sort -u); do kill -KILL $p 2>/dev/null; done
+  # our own leftovers only: processes of our process group still listening on our port
+  for p in $(ss -ltnpH "sport = :$PORT" 2>/dev/null | grep -oP 'pid=\K[0-9]+' | sort -u); do
+    [ "$(ps -o pgid= -p $p 2>/dev/null | tr -d ' ')" = "$pg" ] && kill -KILL $p 2>/dev/null
+  done
   for i in $(seq 1 60); do
     [ -z "$(nvidia-smi --query-compute-apps=pid --format=csv,noheader 2>/dev/null)" ] && break; sleep 2
   done

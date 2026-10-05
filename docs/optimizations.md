@@ -1418,15 +1418,16 @@ per workload and mode, plus a check script that every flag logged its enable lin
 These are single prompts, so they show that the build works, not how fast it is. The shipped build was measured
 properly on 2026-10-06 (32 prompts, `TABLES.md` §8, README "2026-10 update").
 
-Every A/B in this section ran `wa`. W4 and W16 ran the new pieces for the first time in these smokes, so their
-speed with them is not measured. A code reading found no adaptive-only assumption in the shipped diff (W4 runs
+Every A/B in this section ran `wa`. W4 and W16 ran the new pieces for the first time in these smokes; W4 was
+then measured on 2026-10-06 (`TABLES.md` §8, greedy only), W16 has not been. A code reading found no adaptive-only assumption in the shipped diff (W4 runs
 wa's width-3 code, W16 its width-15 code). The wa width model (`SGLANG_ADAPTIVE_STEP_A/B`) was fitted to the
 September step cost and has not been re-fitted to the cheaper steps.
 
 ### H7. Known issues found in the pre-publication review (2026-10-06, not fixed yet)
 
-None of these can occur in the measured setting (one running request, SGLang's own contiguous hidden states),
-but they matter if you reuse the code elsewhere:
+The first and third cannot occur in the measured setting (one running request, SGLang's own contiguous hidden
+states). The second can, with any batch size, but only for sampled requests with a `top_k` (greedy rows take the
+argmax path) and only when more logits tie exactly at the cut than the margin; we did not check how often:
 
 * **RS greedy fast path with mixed batches.** With `SGLANG_RS_GREEDY_FAST=1` a greedy request's draft support
   repeats one token id. If a batch mixes it with a request that needs the dense verify fallback (for example

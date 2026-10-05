@@ -139,7 +139,8 @@ or the server refuses to start). `w16` has run the new build only in single-prom
 
 Absolute throughput of the shipped build, measured on 2026-10-06 with the 32 held-out prompts of the
 September study (8 per workload, thinking on, one request at a time, one server start per row, launched the
-way LM Studio launches it). Full table and conditions: [`results/TABLES.md`](results/TABLES.md) section 8;
+way LM Studio launches it, except that the desktop stayed at 160 Hz: LM Studio's entry switches it to 60 Hz
+while serving, which `docs/measurement.md` puts at 5–7 % shorter steps). Full table and conditions: [`results/TABLES.md`](results/TABLES.md) section 8;
 raw (stripped) files: `results/runs-1002/pub1006/`.
 
 | build | sampling | code-edit | prose-en | prose-ja | agent-loop |
@@ -160,7 +161,8 @@ artefacts.
 ³ Different, shorter prompts, so indicative only; it is the same baseline row as in the first table.
 
 Greedy numbers of the shipped build are within a few percent of the September study (`wa` 579 / 255 / 294 /
-358), so the September tables still describe greedy speed; the 2026-10 work mostly helped sampled
+358; that study averaged three server starts and used the September launcher settings, so this is a rough
+check), so the September tables still describe greedy speed; the 2026-10 work mostly helped sampled
 requests. With only public components, `wa` loses about 20 % on code-edit and 8–15 % elsewhere, mainly
 through lower acceptance (code-edit 8.1 vs 10.5 tokens per step).
 
@@ -258,9 +260,10 @@ build its venv, `patches/flashinfer/apply.sh`, download the NVFP4 checkpoint, us
   conservative test of the single-request setting that the speed numbers use, and quality with thinking
   enabled was not measured. Set `PRUNE_TAU=0` to turn it off.
 - Single-user oriented: memory fractions and state-slot counts are sized for one request at a time on
-  a GPU that also runs a desktop. Throughput with concurrent requests was not optimised, and three known
-  issues that only matter with several running requests or other callers are listed in
-  [`docs/optimizations.md`](docs/optimizations.md) §H7.
+  a GPU that also runs a desktop. Throughput with concurrent requests was not optimised. Three known
+  issues are listed in [`docs/optimizations.md`](docs/optimizations.md) §H7: two only matter with several
+  running requests or other callers; the third (rare exact ties at the sparse-verify cut) can also
+  touch a single sampled request.
 - The baseline row was measured with the harness's recommended sampling (temperature 0.2–0.7), the
   other rows greedy.
 - Known issue: two unit tests of the rejected `NGRAM_CHAIN` drafter fail after a later logging change

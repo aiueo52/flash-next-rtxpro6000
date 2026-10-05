@@ -323,7 +323,7 @@ reference on real shapes), as in §2, and rejection-sampling changes by statisti
 by refitting the nuisance terms (prompt intercepts, and for `ms/step|a` the acceptance slopes) without drift and
 B. When B changes acceptance, part of its effect then leaks into the slopes. The script now subtracts the
 joint-fit nuisance terms. Rerunning the corrected script on the stripped files moves the arm-level B effects of
-`stack8/`, `st1/` and `xa1-st1/` by at most 0.35 percentage points (largest: stack greedy `ms/step|a` −7.57 % →
+`stack8/`, `st1/` and `xa1-st1/` by at most 0.35 percentage points (largest: stack LM Studio sampling `ms/step|a` −7.57 % →
 −7.92 %). No conclusion changes. The logs in `results/runs-1002/` are from the old version.
 
 **Pre-registered rules.** Each A/B's adoption rule (which CI must exclude what, per mode and workload) was

@@ -258,7 +258,8 @@ def build() -> str:
     L += ship_table()
     L += ["", "## 8. Shipped build, 8 held-out prompts, private vs public components (2026-10-06 JST)", "",
           "The 2026-10-02 build (`launch/as-measured/serve-fast.sh`, worktree 7118260ce3) as LM Studio launches it: mem fraction",
-          "0.925, `MAMBA_SLOTS=16`, context 262,144, chunked prefill 4096, one running request. 32 BN1 held-out prompts",
+          "0.925, `MAMBA_SLOTS=16`, context 262,144, chunked prefill 4096, one running request; the desktop stayed at 160 Hz (the LM Studio",
+          "entry sets `SERVE_DISPLAY_HZ=60`, see `preflight.json`; this run cleared it, as the 2026-10 A/B drivers in `bench/bench/` do). 32 BN1 held-out prompts",
           "(`bench/workloads/sets/*-v1`, 8 per workload, same caps as section 2), thinking on, one request each,",
           "**one server start per run** (no restarts, unlike section 2). `public` = the checkpoint's original MTP head",
           "(`RadixArk/Qwen3.8-Flash-Next-NVFP4`, all 419 files hash-checked against the Hub, `verify-base.json`) +",
