@@ -16,7 +16,7 @@ SKIP chunks are dropped). One SSE chunk is emitted per verify step on this serve
 import argparse, json, os, statistics, threading, time
 import requests
 
-SAMPLING = dict(temperature=0.8, top_p=0.95, top_k=40, min_p=0.05)   # LM Studio bridge defaults
+SAMPLING = dict(temperature=0.8, top_p=0.95, top_k=40, min_p=0.05)   # LM Studio defaults
 GREEDY = dict(temperature=0.0)
 SKIP = 8
 
