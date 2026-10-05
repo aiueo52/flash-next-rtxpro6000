@@ -1426,8 +1426,9 @@ September step cost and has not been re-fitted to the cheaper steps.
 ### H7. Known issues found in the pre-publication review (2026-10-06, not fixed yet)
 
 The first and third cannot occur in the measured setting (one running request, SGLang's own contiguous hidden
-states). The second can, with any batch size, but only for sampled requests with a `top_k` (greedy rows take the
-argmax path) and only when more logits tie exactly at the cut than the margin; we did not check how often:
+states). The second can, with any batch size, but only in a batch that holds a sampled request with a `top_k` (an
+all-greedy batch takes the argmax path; in a mixed batch the greedy rows go through the sparse path too) and
+only when more logits tie exactly at the cut than the margin; we did not check how often:
 
 * **RS greedy fast path with mixed batches.** With `SGLANG_RS_GREEDY_FAST=1` a greedy request's draft support
   repeats one token id. If a batch mixes it with a request that needs the dense verify fallback (for example
