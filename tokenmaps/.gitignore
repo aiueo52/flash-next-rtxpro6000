@@ -5,3 +5,6 @@
 *.json
 *.jsonl
 *.txt
+# ...except the published public-data map and its source record
+!public/public_49152.pt
+!public/public_49152.sources.json

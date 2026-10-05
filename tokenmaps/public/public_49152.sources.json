@@ -1,0 +1,262 @@
+{
+ "map": {
+  "path": "tokenmaps/public/public_49152.pt",
+  "bytes": 177099,
+  "sha256": "48164e62467c0be4ff4ea3ef2c18685d3bff5af1fecc4809a8690f5d362dae5d",
+  "rows": 49152,
+  "format": "sorted list of token ids, torch.save; all 33 added tokens included",
+  "overlap_with_private_hot2_49152": 35404
+ },
+ "tokenizer": "RadixArk/Qwen3.8-Flash-Next-NVFP4@7b719225242aacd3dbd3f9407468c2ee9a9d2594",
+ "build": {
+  "script": "tokenmaps/build_hot_vocab.py",
+  "seed": 7,
+  "heldout": "10% of documents per source",
+  "weights": {
+   "code": 0.25,
+   "enwiki": 0.1,
+   "en_chat": 0.1,
+   "jawiki": 0.1,
+   "ja_chat": 0.1,
+   "reasoning": 0.2,
+   "agent_swe": 0.1,
+   "agent_tools": 0.05
+  },
+  "command": "build_hot_vocab.py --tokenizer <base model dir> --jsonl code=text/code.jsonl:0.25 --jsonl enwiki=text/enwiki.jsonl:0.1 --jsonl en_chat=text/en_chat.jsonl:0.1 --jsonl jawiki=text/jawiki.jsonl:0.1 --jsonl ja_chat=text/ja_chat.jsonl:0.1 --jsonl reasoning=text/reasoning.jsonl:0.2 --jsonl agent_swe=text/agent_swe.jsonl:0.1 --jsonl agent_tools=text/agent_tools.jsonl:0.05 --sizes 49152 --prefix public --out-dir <dir>"
+ },
+ "prep": {
+  "script": "tokenmaps/public/prep_public.py",
+  "rule": "generated side only (assistant/gpt/ai turns); file order; per-source char caps",
+  "per_source": {
+   "code": {
+    "docs": 10104,
+    "chars": 95909005,
+    "per_tarball_chars": {
+     "cpython-v3.13.0.tar.gz": 30159679,
+     "go-go1.23.0.tar.gz": 30015212,
+     "react-v18.3.1.tar.gz": 14549279,
+     "vuejs-core-v3.5.12.tar.gz": 4900958,
+     "tokio-1.40.0.tar.gz": 5182106,
+     "curl-8_10_1.tar.gz": 11101772
+    }
+   },
+   "enwiki": {
+    "docs": 30837,
+    "chars": 80002398
+   },
+   "jawiki": {
+    "docs": 24989,
+    "chars": 40002311
+   },
+   "en_chat": {
+    "docs": 42789,
+    "chars": 60001357
+   },
+   "ja_chat": {
+    "docs": 56593,
+    "chars": 22807409
+   },
+   "reasoning": {
+    "docs": 5937,
+    "chars": 80005725
+   },
+   "agent_swe": {
+    "docs": 134660,
+    "chars": 60000130
+   },
+   "agent_tools": {
+    "docs": 4162,
+    "chars": 2659671
+   }
+  }
+ },
+ "sources": [
+  {
+   "kind": "hf-dataset",
+   "repo": "wikimedia/wikipedia",
+   "revision": "b04c8d1ceb2f5cd4588862100d08de323dccfbaa",
+   "file": "20231101.en/train-00007-of-00041.parquet",
+   "local": "enwiki-20231101-00007.parquet",
+   "sha256": "adebba8b075444923ba42ed6214fe205efc756c773f440d98cbdd88a33597c2c",
+   "license": "CC-BY-SA-3.0 OR GFDL (attribution: Wikipedia contributors)",
+   "source": "enwiki"
+  },
+  {
+   "kind": "hf-dataset",
+   "repo": "wikimedia/wikipedia",
+   "revision": "b04c8d1ceb2f5cd4588862100d08de323dccfbaa",
+   "file": "20231101.ja/train-00007-of-00015.parquet",
+   "local": "jawiki-20231101-00007.parquet",
+   "sha256": "b112e83cf73327ba2246fd9c31eb1af501e51bac8450d8420963e29132d9b04b",
+   "license": "CC-BY-SA-3.0 OR GFDL (attribution: Wikipedia contributors)",
+   "source": "jawiki"
+  },
+  {
+   "kind": "hf-dataset",
+   "repo": "HuggingFaceH4/ultrachat_200k",
+   "revision": "8049631c405ae6576f93f445c6b8166f76f5505a",
+   "file": "data/test_sft-00000-of-00001-f7dfac4afe5b93f4.parquet",
+   "local": "ultrachat-test_sft.parquet",
+   "sha256": "c18fd6e77395577652bdefbc5a87044ea799e989451ecfca5c6cf977ae5c6f70",
+   "license": "MIT",
+   "source": "en_chat"
+  },
+  {
+   "kind": "hf-dataset",
+   "repo": "llm-jp/oasst2-33k-ja",
+   "revision": "df6f564ceaa48d3435a200f9f926aa9ab71768a9",
+   "file": "oasst2-33k-ja.jsonl",
+   "local": "oasst2-33k-ja.jsonl",
+   "sha256": "71f82d3d6bb167a03b0a09794097ba020bfcffda531a404508d26ee80a62497d",
+   "license": "Apache-2.0",
+   "source": "ja_chat"
+  },
+  {
+   "kind": "hf-dataset",
+   "repo": "open-thoughts/OpenThoughts-114k",
+   "revision": "bd093c3994fd54d2390985b66988ddf282a55eb6",
+   "file": "data/train-00005-of-00006.parquet",
+   "local": "openthoughts-00005.parquet",
+   "sha256": "bd455b4a7638967557919b683297f8f4014efe58a7c75c90cc5da62e88bced1f",
+   "license": "Apache-2.0",
+   "source": "reasoning"
+  },
+  {
+   "kind": "hf-dataset",
+   "repo": "nebius/SWE-agent-trajectories",
+   "revision": "68195a1450865274106246d0d0296a1d6807b88e",
+   "file": "data/train-00000-of-00012.parquet",
+   "local": "swe-agent-traj-00000.parquet",
+   "sha256": "5a395e8c7bb8ddc4b8f4d268506b3a0e2cf9b5ec3922600117322fe788067a13",
+   "license": "CC-BY-4.0 (attribution: Nebius)",
+   "source": "agent_swe"
+  },
+  {
+   "kind": "hf-dataset",
+   "repo": "NousResearch/hermes-function-calling-v1",
+   "revision": "dae3e1d28cfbcf4b915c04ea1e072030529b4bda",
+   "file": "func-calling.json",
+   "local": "hermes-func-calling.json",
+   "sha256": "769478035a886678d525d057ea66e3fd1e247f43e35c8d6d7cc866e080b6742b",
+   "license": "Apache-2.0",
+   "source": "agent_tools"
+  },
+  {
+   "kind": "hf-dataset",
+   "repo": "NousResearch/hermes-function-calling-v1",
+   "revision": "dae3e1d28cfbcf4b915c04ea1e072030529b4bda",
+   "file": "json-mode-agentic.json",
+   "local": "hermes-json-mode-agentic.json",
+   "sha256": "7343a1ce0b3c1e894978fc15bb79c695a925f835c91a81786bf59e7379eb5da2",
+   "license": "Apache-2.0",
+   "source": "agent_tools"
+  },
+  {
+   "kind": "github-tag",
+   "repo": "python/cpython",
+   "tag": "v3.13.0",
+   "local": "cpython-v3.13.0.tar.gz",
+   "sha256": "d2c5dbd73111a80ee654489eb0f52b663b38ef9ce9e9323312515d941d0dfaa2",
+   "license": "PSF-2.0",
+   "source": "code"
+  },
+  {
+   "kind": "github-tag",
+   "repo": "golang/go",
+   "tag": "go1.23.0",
+   "local": "go-go1.23.0.tar.gz",
+   "sha256": "0bc1065ced4718d43c8cf945e7c321b6a8814defd4f7cae9588719494021bddf",
+   "license": "BSD-3-Clause",
+   "source": "code"
+  },
+  {
+   "kind": "github-tag",
+   "repo": "facebook/react",
+   "tag": "v18.3.1",
+   "local": "react-v18.3.1.tar.gz",
+   "sha256": "6f03e6929b400504862652bc1bdfb6d3d638ddb55bacfb942253c5d7d09a644f",
+   "license": "MIT",
+   "source": "code"
+  },
+  {
+   "kind": "github-tag",
+   "repo": "vuejs/core",
+   "tag": "v3.5.12",
+   "local": "vuejs-core-v3.5.12.tar.gz",
+   "sha256": "22b805314f7e5ec22885a323c34664663a399d9172e2c198cb332683712cb12a",
+   "license": "MIT",
+   "source": "code"
+  },
+  {
+   "kind": "github-tag",
+   "repo": "tokio-rs/tokio",
+   "tag": "tokio-1.40.0",
+   "local": "tokio-1.40.0.tar.gz",
+   "sha256": "52532db493a20c4f1d3986526a3aadd18bfa2852ade11e4c3bcd4428bb99ba98",
+   "license": "MIT",
+   "source": "code"
+  },
+  {
+   "kind": "github-tag",
+   "repo": "curl/curl",
+   "tag": "curl-8_10_1",
+   "local": "curl-8_10_1.tar.gz",
+   "sha256": "5aaf131294f734756325dd99d849518c9a5060fc702517ab3064c76257dc700c",
+   "license": "curl (MIT-style)",
+   "source": "code"
+  }
+ ],
+ "per_source_tokens": {
+  "code": {
+   "docs": 10104,
+   "train_tokens": 26734632,
+   "heldout_tokens": 2791050
+  },
+  "enwiki": {
+   "docs": 30837,
+   "train_tokens": 18094721,
+   "heldout_tokens": 2054448
+  },
+  "en_chat": {
+   "docs": 42789,
+   "train_tokens": 11148313,
+   "heldout_tokens": 1253548
+  },
+  "jawiki": {
+   "docs": 24989,
+   "train_tokens": 23197068,
+   "heldout_tokens": 2614247
+  },
+  "ja_chat": {
+   "docs": 56593,
+   "train_tokens": 10261565,
+   "heldout_tokens": 1134582
+  },
+  "reasoning": {
+   "docs": 5937,
+   "train_tokens": 25929411,
+   "heldout_tokens": 2602645
+  },
+  "agent_swe": {
+   "docs": 134660,
+   "train_tokens": 13086799,
+   "heldout_tokens": 1456825
+  },
+  "agent_tools": {
+   "docs": 4162,
+   "train_tokens": 634572,
+   "heldout_tokens": 70054
+  }
+ },
+ "heldout_coverage_pct": {
+  "code": 98.43,
+  "enwiki": 95.27,
+  "en_chat": 97.43,
+  "jawiki": 98.58,
+  "ja_chat": 98.76,
+  "reasoning": 99.8,
+  "agent_swe": 99.52,
+  "agent_tools": 97.75
+ },
+ "not_included": "no private transcripts, no self-generated target outputs (the private hot2 map was 50% self-gen)"
+}

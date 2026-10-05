@@ -2,8 +2,9 @@ flash-next-rtxpro6000
 Copyright 2026 aiueo52 and contributors
 
 This repository is licensed under the Apache License, Version 2.0 (see LICENSE), except where a
-file or patch hunk is derived from third-party code under another license as listed below. The full
-texts of those other licenses are in licenses/.
+file or patch hunk is derived from third-party code under another license as listed below, and
+except the two data files in tokenmaps/public/ (CC BY-SA 4.0, see "Data-derived file" below). The
+full texts of the other code licenses are in licenses/.
 
 ===================================================================================================
 Apache-2.0 projects this work builds on (notices reproduced under section 4(d) of the License)
@@ -108,6 +109,42 @@ Redistributions of those hunks must keep the notices above and the corresponding
 Modified files (Apache-2.0 section 4(b)): every upstream SGLang/fork file and every FlashInfer file that
 the patches change is listed in patches/sglang/MODIFICATIONS.md; the patches themselves record each
 change.
+
+===================================================================================================
+Data-derived file: the public draft token map (tokenmaps/public/)
+===================================================================================================
+
+tokenmaps/public/public_49152.pt is a sorted list of 49,152 token ids of the Qwen3.8-Flash-Next
+tokenizer, ranked by how often each id occurs when public text is tokenised. It contains no text,
+no counts and no other content of the sources; public_49152.sources.json records which files were
+read (repository, revision, file, sha256, licence) and the per-source document, character and token
+totals. Whether a frequency-ranked id list is an adaptation of the source text under the
+ShareAlike licence of Wikipedia is not settled. To be safe, these two data files are offered under
+the Creative Commons Attribution-ShareAlike 4.0 International licence
+(https://creativecommons.org/licenses/by-sa/4.0/) instead of Apache-2.0, with the attributions
+below. The scripts that build the map (tokenmaps/public/fetch_public.sh,
+tokenmaps/public/prep_public.py, tokenmaps/build_hot_vocab.py) are Apache-2.0 like the rest of
+the repository; they download the sources from their publishers and redistribute none of them.
+
+Changes made to every source: the files listed below were read once (conversations: only the
+assistant / "gpt" / "ai" turns; capped at a fixed number of characters per source, in file order),
+tokenised, and only the per-token frequencies were used to rank the ids.
+
+Attributions:
+- English Wikipedia and Japanese Wikipedia (dump 20231101; shards 20231101.en/train-00007-of-00041
+  and 20231101.ja/train-00007-of-00015), by Wikipedia contributors, via the Hugging Face dataset
+  wikimedia/wikipedia (https://huggingface.co/datasets/wikimedia/wikipedia, revision
+  b04c8d1ceb2f5cd4588862100d08de323dccfbaa). Licence: CC BY-SA 3.0
+  (https://creativecommons.org/licenses/by-sa/3.0/) and GFDL.
+- SWE-agent-trajectories by Nebius (https://huggingface.co/datasets/nebius/SWE-agent-trajectories,
+  revision 68195a1450865274106246d0d0296a1d6807b88e, shard data/train-00000-of-00012). Licence:
+  CC BY 4.0 (https://creativecommons.org/licenses/by/4.0/).
+- Other sources (permissive licences; listed for completeness): HuggingFaceH4/ultrachat_200k (MIT),
+  llm-jp/oasst2-33k-ja (Apache-2.0), open-thoughts/OpenThoughts-114k (Apache-2.0),
+  NousResearch/hermes-function-calling-v1 (Apache-2.0), and the source trees of python/cpython
+  v3.13.0 (PSF-2.0), golang/go go1.23.0 (BSD-3-Clause), facebook/react v18.3.1 (MIT), vuejs/core
+  v3.5.12 (MIT), tokio-rs/tokio tokio-1.40.0 (MIT) and curl/curl curl-8_10_1 (curl licence).
+  Exact revisions and file hashes: tokenmaps/public/public_49152.sources.json.
 
 ===================================================================================================
 Other references (not redistributed here)
