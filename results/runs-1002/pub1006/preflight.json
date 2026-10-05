@@ -1,0 +1,283 @@
+{
+ "prompts": [
+  {
+   "id": "bn1-code-edit-01",
+   "max_tokens": 12288,
+   "input_tokens": 12793
+  },
+  {
+   "id": "bn1-prose-en-01",
+   "max_tokens": 6144,
+   "input_tokens": 132
+  },
+  {
+   "id": "bn1-prose-ja-01",
+   "max_tokens": 6144,
+   "input_tokens": 189
+  },
+  {
+   "id": "bn1-agent-loop-01",
+   "max_tokens": 8192,
+   "input_tokens": 297
+  },
+  {
+   "id": "bn1-code-edit-02",
+   "max_tokens": 12288,
+   "input_tokens": 12511
+  },
+  {
+   "id": "bn1-prose-en-02",
+   "max_tokens": 6144,
+   "input_tokens": 133
+  },
+  {
+   "id": "bn1-prose-ja-02",
+   "max_tokens": 6144,
+   "input_tokens": 180
+  },
+  {
+   "id": "bn1-agent-loop-02",
+   "max_tokens": 8192,
+   "input_tokens": 285
+  },
+  {
+   "id": "bn1-code-edit-03",
+   "max_tokens": 12288,
+   "input_tokens": 13078
+  },
+  {
+   "id": "bn1-prose-en-03",
+   "max_tokens": 6144,
+   "input_tokens": 134
+  },
+  {
+   "id": "bn1-prose-ja-03",
+   "max_tokens": 6144,
+   "input_tokens": 187
+  },
+  {
+   "id": "bn1-agent-loop-03",
+   "max_tokens": 8192,
+   "input_tokens": 318
+  },
+  {
+   "id": "bn1-code-edit-04",
+   "max_tokens": 12288,
+   "input_tokens": 13072
+  },
+  {
+   "id": "bn1-prose-en-04",
+   "max_tokens": 6144,
+   "input_tokens": 138
+  },
+  {
+   "id": "bn1-prose-ja-04",
+   "max_tokens": 6144,
+   "input_tokens": 186
+  },
+  {
+   "id": "bn1-agent-loop-04",
+   "max_tokens": 8192,
+   "input_tokens": 292
+  },
+  {
+   "id": "bn1-code-edit-05",
+   "max_tokens": 12288,
+   "input_tokens": 12797
+  },
+  {
+   "id": "bn1-prose-en-05",
+   "max_tokens": 6144,
+   "input_tokens": 131
+  },
+  {
+   "id": "bn1-prose-ja-05",
+   "max_tokens": 6144,
+   "input_tokens": 191
+  },
+  {
+   "id": "bn1-agent-loop-05",
+   "max_tokens": 8192,
+   "input_tokens": 284
+  },
+  {
+   "id": "bn1-code-edit-06",
+   "max_tokens": 12288,
+   "input_tokens": 13359
+  },
+  {
+   "id": "bn1-prose-en-06",
+   "max_tokens": 6144,
+   "input_tokens": 132
+  },
+  {
+   "id": "bn1-prose-ja-06",
+   "max_tokens": 6144,
+   "input_tokens": 183
+  },
+  {
+   "id": "bn1-agent-loop-06",
+   "max_tokens": 8192,
+   "input_tokens": 301
+  },
+  {
+   "id": "bn1-code-edit-07",
+   "max_tokens": 12288,
+   "input_tokens": 13641
+  },
+  {
+   "id": "bn1-prose-en-07",
+   "max_tokens": 6144,
+   "input_tokens": 137
+  },
+  {
+   "id": "bn1-prose-ja-07",
+   "max_tokens": 6144,
+   "input_tokens": 186
+  },
+  {
+   "id": "bn1-agent-loop-07",
+   "max_tokens": 8192,
+   "input_tokens": 288
+  },
+  {
+   "id": "bn1-code-edit-08",
+   "max_tokens": 12288,
+   "input_tokens": 13077
+  },
+  {
+   "id": "bn1-prose-en-08",
+   "max_tokens": 6144,
+   "input_tokens": 135
+  },
+  {
+   "id": "bn1-prose-ja-08",
+   "max_tokens": 6144,
+   "input_tokens": 185
+  },
+  {
+   "id": "bn1-agent-loop-08",
+   "max_tokens": 8192,
+   "input_tokens": 290
+  }
+ ],
+ "hot2_49152": {
+  "rows": 49152,
+  "sha256": "dd37b2fe862f9bc2e35ee334a18199d7158363c22b366c0ca565610c47549e16",
+  "bytes": 179135,
+  "ok": true
+ },
+ "public_49152": {
+  "rows": 49152,
+  "sha256": "48164e62467c0be4ff4ea3ef2c18685d3bff5af1fecc4809a8690f5d362dae5d",
+  "bytes": 177099,
+  "ok": true
+ },
+ "map_overlap": 35404,
+ "base_verified": {
+  "checked": 419,
+  "ok": 419,
+  "local_only": []
+ },
+ "Qwen3.8-Flash-Next-NVFP4": {
+  "mtp_shards": {
+   "model-bf16-00010.safetensors": {
+    "bytes": 323564201,
+    "symlink": false
+   },
+   "model-bf16-00011.safetensors": {
+    "bytes": 10727387912,
+    "symlink": false
+   },
+   "model-bf16-00012.safetensors": {
+    "bytes": 3683689888,
+    "symlink": false
+   }
+  }
+ },
+ "Qwen3.8-Flash-Next-NVFP4-mtpft5": {
+  "mtp_shards": {
+   "model-bf16-00010.safetensors": {
+    "bytes": 323563696,
+    "symlink": false
+   },
+   "model-bf16-00011.safetensors": {
+    "bytes": 10727387912,
+    "symlink": false
+   },
+   "model-bf16-00012.safetensors": {
+    "bytes": 3683689888,
+    "symlink": false
+   }
+  }
+ },
+ "base_index_sha256": "da5ca9c3b65e48e151329e64e141c2fa700bf2f99aec53cc014e4b52a6ff7a84",
+ "worktree_head": "7118260ce3b461a34304c855dd9a8351ac794888",
+ "serve_fast_sha256": "592ad39b4796b390b53c16b92899afaf577dd6d3428a2916821a13fc3d144f5f",
+ "serve_local_sha256": "8a7899b9ea8b589a6635a880dbbc0181e6626d5bdccfc81553dcc9707fb42317",
+ "qwen3.8-flash-next-adaptive-sglang.gguf": {
+  "name": "Qwen3.8-Flash-Next (SGLang Adaptive W4/W16)",
+  "cmd": [
+   "bash",
+   "/home/user/tools/sglang-prod-1002/serve-fast.sh",
+   "wa",
+   "--chunked-prefill-size",
+   "4096",
+   "--max-running-requests",
+   "1"
+  ],
+  "env": {
+   "PORT": "{port}",
+   "CONTEXT_LENGTH": "{ctx}",
+   "MAMBA_SLOTS": "16",
+   "MAX_TOTAL_TOKENS": "{ctx}",
+   "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
+   "SERVE_DISPLAY_HZ": "60",
+   "WA_MEM_FRACTION": "0.925"
+  },
+  "cwd": "/home/user/tools/sglang-prod-1002",
+  "ready_path": "/health",
+  "ready_timeout_sec": 1800,
+  "drop_params": [
+   "return_progress",
+   "timings_per_token"
+  ],
+  "post_request_path": "/continue_generation",
+  "compact": {
+   "enable": false
+  }
+ },
+ "qwen3.8-flash-next-sglang.gguf": {
+  "name": "Qwen3.8-Flash-Next (SGLang W4, v3 head)",
+  "cmd": [
+   "bash",
+   "/home/user/tools/sglang-prod-1002/serve-fast.sh",
+   "w4",
+   "--chunked-prefill-size",
+   "4096",
+   "--max-running-requests",
+   "1"
+  ],
+  "env": {
+   "PORT": "{port}",
+   "CONTEXT_LENGTH": "{ctx}",
+   "MAMBA_SLOTS": "16",
+   "MAX_TOTAL_TOKENS": "{ctx}",
+   "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
+   "SERVE_DISPLAY_HZ": "60",
+   "MEM_FRACTION": "0.925"
+  },
+  "cwd": "/home/user/tools/sglang-prod-1002",
+  "ready_path": "/health",
+  "ready_timeout_sec": 1800,
+  "drop_params": [
+   "return_progress",
+   "timings_per_token"
+  ],
+  "post_request_path": "/continue_generation",
+  "compact": {
+   "enable": false
+  }
+ },
+ "problems": []
+}

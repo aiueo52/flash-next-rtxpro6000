@@ -31,8 +31,9 @@ private inputs (paths from environment variables) and are not runnable as is.
 `public/public_49152.pt` is a 49,152-row map built **only from public data**, so that a "public
 components only" configuration (the checkpoint's original MTP head + this map) can be run by anyone.
 It is not the map behind the published speed numbers: `hot2_49152` stays private, and the two maps
-share 35,404 of their 49,152 ids (72.0 %). Its in-server speed is not measured yet (see the README's
-2026-10 update).
+share 35,404 of their 49,152 ids (72.0 %). Its in-server speed, together with the original MTP head, is in
+`results/TABLES.md` section 8 and the README's 2026-10 update (`wa` greedy: about 20 % slower than the
+private pair on code-edit, 8–15 % on the other workloads).
 
 | source | text used | weight | licence |
 |---|---|---:|---|

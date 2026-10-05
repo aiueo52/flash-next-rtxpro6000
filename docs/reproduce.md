@@ -111,7 +111,9 @@ Differences from the measured configuration that you cannot remove:
   correspondingly lower acceptance and t/s (roughly 5–10 % on prose/agent), or train your own head
   with [`train-your-own-mtp-head.md`](train-your-own-mtp-head.md).
 - **Token map.** The measured map was built partly from private data and is not published. The public
-  map shares 72.0 % of its ids; its effect on speed has not been measured yet.
+  map shares 72.0 % of its ids. With the original head and the public map together (2026-10-06,
+  `results/TABLES.md` section 8), `wa` greedy ran 468 / 232 / 248 / 307 t/s (code-edit / prose-en /
+  prose-ja / agent-loop) vs 584 / 253 / 290 / 359 with the private pair, same build and launcher.
 - **2026-10 flags.** The launcher turns on every 2026-10-02 feature by default, including rejection
   sampling for sampling requests (`SGLANG_OPT_SPEC_SPARSE_RS=1`). Set the flags listed in the appendix of
   `docs/optimizations.md` to 0 to compare with the September tables.

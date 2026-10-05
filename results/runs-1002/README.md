@@ -1,6 +1,6 @@
 # Result files of the 2026-10 round
 
-Raw results behind the lab notes in `docs/lab-notes/` (named below), `docs/optimizations.md` (2026-10 section), `docs/rejected.md` and sections 6-7 of
+Raw results behind the lab notes in `docs/lab-notes/` (named below), `docs/optimizations.md` (2026-10 section), `docs/rejected.md` and sections 6-8 of
 `../TABLES.md`. All runs: one RTX PRO 6000 Blackwell Max-Q, the `wa` profile unless the
 directory says otherwise, `fnbench` on the BN1 held-out prompts of the four workloads (code-edit, prose-en, prose-ja, agent-loop;
 4 per workload in `stack8/`, `st1/`, `xa1-st1/`, 8 in most others).
@@ -21,6 +21,7 @@ min_p 0.05). `*-probe.jsonl` are the per-request step counters (ms/step, tok/ste
 | `rq2-u2h/` | RQ2 u2h prologue, 4 starts | `FC_fc-moe_2026-10-01.md` |
 | `ship/` | the shipped build, one start per profile (wa, w4, w16), single-prompt smokes | `STACK_2026-10-01.md` |
 | `long-524k/` | 524,288-token context: needle tests, prefill and decode speed, GPU memory | `LONGCTX_2026-10-02.md` |
+| `pub1006/` | the shipped build on the 32 BN1 prompts, 2026-10-06, one start per run: `wa`/`w4` with the private head + map (greedy, and `wa` with LM Studio sampling) and with public components only (original MTP head + `tokenmaps/public/public_49152.pt`); `effective-*.txt` = exact env and flags, `verify-base.json` = hash check of the original checkpoint against the Hub | `../TABLES.md` section 8 |
 
 What was removed before publishing (`../strip_runs.py` and a path rewrite):
 

@@ -1,0 +1,2104 @@
+{
+ "dir": "/home/user/models/RadixArk/Qwen3.8-Flash-Next-NVFP4",
+ "files_checked": 419,
+ "ok": 419,
+ "not_ok": [],
+ "local_only": [],
+ "results": [
+  {
+   "path": ".gitattributes",
+   "status": "ok",
+   "hash": "a09db2ea4d1bd1fc1c09f6fca45e8e4054953535"
+  },
+  {
+   "path": "README.md",
+   "status": "ok",
+   "hash": "9b8e304b4017ee6ad6b00e15ba245abd248c41ee"
+  },
+  {
+   "path": "aime26_metrics.json",
+   "status": "ok",
+   "hash": "b5ca71b4914a62d3e2b835d1949cfc4f554113cf"
+  },
+  {
+   "path": "audit_unchanged_report.json",
+   "status": "ok",
+   "hash": "7f4fd4c96681c25286369827e59b7ea5730cb792"
+  },
+  {
+   "path": "chat_template.jinja",
+   "status": "ok",
+   "hash": "c0c686f9c38d70d179fb7b5f5aa7530bc913dda3"
+  },
+  {
+   "path": "config.json",
+   "status": "ok",
+   "hash": "ac690fbadfabbba25b73b526880ed1ceea70b14e"
+  },
+  {
+   "path": "conversion_environment.json",
+   "status": "ok",
+   "hash": "d21933d335e6d5bf6e2da338d35af1c1f75e071a"
+  },
+  {
+   "path": "generation_config.json",
+   "status": "ok",
+   "hash": "023756cfadf88e5bf69eefeee3e172f38c448d64"
+  },
+  {
+   "path": "gsm8k_metrics.json",
+   "status": "ok",
+   "hash": "8e9b7b12d77a12bb59c3119e09f227d567fd0ee8"
+  },
+  {
+   "path": "hf_quant_config.json",
+   "status": "ok",
+   "hash": "5307b85d03386f8d813890063906fe70cbf78327"
+  },
+  {
+   "path": "layer-00000-experts-0000-0127.complete.json",
+   "status": "ok",
+   "hash": "5fda63ded2a9cf44390f9d90067150d6e0b17af0"
+  },
+  {
+   "path": "layer-00000-experts-0000-0127.safetensors",
+   "status": "ok",
+   "hash": "d367f9ed6570543e49a99db0a8f88fe12ed94117f9bb3db0d90624937cb56457"
+  },
+  {
+   "path": "layer-00000-experts-0128-0255.complete.json",
+   "status": "ok",
+   "hash": "8eef8ca48a9a9e7f84c2349b875647d34da3f470"
+  },
+  {
+   "path": "layer-00000-experts-0128-0255.safetensors",
+   "status": "ok",
+   "hash": "e24ede1ac5e0341608da8ada2989bc92981ff6286e2f1601025ccb8c8d8b36ee"
+  },
+  {
+   "path": "layer-00000-experts-0256-0383.complete.json",
+   "status": "ok",
+   "hash": "1f8622eec64edfd0ba11f1c16db197f99a4b06b2"
+  },
+  {
+   "path": "layer-00000-experts-0256-0383.safetensors",
+   "status": "ok",
+   "hash": "7ab7f14e3072a3073079701c721c05aca111c365336294d9eb78651355565bd3"
+  },
+  {
+   "path": "layer-00000-experts-0384-0511.complete.json",
+   "status": "ok",
+   "hash": "889625f939585608b0f4e1d43cf4540f195c4aed"
+  },
+  {
+   "path": "layer-00000-experts-0384-0511.safetensors",
+   "status": "ok",
+   "hash": "1d91a60f90dbc44655c37d97d7eb37c93d5a8a872b92efed20f77d0705277045"
+  },
+  {
+   "path": "layer-00001-experts-0000-0127.complete.json",
+   "status": "ok",
+   "hash": "3ee325a2425c9de8f76893a587bd24104b14d741"
+  },
+  {
+   "path": "layer-00001-experts-0000-0127.safetensors",
+   "status": "ok",
+   "hash": "f987d5b4bf0a09f933e77230a7155917caeccd684a9c2af65ae055e7ba2f5841"
+  },
+  {
+   "path": "layer-00001-experts-0128-0255.complete.json",
+   "status": "ok",
+   "hash": "bb100ed83a595360217eaf621b564aa888254044"
+  },
+  {
+   "path": "layer-00001-experts-0128-0255.safetensors",
+   "status": "ok",
+   "hash": "6bfd3aa965124674ef499f5e33e842ef6e012755dfa659da1e09a2f689a3257d"
+  },
+  {
+   "path": "layer-00001-experts-0256-0383.complete.json",
+   "status": "ok",
+   "hash": "bdb6e2ef56658f38335af82150a142e225beab2b"
+  },
+  {
+   "path": "layer-00001-experts-0256-0383.safetensors",
+   "status": "ok",
+   "hash": "3e38e9e9a79a96cad1473f129897ff2fa79593b65cc9dd1d7416370b96675040"
+  },
+  {
+   "path": "layer-00001-experts-0384-0511.complete.json",
+   "status": "ok",
+   "hash": "9e1f86f39f20072373f73028fc4bfadbd6c4087d"
+  },
+  {
+   "path": "layer-00001-experts-0384-0511.safetensors",
+   "status": "ok",
+   "hash": "2f277f27504d22712822fb711071a212dd695841c9cbf4be7d3719d78f64d3db"
+  },
+  {
+   "path": "layer-00002-experts-0000-0127.complete.json",
+   "status": "ok",
+   "hash": "c69098976a38e70ac7da24f13ae05f14907dc711"
+  },
+  {
+   "path": "layer-00002-experts-0000-0127.safetensors",
+   "status": "ok",
+   "hash": "e50f19bc1547c83a18d278b5b7c1cb544d76ee1a9487ee16be6e2af7a5135244"
+  },
+  {
+   "path": "layer-00002-experts-0128-0255.complete.json",
+   "status": "ok",
+   "hash": "90755a6c446792f01bd487d5ffd4347dfa749497"
+  },
+  {
+   "path": "layer-00002-experts-0128-0255.safetensors",
+   "status": "ok",
+   "hash": "76671caa9d6bef00bdead734b3b325aa08091ba3ff10df802ab3a8299cb4380e"
+  },
+  {
+   "path": "layer-00002-experts-0256-0383.complete.json",
+   "status": "ok",
+   "hash": "deb90bbc29c3d08b9c5c93e54deb5576778ef79e"
+  },
+  {
+   "path": "layer-00002-experts-0256-0383.safetensors",
+   "status": "ok",
+   "hash": "21170bf6d48641a8deb3b72c91a92386361ac15071cb96bc8c3ec60dd4c1428c"
+  },
+  {
+   "path": "layer-00002-experts-0384-0511.complete.json",
+   "status": "ok",
+   "hash": "6770379c0bed366c6898a3cfb449211ae6842273"
+  },
+  {
+   "path": "layer-00002-experts-0384-0511.safetensors",
+   "status": "ok",
+   "hash": "fc02c5de9f8be6cc33c8b9426022ab3af2e8de71665d75b49863e3c4243fd3f6"
+  },
+  {
+   "path": "layer-00003-experts-0000-0127.complete.json",
+   "status": "ok",
+   "hash": "3395083b72dd216b74a8307eeffaf489ff4621dc"
+  },
+  {
+   "path": "layer-00003-experts-0000-0127.safetensors",
+   "status": "ok",
+   "hash": "81a41d71d0405ce057ea78c81fe967cda0e4df89b70eca587306798007aae674"
+  },
+  {
+   "path": "layer-00003-experts-0128-0255.complete.json",
+   "status": "ok",
+   "hash": "b9064ffd7119321f2817496903c72ead41427e2f"
+  },
+  {
+   "path": "layer-00003-experts-0128-0255.safetensors",
+   "status": "ok",
+   "hash": "13d153729652cba5f9f33eb5f7cbc4c2696453d5d7c125b451a5b04319cf8c02"
+  },
+  {
+   "path": "layer-00003-experts-0256-0383.complete.json",
+   "status": "ok",
+   "hash": "d0bf6ec5554c0041a43e9320f111facf03a9d6ba"
+  },
+  {
+   "path": "layer-00003-experts-0256-0383.safetensors",
+   "status": "ok",
+   "hash": "000bb3a3a9148a08cd12ecfb308fc9dc565026aff9fa3f6a39e300a91d21e463"
+  },
+  {
+   "path": "layer-00003-experts-0384-0511.complete.json",
+   "status": "ok",
+   "hash": "c0b6f7a99cdbd9a3634275cc490e8f8cc2fad5a3"
+  },
+  {
+   "path": "layer-00003-experts-0384-0511.safetensors",
+   "status": "ok",
+   "hash": "e27cb3b27f029ec5c18d78cea549f7939336894c2ae01b0b4c174626f639201b"
+  },
+  {
+   "path": "layer-00004-experts-0000-0127.complete.json",
+   "status": "ok",
+   "hash": "3f473aa4d107531b6cddc710d621ff080cc8a55b"
+  },
+  {
+   "path": "layer-00004-experts-0000-0127.safetensors",
+   "status": "ok",
+   "hash": "e784a5b42e35615d3f2eb8ab264ab6d1498e3e8791076b3b0a1c34f3eac9c8c6"
+  },
+  {
+   "path": "layer-00004-experts-0128-0255.complete.json",
+   "status": "ok",
+   "hash": "f58396926880ab214a21fbf70b26b75223423a6c"
+  },
+  {
+   "path": "layer-00004-experts-0128-0255.safetensors",
+   "status": "ok",
+   "hash": "2479cc9a39ff2648f9c225ade0ce635ab7393662793f7097ff0f502a9b0e44b2"
+  },
+  {
+   "path": "layer-00004-experts-0256-0383.complete.json",
+   "status": "ok",
+   "hash": "734b97f267a6b9ce11b0effe758580b141b3af9f"
+  },
+  {
+   "path": "layer-00004-experts-0256-0383.safetensors",
+   "status": "ok",
+   "hash": "4926bf02da40ce2adfb2c2e06325b81340d91589aa7c383a8d047bc499c8f573"
+  },
+  {
+   "path": "layer-00004-experts-0384-0511.complete.json",
+   "status": "ok",
+   "hash": "7c0cec973ddc0c808e8c58277750908b319e17bc"
+  },
+  {
+   "path": "layer-00004-experts-0384-0511.safetensors",
+   "status": "ok",
+   "hash": "a05a14cd5e08b38074b35b39e4c961402827d3b9e4737df4b76fc338483859ab"
+  },
+  {
+   "path": "layer-00005-experts-0000-0127.complete.json",
+   "status": "ok",
+   "hash": "60720f4dddaf5084fff3cefd2be66b1712d6ac62"
+  },
+  {
+   "path": "layer-00005-experts-0000-0127.safetensors",
+   "status": "ok",
+   "hash": "912811df1ffc0226b3a21f42fdd5e979d448a2bc329321087eaa87553aa9d1df"
+  },
+  {
+   "path": "layer-00005-experts-0128-0255.complete.json",
+   "status": "ok",
+   "hash": "aebd39b31324de4554173c6a1b0013443f5485b7"
+  },
+  {
+   "path": "layer-00005-experts-0128-0255.safetensors",
+   "status": "ok",
+   "hash": "e76dace09c68bba7d573f688958c1ab79c2790666dafa3641067168ec189b361"
+  },
+  {
+   "path": "layer-00005-experts-0256-0383.complete.json",
+   "status": "ok",
+   "hash": "f6e01d8613e292f44b5f5f15dbad651d8b3748d3"
+  },
+  {
+   "path": "layer-00005-experts-0256-0383.safetensors",
+   "status": "ok",
+   "hash": "ec950a8a7013a2904028f6aa450fe321f38d1a97483d3048f3824794287f74da"
+  },
+  {
+   "path": "layer-00005-experts-0384-0511.complete.json",
+   "status": "ok",
+   "hash": "edb1e9962445588823c3c68c81126374c9e64dca"
+  },
+  {
+   "path": "layer-00005-experts-0384-0511.safetensors",
+   "status": "ok",
+   "hash": "7a7dcfd32d7b27221d4595343462d475093d45c95705e0eb51117bfe4c42906b"
+  },
+  {
+   "path": "layer-00006-experts-0000-0127.complete.json",
+   "status": "ok",
+   "hash": "56db9ea6eb859432e8a72e0af0e970023af8095e"
+  },
+  {
+   "path": "layer-00006-experts-0000-0127.safetensors",
+   "status": "ok",
+   "hash": "933a455efdb7de629b707fa58d2ea93af64c9d289aadc0907993d0eed364e70e"
+  },
+  {
+   "path": "layer-00006-experts-0128-0255.complete.json",
+   "status": "ok",
+   "hash": "b35f1e1c1c208456bac6c0309f1336c98e0fd682"
+  },
+  {
+   "path": "layer-00006-experts-0128-0255.safetensors",
+   "status": "ok",
+   "hash": "09d9c4301048b95ef3f4cb43756c76bcf1caf181fc1f46c80d113699f9cc1190"
+  },
+  {
+   "path": "layer-00006-experts-0256-0383.complete.json",
+   "status": "ok",
+   "hash": "617e82443314793b339669affa2c2d3b84a83240"
+  },
+  {
+   "path": "layer-00006-experts-0256-0383.safetensors",
+   "status": "ok",
+   "hash": "9a24d6de2c4044f161e296f9d8206fb732514a73a357bcc5b5aa492265050cc3"
+  },
+  {
+   "path": "layer-00006-experts-0384-0511.complete.json",
+   "status": "ok",
+   "hash": "3080bc44f8dec3b6ddf1192c2ab45af841d6a0c7"
+  },
+  {
+   "path": "layer-00006-experts-0384-0511.safetensors",
+   "status": "ok",
+   "hash": "1b0c1b76e2ea2ad41a8be46b699119af9ca1deb6f4101e3f2766ae73c2c3889a"
+  },
+  {
+   "path": "layer-00007-experts-0000-0127.complete.json",
+   "status": "ok",
+   "hash": "14b36fc1714fd92805ef3e05793d5f35bf76a0a8"
+  },
+  {
+   "path": "layer-00007-experts-0000-0127.safetensors",
+   "status": "ok",
+   "hash": "ebbf7d1038139ede10a6d51024c8766f2d41f14550cb8fafd8c6870f11f73dfb"
+  },
+  {
+   "path": "layer-00007-experts-0128-0255.complete.json",
+   "status": "ok",
+   "hash": "7b84b0fab2313929e1f7eca3ee20e84a7ef63b64"
+  },
+  {
+   "path": "layer-00007-experts-0128-0255.safetensors",
+   "status": "ok",
+   "hash": "5d0d93dbe8accb9934ef2dd1b46ae16016378c87e0fce1b67cf76c05fb042f27"
+  },
+  {
+   "path": "layer-00007-experts-0256-0383.complete.json",
+   "status": "ok",
+   "hash": "eff12003162dc5843c15f7544b3da7eabce8b3a8"
+  },
+  {
+   "path": "layer-00007-experts-0256-0383.safetensors",
+   "status": "ok",
+   "hash": "edcca3b3819218b11d747f5411d889e79ae8cc8cd4e87842a09ef630e874b2dc"
+  },
+  {
+   "path": "layer-00007-experts-0384-0511.complete.json",
+   "status": "ok",
+   "hash": "43aefa9d6060521afe8f60f35a0587e57e27e492"
+  },
+  {
+   "path": "layer-00007-experts-0384-0511.safetensors",
+   "status": "ok",
+   "hash": "521779414bc473815c661931323f75012165e5d59256eb31a7d88f93fdf931e7"
+  },
+  {
+   "path": "layer-00008-experts-0000-0127.complete.json",
+   "status": "ok",
+   "hash": "abc2bf194dc7b54e43a72f8c634a7d7bfa235331"
+  },
+  {
+   "path": "layer-00008-experts-0000-0127.safetensors",
+   "status": "ok",
+   "hash": "5070037b26df8c3d87a13248226f2fe1bd1312e8ec7933ad95071f5591a49f0e"
+  },
+  {
+   "path": "layer-00008-experts-0128-0255.complete.json",
+   "status": "ok",
+   "hash": "91ac652baafa73d8462905467baab7fa4419554b"
+  },
+  {
+   "path": "layer-00008-experts-0128-0255.safetensors",
+   "status": "ok",
+   "hash": "29063412c01ee9c8eec38bc5028eab090e85339219114ab193cc3577c032fcc8"
+  },
+  {
+   "path": "layer-00008-experts-0256-0383.complete.json",
+   "status": "ok",
+   "hash": "9dec05aee9b876b9524d04a68677ce70446f7893"
+  },
+  {
+   "path": "layer-00008-experts-0256-0383.safetensors",
+   "status": "ok",
+   "hash": "999422559453720ac35c64e46ac30b5c8427a5c8e2c694831369b4b29920bc21"
+  },
+  {
+   "path": "layer-00008-experts-0384-0511.complete.json",
+   "status": "ok",
+   "hash": "aefce07c13afa8283147c1e59b06660c28c5a8d6"
+  },
+  {
+   "path": "layer-00008-experts-0384-0511.safetensors",
+   "status": "ok",
+   "hash": "6fad6ce894124a7d74f2a34a82954a2cd1128206dcace823e63af7788f023980"
+  },
+  {
+   "path": "layer-00009-experts-0000-0127.complete.json",
+   "status": "ok",
+   "hash": "b0a0d21a9a7ba55785d61d2fdf4ede34cc48567a"
+  },
+  {
+   "path": "layer-00009-experts-0000-0127.safetensors",
+   "status": "ok",
+   "hash": "90ef8f76c7415a1ca69c4bf8b64135f5ee27d42b2b03a6af1556daf084a3ffcd"
+  },
+  {
+   "path": "layer-00009-experts-0128-0255.complete.json",
+   "status": "ok",
+   "hash": "3d4c8775e8088a4afdcde0d5befafa16d0c03863"
+  },
+  {
+   "path": "layer-00009-experts-0128-0255.safetensors",
+   "status": "ok",
+   "hash": "75edef05364e8d6d89da56111cbc0ee6a7ff70b61f6d63c7ec7dcdf5b0db801c"
+  },
+  {
+   "path": "layer-00009-experts-0256-0383.complete.json",
+   "status": "ok",
+   "hash": "d36d48d4a2e762f5d6fd34d8b7b6dbd0633e4040"
+  },
+  {
+   "path": "layer-00009-experts-0256-0383.safetensors",
+   "status": "ok",
+   "hash": "56f9f90923efeb3e05a9ef7e086826cebc1eb3a4f62d628a3501596f20c623ce"
+  },
+  {
+   "path": "layer-00009-experts-0384-0511.complete.json",
+   "status": "ok",
+   "hash": "798e68c3e89b07571ca673ef6e52bd5e110d2a84"
+  },
+  {
+   "path": "layer-00009-experts-0384-0511.safetensors",
+   "status": "ok",
+   "hash": "4094286ed6b1518046b321d70bab660d33eaa285cbd275ca1b5d9c687c986121"
+  },
+  {
+   "path": "layer-00010-experts-0000-0127.complete.json",
+   "status": "ok",
+   "hash": "9116daafa64a3276852313de644979e466e9dade"
+  },
+  {
+   "path": "layer-00010-experts-0000-0127.safetensors",
+   "status": "ok",
+   "hash": "68a4532a1432712d21c09dae384dfaefce7f68b4e6be3528571676a8bede2960"
+  },
+  {
+   "path": "layer-00010-experts-0128-0255.complete.json",
+   "status": "ok",
+   "hash": "a1a1c1d80c68ca2550de491a34ac2d04b4743301"
+  },
+  {
+   "path": "layer-00010-experts-0128-0255.safetensors",
+   "status": "ok",
+   "hash": "ad652e49701dc1ebb7fcb6189dd60c09966dacab32ac5c30184992bc9cc9f025"
+  },
+  {
+   "path": "layer-00010-experts-0256-0383.complete.json",
+   "status": "ok",
+   "hash": "daff9ab53ef6c851ac5cee599147e28e796b2f44"
+  },
+  {
+   "path": "layer-00010-experts-0256-0383.safetensors",
+   "status": "ok",
+   "hash": "88b8cd2a04946087315f4f7354a9c229689c494c99a1a6e63e2a5ef155db6b7b"
+  },
+  {
+   "path": "layer-00010-experts-0384-0511.complete.json",
+   "status": "ok",
+   "hash": "a2099ce9f3dd615305547f47d0ed60311207e19f"
+  },
+  {
+   "path": "layer-00010-experts-0384-0511.safetensors",
+   "status": "ok",
+   "hash": "19596339ee4ef575452cfa2d2aece12c525fda94308b7d6893eb317fe65ba759"
+  },
+  {
+   "path": "layer-00011-experts-0000-0127.complete.json",
+   "status": "ok",
+   "hash": "ffe6c44c32719717a27bf9acb078c5f8e1ca276d"
+  },
+  {
+   "path": "layer-00011-experts-0000-0127.safetensors",
+   "status": "ok",
+   "hash": "b6200a9b68496dc61b705d29b2b1ea1b7d13cc516edcdc14cdfe98d7cfef0730"
+  },
+  {
+   "path": "layer-00011-experts-0128-0255.complete.json",
+   "status": "ok",
+   "hash": "8a1a9d4bb11815bca0204fa262e63844ea2c72eb"
+  },
+  {
+   "path": "layer-00011-experts-0128-0255.safetensors",
+   "status": "ok",
+   "hash": "bc879b9347d0587157ad96c7cb056675996f3fabfcdb9465d4883ec5eb443f4a"
+  },
+  {
+   "path": "layer-00011-experts-0256-0383.complete.json",
+   "status": "ok",
+   "hash": "2421ee9cf763952e84f84ba38ceca17f2d9ee5ea"
+  },
+  {
+   "path": "layer-00011-experts-0256-0383.safetensors",
+   "status": "ok",
+   "hash": "dbe5c9568538e9228baa101d1d945c3d832c87d61d63ca0baac23059859a49af"
+  },
+  {
+   "path": "layer-00011-experts-0384-0511.complete.json",
+   "status": "ok",
+   "hash": "12a9394db625b4f8a1f9ad86bc06854b40db6577"
+  },
+  {
+   "path": "layer-00011-experts-0384-0511.safetensors",
+   "status": "ok",
+   "hash": "558b97015911a591cf5586ca5d37bc0b10eed01d2255b1669749d32b1be70e59"
+  },
+  {
+   "path": "layer-00012-experts-0000-0127.complete.json",
+   "status": "ok",
+   "hash": "40119bea04889ba39d1acd4766b3cc44f17bec45"
+  },
+  {
+   "path": "layer-00012-experts-0000-0127.safetensors",
+   "status": "ok",
+   "hash": "2d397a091516cc731e96816a9f04ed2f91e57ca9c05f3f1e0457bb0e45f503f7"
+  },
+  {
+   "path": "layer-00012-experts-0128-0255.complete.json",
+   "status": "ok",
+   "hash": "d1eafec9ff24b022169c484b6da6e2d5a49fd2a5"
+  },
+  {
+   "path": "layer-00012-experts-0128-0255.safetensors",
+   "status": "ok",
+   "hash": "24f7f2abfb8b767cb15b16cdd54178c3683c6d71d2f829c285b376986ae2eea2"
+  },
+  {
+   "path": "layer-00012-experts-0256-0383.complete.json",
+   "status": "ok",
+   "hash": "fb0119b8dbb8af3fd666dd71515cc7b2868cc6eb"
+  },
+  {
+   "path": "layer-00012-experts-0256-0383.safetensors",
+   "status": "ok",
+   "hash": "4321bfe78906522316a4d0c2493872edf74c5e439cf1cf81892d51f273db0136"
+  },
+  {
+   "path": "layer-00012-experts-0384-0511.complete.json",
+   "status": "ok",
+   "hash": "ddabd3038c55b19a85225bb51f8a183477bfe15e"
+  },
+  {
+   "path": "layer-00012-experts-0384-0511.safetensors",
+   "status": "ok",
+   "hash": "47346d69140682e1471ce33c82136014f7b21d6ba4213a7733a833479c0c7aee"
+  },
+  {
+   "path": "layer-00013-experts-0000-0127.complete.json",
+   "status": "ok",
+   "hash": "f4ca13f8c17c8ff35deef35747c8876f43839350"
+  },
+  {
+   "path": "layer-00013-experts-0000-0127.safetensors",
+   "status": "ok",
+   "hash": "3f8fe8175f1a6b91e138909ac1c443c86d6a88042ca2ab50b9b11bd51cadf834"
+  },
+  {
+   "path": "layer-00013-experts-0128-0255.complete.json",
+   "status": "ok",
+   "hash": "3d7713fb3c8c7985cd52b854a8599f99ab798d1c"
+  },
+  {
+   "path": "layer-00013-experts-0128-0255.safetensors",
+   "status": "ok",
+   "hash": "62b0b839555207d96c894c4110a9aa757e34b756b6b9553edce24fa8d74faec4"
+  },
+  {
+   "path": "layer-00013-experts-0256-0383.complete.json",
+   "status": "ok",
+   "hash": "e9af6a8c8e8504cb9c79c544e31e4ed093fb8022"
+  },
+  {
+   "path": "layer-00013-experts-0256-0383.safetensors",
+   "status": "ok",
+   "hash": "7c7000b3619b91b2a30ee3d451180c431747ecf15e14fc1de8d4c4582356c0de"
+  },
+  {
+   "path": "layer-00013-experts-0384-0511.complete.json",
+   "status": "ok",
+   "hash": "1875d6b680f26fae384a8dd34f21c349dbed5052"
+  },
+  {
+   "path": "layer-00013-experts-0384-0511.safetensors",
+   "status": "ok",
+   "hash": "0eafff8f1fa3d84cda08d8fba633ae4ba3428c710792be00704e014a5132d1bc"
+  },
+  {
+   "path": "layer-00014-experts-0000-0127.complete.json",
+   "status": "ok",
+   "hash": "c487b2a8c9e38d9327ccb05dc4deacdeef485e39"
+  },
+  {
+   "path": "layer-00014-experts-0000-0127.safetensors",
+   "status": "ok",
+   "hash": "3bc4d5fc2a77321dc1873246c3a472f8c1b5314feff2522254fa2f299f78e2e5"
+  },
+  {
+   "path": "layer-00014-experts-0128-0255.complete.json",
+   "status": "ok",
+   "hash": "a436a07236ad0f75fca2fc3d41ed9eecb003611e"
+  },
+  {
+   "path": "layer-00014-experts-0128-0255.safetensors",
+   "status": "ok",
+   "hash": "b823e0cee319b619968acaeba80c8b18d520ae9fc178cf4724034338c46c7d57"
+  },
+  {
+   "path": "layer-00014-experts-0256-0383.complete.json",
+   "status": "ok",
+   "hash": "4fb3a3f01450f6d9174d002c26cb4f35b657e33f"
+  },
+  {
+   "path": "layer-00014-experts-0256-0383.safetensors",
+   "status": "ok",
+   "hash": "58a262f85cce6607232a9ccc67bdeaeb2872139b9c22877241d54ad2cd98c834"
+  },
+  {
+   "path": "layer-00014-experts-0384-0511.complete.json",
+   "status": "ok",
+   "hash": "6dfbf0a510205fbbaebe63b55f01c25c47e4920a"
+  },
+  {
+   "path": "layer-00014-experts-0384-0511.safetensors",
+   "status": "ok",
+   "hash": "c2f1a5e3401305b6270cb5a5dd9721143e4470da05f70004ae6b57c978a193b8"
+  },
+  {
+   "path": "layer-00015-experts-0000-0127.complete.json",
+   "status": "ok",
+   "hash": "f657c6400be959b092650162488e6c00e13e59e9"
+  },
+  {
+   "path": "layer-00015-experts-0000-0127.safetensors",
+   "status": "ok",
+   "hash": "567cc35e0ced101973b5d92aa384779b6cc1006199f52314e9d4cd9cdfe273b4"
+  },
+  {
+   "path": "layer-00015-experts-0128-0255.complete.json",
+   "status": "ok",
+   "hash": "c67bcb5f1076669a7af0f1fffa976db30adf403a"
+  },
+  {
+   "path": "layer-00015-experts-0128-0255.safetensors",
+   "status": "ok",
+   "hash": "b5eabab058dc2195ed5594ea8968e2f2ed5fc8d92d39961d24a42ddc9fbe2506"
+  },
+  {
+   "path": "layer-00015-experts-0256-0383.complete.json",
+   "status": "ok",
+   "hash": "cbd7af9419a89b463ddff968f2083f21ac555a0d"
+  },
+  {
+   "path": "layer-00015-experts-0256-0383.safetensors",
+   "status": "ok",
+   "hash": "0673c5fdce8dd6104a88b3baf9e27a29ddb147009af2f48556ddc03e91561b68"
+  },
+  {
+   "path": "layer-00015-experts-0384-0511.complete.json",
+   "status": "ok",
+   "hash": "2a6155de1305e248763d2267b4d53727357eed54"
+  },
+  {
+   "path": "layer-00015-experts-0384-0511.safetensors",
+   "status": "ok",
+   "hash": "4b9e16bbb6f34671fce3cd3627ef0cf1a542095c46bbfa4967c7fa191772cc57"
+  },
+  {
+   "path": "layer-00016-experts-0000-0127.complete.json",
+   "status": "ok",
+   "hash": "a6a62791679eeda4502b8cec0275cb70f1f62e01"
+  },
+  {
+   "path": "layer-00016-experts-0000-0127.safetensors",
+   "status": "ok",
+   "hash": "549cf0a240c5bfc08c5134e4477d453a19a90afee0baabbead88cbd3d32556ea"
+  },
+  {
+   "path": "layer-00016-experts-0128-0255.complete.json",
+   "status": "ok",
+   "hash": "afb8833abc6a810d6725effcf711cdc46a222e17"
+  },
+  {
+   "path": "layer-00016-experts-0128-0255.safetensors",
+   "status": "ok",
+   "hash": "508331705c85d792a8f2fbd7344cd6f05f98fb0851fff79e4ac4b48a4c7150df"
+  },
+  {
+   "path": "layer-00016-experts-0256-0383.complete.json",
+   "status": "ok",
+   "hash": "fbb47550621df07a66882b8eb8e7e28bae027275"
+  },
+  {
+   "path": "layer-00016-experts-0256-0383.safetensors",
+   "status": "ok",
+   "hash": "23e3d1654fff408816edb1192268736c2a58090e0dc6f8f931d407e98f611cc3"
+  },
+  {
+   "path": "layer-00016-experts-0384-0511.complete.json",
+   "status": "ok",
+   "hash": "8f550d6ad1cd543419e7f9ffe3d30a2bb820e109"
+  },
+  {
+   "path": "layer-00016-experts-0384-0511.safetensors",
+   "status": "ok",
+   "hash": "e5b5709cc3799ca076cafcf64b6f7ad1eb5820cf64188d9dc92f13888006fdb5"
+  },
+  {
+   "path": "layer-00017-experts-0000-0127.complete.json",
+   "status": "ok",
+   "hash": "7f9e5873f9e91786953ca0dc1c2a14dbf3b5ec8b"
+  },
+  {
+   "path": "layer-00017-experts-0000-0127.safetensors",
+   "status": "ok",
+   "hash": "c158fc5bbf96cc64e8fdaa1be1fa0d12df5da6048e5236c2268058fe3560c700"
+  },
+  {
+   "path": "layer-00017-experts-0128-0255.complete.json",
+   "status": "ok",
+   "hash": "15ec2260cfb7515b89b1db4d68ffbe20258d3649"
+  },
+  {
+   "path": "layer-00017-experts-0128-0255.safetensors",
+   "status": "ok",
+   "hash": "168581b524e2b6937405c11cf227a917ca7732a907a9e2c6f28e5a18cc8fe40f"
+  },
+  {
+   "path": "layer-00017-experts-0256-0383.complete.json",
+   "status": "ok",
+   "hash": "698948ff546e61c0a74c90944da9a74e301e948b"
+  },
+  {
+   "path": "layer-00017-experts-0256-0383.safetensors",
+   "status": "ok",
+   "hash": "d3b503750fe0829af5171372c5a90d106694cc85f9518420fd82e7a5a445b3e4"
+  },
+  {
+   "path": "layer-00017-experts-0384-0511.complete.json",
+   "status": "ok",
+   "hash": "cf361bdd5ae408e9a843f54972a8b1b643a3256a"
+  },
+  {
+   "path": "layer-00017-experts-0384-0511.safetensors",
+   "status": "ok",
+   "hash": "37beff318fcd350d83f3a841a4864c6e466f846b9691f7b6fa87f189328b70c7"
+  },
+  {
+   "path": "layer-00018-experts-0000-0127.complete.json",
+   "status": "ok",
+   "hash": "5f9f75fe25fafc5504680bff05df676a39012931"
+  },
+  {
+   "path": "layer-00018-experts-0000-0127.safetensors",
+   "status": "ok",
+   "hash": "b80b8151e21d27ed41f9e64a383469db85f982ce10a0be76b2b3053e7539a5a5"
+  },
+  {
+   "path": "layer-00018-experts-0128-0255.complete.json",
+   "status": "ok",
+   "hash": "5f4034c93641f1a3b5dab3943b13647ef728d630"
+  },
+  {
+   "path": "layer-00018-experts-0128-0255.safetensors",
+   "status": "ok",
+   "hash": "c3284c528f0c2083ef72dfce27c890fa31286e6c3c0636183edeea3bce1f96e5"
+  },
+  {
+   "path": "layer-00018-experts-0256-0383.complete.json",
+   "status": "ok",
+   "hash": "ed32433b9d040c651fe52995053de7fee837b563"
+  },
+  {
+   "path": "layer-00018-experts-0256-0383.safetensors",
+   "status": "ok",
+   "hash": "940ff868de9b0bae4184cccf7cd410aea022df8fe5f1aaaa3c7946e9a7d3473e"
+  },
+  {
+   "path": "layer-00018-experts-0384-0511.complete.json",
+   "status": "ok",
+   "hash": "569aa9af5ba4cc9e45c1f3984d669f6db9f111e2"
+  },
+  {
+   "path": "layer-00018-experts-0384-0511.safetensors",
+   "status": "ok",
+   "hash": "861632cf423d474282da4e967d9b1dadafc8bcdf5232553d5d568d8ac3b6e72c"
+  },
+  {
+   "path": "layer-00019-experts-0000-0127.complete.json",
+   "status": "ok",
+   "hash": "bc0ada9c4ec4153e6d7bd23b7027a50b4568f1b3"
+  },
+  {
+   "path": "layer-00019-experts-0000-0127.safetensors",
+   "status": "ok",
+   "hash": "b169c46264cedb7ab0223f361dbb64f13abd8dd36a75935ea47fe17634d6db5d"
+  },
+  {
+   "path": "layer-00019-experts-0128-0255.complete.json",
+   "status": "ok",
+   "hash": "2abc0ea34ec2a712c33075069b366862d6fe5a72"
+  },
+  {
+   "path": "layer-00019-experts-0128-0255.safetensors",
+   "status": "ok",
+   "hash": "60068e4f6634e07d1e9ce6d1f64066e91cb832655e42002e263cb194beede0b3"
+  },
+  {
+   "path": "layer-00019-experts-0256-0383.complete.json",
+   "status": "ok",
+   "hash": "bbe8276903ae05a586c342e1fe713cea2c2685c1"
+  },
+  {
+   "path": "layer-00019-experts-0256-0383.safetensors",
+   "status": "ok",
+   "hash": "4526078c89f23834251b8b449a4c5b35b8de4c5116adf204dbb7476c089242f4"
+  },
+  {
+   "path": "layer-00019-experts-0384-0511.complete.json",
+   "status": "ok",
+   "hash": "820568276a7c6853f176f841b1020ff212efbade"
+  },
+  {
+   "path": "layer-00019-experts-0384-0511.safetensors",
+   "status": "ok",
+   "hash": "23bbff916cac0b589920a1cfa689a4feb30b09bae71d62298554c9caa614c14b"
+  },
+  {
+   "path": "layer-00020-experts-0000-0127.complete.json",
+   "status": "ok",
+   "hash": "85fb79e8e023112c55523ab9f6ea202b7293dfc4"
+  },
+  {
+   "path": "layer-00020-experts-0000-0127.safetensors",
+   "status": "ok",
+   "hash": "3f60eb3bf1c5ef04894b50cd99d064cadc9e836c340c576b230f753867dce9aa"
+  },
+  {
+   "path": "layer-00020-experts-0128-0255.complete.json",
+   "status": "ok",
+   "hash": "8bf1d363d875c00a4264505242235a16a5b3c861"
+  },
+  {
+   "path": "layer-00020-experts-0128-0255.safetensors",
+   "status": "ok",
+   "hash": "9f335aa65fa587e99342dd607277c0d6e2672f1feb3cab3dd93bc8f303804ff6"
+  },
+  {
+   "path": "layer-00020-experts-0256-0383.complete.json",
+   "status": "ok",
+   "hash": "7ec1549a095b36ee2a777efc747dcb877238965e"
+  },
+  {
+   "path": "layer-00020-experts-0256-0383.safetensors",
+   "status": "ok",
+   "hash": "3c5b9f9e8df064c205187b1ec733b6b0850f11a75020960357a55102fdbce8d5"
+  },
+  {
+   "path": "layer-00020-experts-0384-0511.complete.json",
+   "status": "ok",
+   "hash": "f4a1c9dd2bfcc6910e52ab9f3e14a8cd38214386"
+  },
+  {
+   "path": "layer-00020-experts-0384-0511.safetensors",
+   "status": "ok",
+   "hash": "2642d5d728ff4985abbbdaf086cc55e374c3459c9e7a4ae693ed6db5a013ebce"
+  },
+  {
+   "path": "layer-00021-experts-0000-0127.complete.json",
+   "status": "ok",
+   "hash": "1a4aad7b094f9cd56ea8cdd7690117d2fa4de3b8"
+  },
+  {
+   "path": "layer-00021-experts-0000-0127.safetensors",
+   "status": "ok",
+   "hash": "93227a3733f1a851eb36543f4b7df765869ba56110acf8966ed0e1118b2296c3"
+  },
+  {
+   "path": "layer-00021-experts-0128-0255.complete.json",
+   "status": "ok",
+   "hash": "3676540eec0a3d5cc6ad8e588ac68fcdcffb3e8c"
+  },
+  {
+   "path": "layer-00021-experts-0128-0255.safetensors",
+   "status": "ok",
+   "hash": "244185aaf74c55b9ce74c789b500691983d7606cf22579fe6d5144e205063110"
+  },
+  {
+   "path": "layer-00021-experts-0256-0383.complete.json",
+   "status": "ok",
+   "hash": "e85b31e7628e7beb66e98e9d33a37f5b001bc272"
+  },
+  {
+   "path": "layer-00021-experts-0256-0383.safetensors",
+   "status": "ok",
+   "hash": "a542ae04a12af360987efff19022cdb3c23c66eb4336f12f9798f858c3e7fe9d"
+  },
+  {
+   "path": "layer-00021-experts-0384-0511.complete.json",
+   "status": "ok",
+   "hash": "4af66242b14ae940d894ae24add2fa3a15e28474"
+  },
+  {
+   "path": "layer-00021-experts-0384-0511.safetensors",
+   "status": "ok",
+   "hash": "a7437f07bb1eb8901f7c304e396efa6bf5ac7ed63c7eb0e193ab58736bf7161a"
+  },
+  {
+   "path": "layer-00022-experts-0000-0127.complete.json",
+   "status": "ok",
+   "hash": "8b1b5f06d94e3bf824fb73759088732ea63fba3b"
+  },
+  {
+   "path": "layer-00022-experts-0000-0127.safetensors",
+   "status": "ok",
+   "hash": "8dddafa23e0c34888775e566b0c03591e7148049d9e96402b23b96e43e17120e"
+  },
+  {
+   "path": "layer-00022-experts-0128-0255.complete.json",
+   "status": "ok",
+   "hash": "798bf210da83abfd9b0e6db2ffb5cfbb36ac49d8"
+  },
+  {
+   "path": "layer-00022-experts-0128-0255.safetensors",
+   "status": "ok",
+   "hash": "1f12162297cc4967a14531b5ce4323107062e28b4e043ff326a6597361ec5e66"
+  },
+  {
+   "path": "layer-00022-experts-0256-0383.complete.json",
+   "status": "ok",
+   "hash": "bbe48577b392940e62618ad3bd74df690abf663c"
+  },
+  {
+   "path": "layer-00022-experts-0256-0383.safetensors",
+   "status": "ok",
+   "hash": "b9df10513e1aa7a3c32934b0ee572b3d2f81b43bd8f73186e3779658b93fb96f"
+  },
+  {
+   "path": "layer-00022-experts-0384-0511.complete.json",
+   "status": "ok",
+   "hash": "b40dcc8b78825c332e6ffaa4ec8143735a1ab318"
+  },
+  {
+   "path": "layer-00022-experts-0384-0511.safetensors",
+   "status": "ok",
+   "hash": "93b54aa4fc9ef06cf2bf8ac295a605c125380ebd56adff36c1f68a7d8aeacf17"
+  },
+  {
+   "path": "layer-00023-experts-0000-0127.complete.json",
+   "status": "ok",
+   "hash": "e789ed8b40c6c8f002980fa7b7f145e984020156"
+  },
+  {
+   "path": "layer-00023-experts-0000-0127.safetensors",
+   "status": "ok",
+   "hash": "b7bc6a1a6e4355016e3916a23f8060702a80db9b5a200202185ab2506509e8fc"
+  },
+  {
+   "path": "layer-00023-experts-0128-0255.complete.json",
+   "status": "ok",
+   "hash": "fdf0352939b3f6c57d1224c21b4a8aa35a82daab"
+  },
+  {
+   "path": "layer-00023-experts-0128-0255.safetensors",
+   "status": "ok",
+   "hash": "cdec95b4defdff52735c3c14f9e6a223bc9979ac3ac2a301880f34ea79f4c1f7"
+  },
+  {
+   "path": "layer-00023-experts-0256-0383.complete.json",
+   "status": "ok",
+   "hash": "d0bd7eb97d31b1802ca29d537c8255b79816073d"
+  },
+  {
+   "path": "layer-00023-experts-0256-0383.safetensors",
+   "status": "ok",
+   "hash": "3b0079ad9b1b18433823488c3cf37052c79a01e782fe8c7e1184e84548560225"
+  },
+  {
+   "path": "layer-00023-experts-0384-0511.complete.json",
+   "status": "ok",
+   "hash": "09030386e6086dafa1fecdbd993bfbd7b6b50bdd"
+  },
+  {
+   "path": "layer-00023-experts-0384-0511.safetensors",
+   "status": "ok",
+   "hash": "20d44d6e85ffb0b9e939b07ac63e994cd4707ba5f4c6b3c2bf3ef66b357109f2"
+  },
+  {
+   "path": "layer-00024-experts-0000-0127.complete.json",
+   "status": "ok",
+   "hash": "251eaf797d213d84e22a9c9fd0dded811ce95af4"
+  },
+  {
+   "path": "layer-00024-experts-0000-0127.safetensors",
+   "status": "ok",
+   "hash": "08750c65b4c40c65bb45b4fd4e5ad6255b89f29f3ce203d002643a65df5c343d"
+  },
+  {
+   "path": "layer-00024-experts-0128-0255.complete.json",
+   "status": "ok",
+   "hash": "48bc0e04aa8c44602a4eb99af22423981e4e89ba"
+  },
+  {
+   "path": "layer-00024-experts-0128-0255.safetensors",
+   "status": "ok",
+   "hash": "defd82e8300c9fceabb5cfd321327471050a5c42876f855c3f428c97cc0797e3"
+  },
+  {
+   "path": "layer-00024-experts-0256-0383.complete.json",
+   "status": "ok",
+   "hash": "3c66c0b7fb797fa4d667c23f78a6a6149ef0da76"
+  },
+  {
+   "path": "layer-00024-experts-0256-0383.safetensors",
+   "status": "ok",
+   "hash": "1df6e0ba920a67ea4a30efcef8f24abd8407687d40db7d0f0dfda7f7a223371a"
+  },
+  {
+   "path": "layer-00024-experts-0384-0511.complete.json",
+   "status": "ok",
+   "hash": "8c4d1418cbfaa1e5fbf94e5aeddaab8bca0b4216"
+  },
+  {
+   "path": "layer-00024-experts-0384-0511.safetensors",
+   "status": "ok",
+   "hash": "99ff047c10b039d8b2c29959158f30dda36d88bb727dc8901a3a72bd616c8146"
+  },
+  {
+   "path": "layer-00025-experts-0000-0127.complete.json",
+   "status": "ok",
+   "hash": "a4495fe6aba46b3f13e669294868c1c266c7d172"
+  },
+  {
+   "path": "layer-00025-experts-0000-0127.safetensors",
+   "status": "ok",
+   "hash": "193bd0313811df798e6bed2773757f5bb51987acb5f675d830576db1f79c6c86"
+  },
+  {
+   "path": "layer-00025-experts-0128-0255.complete.json",
+   "status": "ok",
+   "hash": "0dd258328a455442d7c5a4d325c5384028dca91f"
+  },
+  {
+   "path": "layer-00025-experts-0128-0255.safetensors",
+   "status": "ok",
+   "hash": "e476c290b5beeba1c39233f03b78a695789b5d108a1af2a71781d75f1c872708"
+  },
+  {
+   "path": "layer-00025-experts-0256-0383.complete.json",
+   "status": "ok",
+   "hash": "28d6a4cc99d37db904d36d6b4f860813f1daebbb"
+  },
+  {
+   "path": "layer-00025-experts-0256-0383.safetensors",
+   "status": "ok",
+   "hash": "1ae4130404619dedea46db458a5d6ddab15e58064b48001ee3d0696c3742d265"
+  },
+  {
+   "path": "layer-00025-experts-0384-0511.complete.json",
+   "status": "ok",
+   "hash": "2d3a8eaf447f66f47b16e1bda107e62799374174"
+  },
+  {
+   "path": "layer-00025-experts-0384-0511.safetensors",
+   "status": "ok",
+   "hash": "17a6ac277c4b1357da4afab1e394fb1e1e99be2553a33ff98a3a9251818a256d"
+  },
+  {
+   "path": "layer-00026-experts-0000-0127.complete.json",
+   "status": "ok",
+   "hash": "ae39297519614921a3fb0a2e20ffd6b6aa467c2f"
+  },
+  {
+   "path": "layer-00026-experts-0000-0127.safetensors",
+   "status": "ok",
+   "hash": "1bf688d4658c7dbe186793a2b3944ec1a1a1effbf0b91d0dcb137f4e4dac249c"
+  },
+  {
+   "path": "layer-00026-experts-0128-0255.complete.json",
+   "status": "ok",
+   "hash": "506c38f0eaa3ccf75bc41e95e51c8f2b4b55d54d"
+  },
+  {
+   "path": "layer-00026-experts-0128-0255.safetensors",
+   "status": "ok",
+   "hash": "234aec40e56b29ca1ea38f5483ce7a2aacdea5e3377d76417a6c6e5e710d2bee"
+  },
+  {
+   "path": "layer-00026-experts-0256-0383.complete.json",
+   "status": "ok",
+   "hash": "8f67d00fd04c6ff3d6e884744e3904669e0ab725"
+  },
+  {
+   "path": "layer-00026-experts-0256-0383.safetensors",
+   "status": "ok",
+   "hash": "64093f5572a8ddefc149f7385b916a5c032c87ec3511dca7087f4484a349950d"
+  },
+  {
+   "path": "layer-00026-experts-0384-0511.complete.json",
+   "status": "ok",
+   "hash": "43d6c6b5b79f0d6439a9da12c82bae80af96f913"
+  },
+  {
+   "path": "layer-00026-experts-0384-0511.safetensors",
+   "status": "ok",
+   "hash": "2421857831c4cd4ea4b091b0128f30012e90b9747514bf89d81d5f3b30ed4330"
+  },
+  {
+   "path": "layer-00027-experts-0000-0127.complete.json",
+   "status": "ok",
+   "hash": "42db2e428aa741b060fde122d209ccd987ac2e9a"
+  },
+  {
+   "path": "layer-00027-experts-0000-0127.safetensors",
+   "status": "ok",
+   "hash": "2782b3eb51fe5ae4e95865c330e9a36d0d8e8d1e46e1b07ef3f34e6cdb2aee05"
+  },
+  {
+   "path": "layer-00027-experts-0128-0255.complete.json",
+   "status": "ok",
+   "hash": "6a1dcfa68db9e7e4f2a72053656056f105a0cc81"
+  },
+  {
+   "path": "layer-00027-experts-0128-0255.safetensors",
+   "status": "ok",
+   "hash": "2ca1523a585acba2383abb9e7ad1f46ec92df4c81dab7ff0f929ff0220e73510"
+  },
+  {
+   "path": "layer-00027-experts-0256-0383.complete.json",
+   "status": "ok",
+   "hash": "2f2ecf57af1d3963173f0da68a485223495dc0dd"
+  },
+  {
+   "path": "layer-00027-experts-0256-0383.safetensors",
+   "status": "ok",
+   "hash": "2da2e96a25e3af4a8f66e6e31196c2e897f792a4d5aa31a3ba2013ec7a9b256e"
+  },
+  {
+   "path": "layer-00027-experts-0384-0511.complete.json",
+   "status": "ok",
+   "hash": "f36e5084dc3ee87eea61fdfd3485b832048af9de"
+  },
+  {
+   "path": "layer-00027-experts-0384-0511.safetensors",
+   "status": "ok",
+   "hash": "31f7ab38d0035b96a0c8df3fa001edd87a9dcd4321c9fafc262fe52bc490029b"
+  },
+  {
+   "path": "layer-00028-experts-0000-0127.complete.json",
+   "status": "ok",
+   "hash": "de81f8165fd3857fc53fd147ef963550cd71ec3d"
+  },
+  {
+   "path": "layer-00028-experts-0000-0127.safetensors",
+   "status": "ok",
+   "hash": "34e51dd4f3f802e6093f76ccfb2bfae6d6c4edc0bbc4372a2aeec089bdffbf4f"
+  },
+  {
+   "path": "layer-00028-experts-0128-0255.complete.json",
+   "status": "ok",
+   "hash": "c07e8aa252278991e8360013ed2eea3ab90e6076"
+  },
+  {
+   "path": "layer-00028-experts-0128-0255.safetensors",
+   "status": "ok",
+   "hash": "f04304ba3fd5e27093ffa3448f320004ea3777dfa04b883a29041e79dd5149d7"
+  },
+  {
+   "path": "layer-00028-experts-0256-0383.complete.json",
+   "status": "ok",
+   "hash": "9d9d491edcfa86e24b7a7a8e07e7687961e2dd0c"
+  },
+  {
+   "path": "layer-00028-experts-0256-0383.safetensors",
+   "status": "ok",
+   "hash": "1b4279f0e6c4f33e614f3096dce0d46460f735771d22e7a17235162db3a524d6"
+  },
+  {
+   "path": "layer-00028-experts-0384-0511.complete.json",
+   "status": "ok",
+   "hash": "6a1f1a7f4b881181c51d29b166e3e1e7db72cd89"
+  },
+  {
+   "path": "layer-00028-experts-0384-0511.safetensors",
+   "status": "ok",
+   "hash": "9ca3cc8d3116b7c21c46bc29d39ffc611be1173f6259024270553b379cbe87a7"
+  },
+  {
+   "path": "layer-00029-experts-0000-0127.complete.json",
+   "status": "ok",
+   "hash": "f6094faeeae4baf829b05394467a453400dba083"
+  },
+  {
+   "path": "layer-00029-experts-0000-0127.safetensors",
+   "status": "ok",
+   "hash": "c234e5b5b535e3c4bf019b11aefa152d615e4ea2709b9bc69d1b8f6d749e8689"
+  },
+  {
+   "path": "layer-00029-experts-0128-0255.complete.json",
+   "status": "ok",
+   "hash": "1f6386032e47845aa5ad82131d3ebaf843ed5d97"
+  },
+  {
+   "path": "layer-00029-experts-0128-0255.safetensors",
+   "status": "ok",
+   "hash": "c753cdab380aafb7402fad4cc5df30a79a2fcf2f9c3455b910721804880fd1ad"
+  },
+  {
+   "path": "layer-00029-experts-0256-0383.complete.json",
+   "status": "ok",
+   "hash": "603fbcb053e146f412b8837dbdbe92cb784f7e0d"
+  },
+  {
+   "path": "layer-00029-experts-0256-0383.safetensors",
+   "status": "ok",
+   "hash": "90a299234ec3a99318d21c678399afdc4f31c3b4186b3ba879cc1cab939a8a30"
+  },
+  {
+   "path": "layer-00029-experts-0384-0511.complete.json",
+   "status": "ok",
+   "hash": "67bd56ef9504ebdeb5f0d282cc8fdc13a52b07ea"
+  },
+  {
+   "path": "layer-00029-experts-0384-0511.safetensors",
+   "status": "ok",
+   "hash": "199194fa12c33b3ce6ebdf12283d544aa881ca04e976849c71bb4f95de4928e4"
+  },
+  {
+   "path": "layer-00030-experts-0000-0127.complete.json",
+   "status": "ok",
+   "hash": "2a6efbfaeb85c4fe0fdc0c9e999e05f8de55b0af"
+  },
+  {
+   "path": "layer-00030-experts-0000-0127.safetensors",
+   "status": "ok",
+   "hash": "09ac224ea1329677f5e6b45c042c01f3a024788e0caca1333c80d5b0d1d465a9"
+  },
+  {
+   "path": "layer-00030-experts-0128-0255.complete.json",
+   "status": "ok",
+   "hash": "95193359f6b5dd9800eaa55991c77ad237a276d3"
+  },
+  {
+   "path": "layer-00030-experts-0128-0255.safetensors",
+   "status": "ok",
+   "hash": "f825803df1f7cb6eacc59891244cfd471f99aace90d50beabc67a2e04e6f759c"
+  },
+  {
+   "path": "layer-00030-experts-0256-0383.complete.json",
+   "status": "ok",
+   "hash": "e11f5b426f9ada9f6b87cc23e0238ec0b447f755"
+  },
+  {
+   "path": "layer-00030-experts-0256-0383.safetensors",
+   "status": "ok",
+   "hash": "8f6753ddbb0f37b6e0574cb50ff9482d23582f7ca3075cfadaaef9860db023d8"
+  },
+  {
+   "path": "layer-00030-experts-0384-0511.complete.json",
+   "status": "ok",
+   "hash": "e0c4b6321372abbf9b8fa79de878bf388e68acb5"
+  },
+  {
+   "path": "layer-00030-experts-0384-0511.safetensors",
+   "status": "ok",
+   "hash": "1ca4e72c3dddc366a4cf8dd994dee03dc46c0b8e1ffe53d6478e00a46107730e"
+  },
+  {
+   "path": "layer-00031-experts-0000-0127.complete.json",
+   "status": "ok",
+   "hash": "cb16cae2bb5a69c85695889d2f9b84f1645afdd6"
+  },
+  {
+   "path": "layer-00031-experts-0000-0127.safetensors",
+   "status": "ok",
+   "hash": "e0b10583cee6577735ee1d3cad89d5503fce19b1c0cd58ecaf33192bd69f03ad"
+  },
+  {
+   "path": "layer-00031-experts-0128-0255.complete.json",
+   "status": "ok",
+   "hash": "41a103c482523a883c3ffecb0a4c8d5a8b5bd755"
+  },
+  {
+   "path": "layer-00031-experts-0128-0255.safetensors",
+   "status": "ok",
+   "hash": "9a85f4d1860671e6cd7f5ab559facea9c0efdfc78c2a4fc3e0345662e987296d"
+  },
+  {
+   "path": "layer-00031-experts-0256-0383.complete.json",
+   "status": "ok",
+   "hash": "80bbe57dca32f2c0700c4707a32e94cc9110f0dd"
+  },
+  {
+   "path": "layer-00031-experts-0256-0383.safetensors",
+   "status": "ok",
+   "hash": "382268f75b5a3c0a7e3de912985838b42cc6b4c72718bc254d18cafb14adf425"
+  },
+  {
+   "path": "layer-00031-experts-0384-0511.complete.json",
+   "status": "ok",
+   "hash": "a8194b549a9ef7d12b747ce1259cf27015b592e5"
+  },
+  {
+   "path": "layer-00031-experts-0384-0511.safetensors",
+   "status": "ok",
+   "hash": "7da4d40aa6fbeaaeddcd19d8a0dde214f3ce96f896e04cb80f3672f89338df15"
+  },
+  {
+   "path": "layer-00032-experts-0000-0127.complete.json",
+   "status": "ok",
+   "hash": "f5a3bbf3acaf0944eccfe9dce3c9c24d3a570f1b"
+  },
+  {
+   "path": "layer-00032-experts-0000-0127.safetensors",
+   "status": "ok",
+   "hash": "ce63cd41815193124b34e8f0a4206a2d1d5483eac1ace84106ee009a51f4ec14"
+  },
+  {
+   "path": "layer-00032-experts-0128-0255.complete.json",
+   "status": "ok",
+   "hash": "1ac4fe58fcaf41b0e7f5b81de300376638cc5ca5"
+  },
+  {
+   "path": "layer-00032-experts-0128-0255.safetensors",
+   "status": "ok",
+   "hash": "576b8243444fb8f307cda8207cd03647d60ebde51503952915f67734b913d62c"
+  },
+  {
+   "path": "layer-00032-experts-0256-0383.complete.json",
+   "status": "ok",
+   "hash": "b3df19ef6d1c2cd8ab2dcef362a4f14d7962f908"
+  },
+  {
+   "path": "layer-00032-experts-0256-0383.safetensors",
+   "status": "ok",
+   "hash": "1e9e15cddbf992a8defa7d20055795ad8ec2ee85e6dbac1a55afc393ddd72ca0"
+  },
+  {
+   "path": "layer-00032-experts-0384-0511.complete.json",
+   "status": "ok",
+   "hash": "4bbb6004ab0a41d312083cd328be81a0ed2e0a2e"
+  },
+  {
+   "path": "layer-00032-experts-0384-0511.safetensors",
+   "status": "ok",
+   "hash": "f7c42fcd6d54dfe180e70664c2169b91b76c6347f51febc2bc28ae105d7a427b"
+  },
+  {
+   "path": "layer-00033-experts-0000-0127.complete.json",
+   "status": "ok",
+   "hash": "58a88b69ddc0317b7f8bfe1abf6bc407a9295a83"
+  },
+  {
+   "path": "layer-00033-experts-0000-0127.safetensors",
+   "status": "ok",
+   "hash": "ba0a7f73f57af2aa3cf4c2fd50b6533cdeeb2c02de9d1e902f305bb3946f76c3"
+  },
+  {
+   "path": "layer-00033-experts-0128-0255.complete.json",
+   "status": "ok",
+   "hash": "ffd649ca5bedd394a0ba3fb5a0211abc8bfefc7d"
+  },
+  {
+   "path": "layer-00033-experts-0128-0255.safetensors",
+   "status": "ok",
+   "hash": "806419069af5028e7cebf5d023adf52bc2b56fa5f1c972bfd26b9ad0df4fab18"
+  },
+  {
+   "path": "layer-00033-experts-0256-0383.complete.json",
+   "status": "ok",
+   "hash": "11ba806aa486f9236fb3ad6447f131bc2649016a"
+  },
+  {
+   "path": "layer-00033-experts-0256-0383.safetensors",
+   "status": "ok",
+   "hash": "9ecd76884ac0db2df1ced1ca7f7b756e74c7aca67ef9a34f5d23e041e284ad89"
+  },
+  {
+   "path": "layer-00033-experts-0384-0511.complete.json",
+   "status": "ok",
+   "hash": "ee73b2f1c93e143342bb14db04e676eeea61b68d"
+  },
+  {
+   "path": "layer-00033-experts-0384-0511.safetensors",
+   "status": "ok",
+   "hash": "6d4558b6cf22f515a3ea9cd409165b5874feb7e18b9b6e0945ffaa88f45ce453"
+  },
+  {
+   "path": "layer-00034-experts-0000-0127.complete.json",
+   "status": "ok",
+   "hash": "d3c6ba5d2914ceb0e905c3b3d830e1a107d3b62a"
+  },
+  {
+   "path": "layer-00034-experts-0000-0127.safetensors",
+   "status": "ok",
+   "hash": "518e346dfa56a49667f04cf604404af602c481216ce319cb1bb6baa9b49b333b"
+  },
+  {
+   "path": "layer-00034-experts-0128-0255.complete.json",
+   "status": "ok",
+   "hash": "cb768686c644dc4eccafdb64a34ce3e037d08c1e"
+  },
+  {
+   "path": "layer-00034-experts-0128-0255.safetensors",
+   "status": "ok",
+   "hash": "23fd381f089ca5ba0c73bb78eced8d52a518ec473f969dbd795e506739567318"
+  },
+  {
+   "path": "layer-00034-experts-0256-0383.complete.json",
+   "status": "ok",
+   "hash": "92628e06afe98dd2320c41633d889b0637de66cf"
+  },
+  {
+   "path": "layer-00034-experts-0256-0383.safetensors",
+   "status": "ok",
+   "hash": "849667349cf940a7e86c6905a84b7fd7fb55d511f825c4e6a653d2150c9f92e4"
+  },
+  {
+   "path": "layer-00034-experts-0384-0511.complete.json",
+   "status": "ok",
+   "hash": "bb53f00d9f4e11e7a81d47507b41435d0198e8ab"
+  },
+  {
+   "path": "layer-00034-experts-0384-0511.safetensors",
+   "status": "ok",
+   "hash": "e0c883b155b1c6fca9ce36984c08f87ecd758bde32104d3ef9ebcc1d02b3823d"
+  },
+  {
+   "path": "layer-00035-experts-0000-0127.complete.json",
+   "status": "ok",
+   "hash": "b57a6b50d2acfd70c24668fa3d33bdaf342fd2df"
+  },
+  {
+   "path": "layer-00035-experts-0000-0127.safetensors",
+   "status": "ok",
+   "hash": "ecadcb5e6d2f6143b0d15d778b668da783556a85b42befd7637c9978fd3bd77e"
+  },
+  {
+   "path": "layer-00035-experts-0128-0255.complete.json",
+   "status": "ok",
+   "hash": "6eff0c821948f4e56871bcf749701d2fa3f84e66"
+  },
+  {
+   "path": "layer-00035-experts-0128-0255.safetensors",
+   "status": "ok",
+   "hash": "c91a550feeec731332d0e97e855311a28c92df4fc3bf974cc6ddc00b5c0e12d1"
+  },
+  {
+   "path": "layer-00035-experts-0256-0383.complete.json",
+   "status": "ok",
+   "hash": "200edc0c41760d1bee2d49200579cf408e1afd52"
+  },
+  {
+   "path": "layer-00035-experts-0256-0383.safetensors",
+   "status": "ok",
+   "hash": "917fcc655a0effc987d27587df3e62130ad530aa6bea96aefe6cede4bd7debff"
+  },
+  {
+   "path": "layer-00035-experts-0384-0511.complete.json",
+   "status": "ok",
+   "hash": "b3c21d0240f15f7f568f74d78fe8dedd08ea1006"
+  },
+  {
+   "path": "layer-00035-experts-0384-0511.safetensors",
+   "status": "ok",
+   "hash": "ece021a3df0741cddaf89182b41e06febeb460052689668fabc6dbb61ad168b4"
+  },
+  {
+   "path": "layer-00036-experts-0000-0127.complete.json",
+   "status": "ok",
+   "hash": "24971165be01bb154271f39bf3d3de550682977e"
+  },
+  {
+   "path": "layer-00036-experts-0000-0127.safetensors",
+   "status": "ok",
+   "hash": "388bd0564300638b5c9bb6e125c6d5c68a33902e233b9c7821539990345e344a"
+  },
+  {
+   "path": "layer-00036-experts-0128-0255.complete.json",
+   "status": "ok",
+   "hash": "571b416e40629d7c12763c031406fe4c884cbce5"
+  },
+  {
+   "path": "layer-00036-experts-0128-0255.safetensors",
+   "status": "ok",
+   "hash": "57bf69a35e9465cd41ef8515e0bc3fe1bdc219609346469b0e3c4b0dcd3a4cb6"
+  },
+  {
+   "path": "layer-00036-experts-0256-0383.complete.json",
+   "status": "ok",
+   "hash": "af14f1110923e4219d371887a67c97e8240c36e4"
+  },
+  {
+   "path": "layer-00036-experts-0256-0383.safetensors",
+   "status": "ok",
+   "hash": "d4da83c4ab407187c8deb681b4253f52bc073c3b80b6ec46ea46b8c1ac960c82"
+  },
+  {
+   "path": "layer-00036-experts-0384-0511.complete.json",
+   "status": "ok",
+   "hash": "e9432383b3de3859b6ea78675537acad2c47b391"
+  },
+  {
+   "path": "layer-00036-experts-0384-0511.safetensors",
+   "status": "ok",
+   "hash": "c977ab88b65759b93d7895902a9b58c703d8a8f86679490684b3fcbff81118bc"
+  },
+  {
+   "path": "layer-00037-experts-0000-0127.complete.json",
+   "status": "ok",
+   "hash": "895d54aeee83ce4d1adc8f02b3c75235a071988b"
+  },
+  {
+   "path": "layer-00037-experts-0000-0127.safetensors",
+   "status": "ok",
+   "hash": "b65f84bbf3745538804b78b6e6f57fc1e2cfbcf792f1c6e2645cd0d98f879ef9"
+  },
+  {
+   "path": "layer-00037-experts-0128-0255.complete.json",
+   "status": "ok",
+   "hash": "e0eeb1c1f2f77e26bcc73fa31cd46f80fa68c670"
+  },
+  {
+   "path": "layer-00037-experts-0128-0255.safetensors",
+   "status": "ok",
+   "hash": "90fb9aeee9d52864d68476f42aa93005f83b5ed44284b0b4ef93a2ee4b9d1d59"
+  },
+  {
+   "path": "layer-00037-experts-0256-0383.complete.json",
+   "status": "ok",
+   "hash": "43294a02f26ec42f5bb472f255f2e44dafd7acf0"
+  },
+  {
+   "path": "layer-00037-experts-0256-0383.safetensors",
+   "status": "ok",
+   "hash": "1cf68b76e59192b1949e9ee6da8bc2b57fc5cbfcd59e56b84d072bc340e5bebe"
+  },
+  {
+   "path": "layer-00037-experts-0384-0511.complete.json",
+   "status": "ok",
+   "hash": "7788da91b243427859201ce300d953ee2f2b598c"
+  },
+  {
+   "path": "layer-00037-experts-0384-0511.safetensors",
+   "status": "ok",
+   "hash": "6c3e5d929e50ef57dea6b0e6ddbb596f478bbd8005d0a1829cdde4ec3d1378c5"
+  },
+  {
+   "path": "layer-00038-experts-0000-0127.complete.json",
+   "status": "ok",
+   "hash": "2adff2972bf071d1e4aac2168e54e1d3fc1be5c1"
+  },
+  {
+   "path": "layer-00038-experts-0000-0127.safetensors",
+   "status": "ok",
+   "hash": "66fbdc1602ec1d7017f61092d2a79ef4b3d6669d3e79934c7bbea9dc6f1b5857"
+  },
+  {
+   "path": "layer-00038-experts-0128-0255.complete.json",
+   "status": "ok",
+   "hash": "b79b4f9a5ee450a3f6ea4a0d1427342f77e0537a"
+  },
+  {
+   "path": "layer-00038-experts-0128-0255.safetensors",
+   "status": "ok",
+   "hash": "9e90062c4e8d2a847c4e1c4a732658382e491d50d3311b1844eb6677a608de29"
+  },
+  {
+   "path": "layer-00038-experts-0256-0383.complete.json",
+   "status": "ok",
+   "hash": "778265f0057160b345f72310f0894474a0fb95a4"
+  },
+  {
+   "path": "layer-00038-experts-0256-0383.safetensors",
+   "status": "ok",
+   "hash": "d94b3b12e49031c484947c3638b33cd460fcf85e94d232b5860cf9e840800504"
+  },
+  {
+   "path": "layer-00038-experts-0384-0511.complete.json",
+   "status": "ok",
+   "hash": "233e12ed2f8f25010dc356187f1858f9fd88d258"
+  },
+  {
+   "path": "layer-00038-experts-0384-0511.safetensors",
+   "status": "ok",
+   "hash": "e48b1f406d505f5743559a744a20ddc57eadd6369ee61f7b759c472e5c15185d"
+  },
+  {
+   "path": "layer-00039-experts-0000-0127.complete.json",
+   "status": "ok",
+   "hash": "863245f382fdb532a96c98b936428496f04a5166"
+  },
+  {
+   "path": "layer-00039-experts-0000-0127.safetensors",
+   "status": "ok",
+   "hash": "2ddc77522f5bdcb2cf910732ac5400c7eb81c4cc434e904b092a2c1f0b289d18"
+  },
+  {
+   "path": "layer-00039-experts-0128-0255.complete.json",
+   "status": "ok",
+   "hash": "975b7094d64b4a6342567859b4330c01b3cba75e"
+  },
+  {
+   "path": "layer-00039-experts-0128-0255.safetensors",
+   "status": "ok",
+   "hash": "68a5c858ded2433bc9b3f1e6f1f253761a229184f068888e672364ab94efd4b2"
+  },
+  {
+   "path": "layer-00039-experts-0256-0383.complete.json",
+   "status": "ok",
+   "hash": "764aabdf274e2d2cebe4c555a00367d41c30bb36"
+  },
+  {
+   "path": "layer-00039-experts-0256-0383.safetensors",
+   "status": "ok",
+   "hash": "a105df175935fe92be45b56a03783fe1eef829bc432781ca735b35a2b14045f3"
+  },
+  {
+   "path": "layer-00039-experts-0384-0511.complete.json",
+   "status": "ok",
+   "hash": "60e8656089f5faf7e023ab530797e3469d70a7ba"
+  },
+  {
+   "path": "layer-00039-experts-0384-0511.safetensors",
+   "status": "ok",
+   "hash": "6f503890fcd49194a35c6a80167ab5508f53cf41986f874ec492f38f0b1e56b9"
+  },
+  {
+   "path": "layer-00040-experts-0000-0127.complete.json",
+   "status": "ok",
+   "hash": "002b44bdb8087a1a7fbf81f97d738b4eb73aedfd"
+  },
+  {
+   "path": "layer-00040-experts-0000-0127.safetensors",
+   "status": "ok",
+   "hash": "762c34b27295007c74d0e0da0100d9d623a7229a8f5536c21d3575cc4d626e20"
+  },
+  {
+   "path": "layer-00040-experts-0128-0255.complete.json",
+   "status": "ok",
+   "hash": "bc9561c2d3b7c51a61637cfa7ab542c9b151b1da"
+  },
+  {
+   "path": "layer-00040-experts-0128-0255.safetensors",
+   "status": "ok",
+   "hash": "fd611b47e966171d27e39b776eb27b9c7033c374166c91b79a2175e8a8c76ddc"
+  },
+  {
+   "path": "layer-00040-experts-0256-0383.complete.json",
+   "status": "ok",
+   "hash": "3efb59b8ed27c8be410e59dc530f2e6c34a54f42"
+  },
+  {
+   "path": "layer-00040-experts-0256-0383.safetensors",
+   "status": "ok",
+   "hash": "2fb1a10066b50789bd93e7ce48ef2d65d4a10186850d8a0260e3270cd6d993f8"
+  },
+  {
+   "path": "layer-00040-experts-0384-0511.complete.json",
+   "status": "ok",
+   "hash": "5065d0eecb11f0501276e9d6fc0776f7f7fc1fc5"
+  },
+  {
+   "path": "layer-00040-experts-0384-0511.safetensors",
+   "status": "ok",
+   "hash": "5480dc8a605c06fcbb7b555ba109a6a04f3fe5c63176f8eeef0ce0fea5306dd3"
+  },
+  {
+   "path": "layer-00041-experts-0000-0127.complete.json",
+   "status": "ok",
+   "hash": "d55e9a1f768f4e6492e79c95119e8231b94df831"
+  },
+  {
+   "path": "layer-00041-experts-0000-0127.safetensors",
+   "status": "ok",
+   "hash": "45d2db6be7f04188b66e5112ed11cea8c76c51a189e532bd637acc048e7d9ec9"
+  },
+  {
+   "path": "layer-00041-experts-0128-0255.complete.json",
+   "status": "ok",
+   "hash": "bcf53b92f1902a9d409b0a6c191da9b5ea5b562a"
+  },
+  {
+   "path": "layer-00041-experts-0128-0255.safetensors",
+   "status": "ok",
+   "hash": "c81d815cffba9e7892369547efd1022564b60985992903e80e8ac389829ff09a"
+  },
+  {
+   "path": "layer-00041-experts-0256-0383.complete.json",
+   "status": "ok",
+   "hash": "bf464ee1a96c1bf4e43f3d748bd434bbde609b6e"
+  },
+  {
+   "path": "layer-00041-experts-0256-0383.safetensors",
+   "status": "ok",
+   "hash": "861a80e534f394c1780cb956cbf80e1a94a11296f6b958e33ce7b71d731e0a98"
+  },
+  {
+   "path": "layer-00041-experts-0384-0511.complete.json",
+   "status": "ok",
+   "hash": "fae4f83d8f492ec25020ac2d3f52c18d45533fed"
+  },
+  {
+   "path": "layer-00041-experts-0384-0511.safetensors",
+   "status": "ok",
+   "hash": "103092afac9547792b476d46d1443602e2719143801cc20441dbb5f2f07483a4"
+  },
+  {
+   "path": "layer-00042-experts-0000-0127.complete.json",
+   "status": "ok",
+   "hash": "5a8d7df2c71c4e9da141003c486d2855612b934d"
+  },
+  {
+   "path": "layer-00042-experts-0000-0127.safetensors",
+   "status": "ok",
+   "hash": "f255b100c78bb3b8d045baee5ad85e409c626d139f6e70e935f6cee80f640e26"
+  },
+  {
+   "path": "layer-00042-experts-0128-0255.complete.json",
+   "status": "ok",
+   "hash": "b0eb92ed2cef86e58db11fe6766b9ff8be87b86d"
+  },
+  {
+   "path": "layer-00042-experts-0128-0255.safetensors",
+   "status": "ok",
+   "hash": "be0caa2be8ee8b0a41b3095cb4556767e228c4425014112a606475dc478a8f3c"
+  },
+  {
+   "path": "layer-00042-experts-0256-0383.complete.json",
+   "status": "ok",
+   "hash": "95ca516dcbbec8b83c9510a5ae4e0821a96a62a5"
+  },
+  {
+   "path": "layer-00042-experts-0256-0383.safetensors",
+   "status": "ok",
+   "hash": "1781ddba444b925ebbde4788232e5ec1facafe5b290f82386a0752739f8d9c7b"
+  },
+  {
+   "path": "layer-00042-experts-0384-0511.complete.json",
+   "status": "ok",
+   "hash": "1d611d9547dd3f3ad4131906ccb83e5fbb5d42f7"
+  },
+  {
+   "path": "layer-00042-experts-0384-0511.safetensors",
+   "status": "ok",
+   "hash": "747efaca036ab0e82eae83eebc41704b1435976771cb0ad2988fe9f0d0949566"
+  },
+  {
+   "path": "layer-00043-experts-0000-0127.complete.json",
+   "status": "ok",
+   "hash": "0c38b287f3bea929f18676fece88f3fa247973c7"
+  },
+  {
+   "path": "layer-00043-experts-0000-0127.safetensors",
+   "status": "ok",
+   "hash": "4f4a15d21467099a816bcc928602d969b84f01a3411d37c70be01c415281e662"
+  },
+  {
+   "path": "layer-00043-experts-0128-0255.complete.json",
+   "status": "ok",
+   "hash": "6376b49c8dd1264ebb3fa3f96b45079c3fc50e28"
+  },
+  {
+   "path": "layer-00043-experts-0128-0255.safetensors",
+   "status": "ok",
+   "hash": "9255aa9eb41a4cb8a7453aecdf6b76a998ad673f452eac4fa4f8841c4c49708f"
+  },
+  {
+   "path": "layer-00043-experts-0256-0383.complete.json",
+   "status": "ok",
+   "hash": "09f9e2d2556e45b7d9f956ddd811d52a07889fe9"
+  },
+  {
+   "path": "layer-00043-experts-0256-0383.safetensors",
+   "status": "ok",
+   "hash": "c879dd2a43ef33c4243ffcd308e504faf8bf51543ed729e6fd67015648c7fdbc"
+  },
+  {
+   "path": "layer-00043-experts-0384-0511.complete.json",
+   "status": "ok",
+   "hash": "b1d345c8abd34c86c0867029133a9cf3dfa85d49"
+  },
+  {
+   "path": "layer-00043-experts-0384-0511.safetensors",
+   "status": "ok",
+   "hash": "1f08bd35554dad5e49198d20fd3cbe855b646b676813ceb41427f12bbcca64cb"
+  },
+  {
+   "path": "layer-00044-experts-0000-0127.complete.json",
+   "status": "ok",
+   "hash": "bb6bca2d793ff562625b70f9cc46f6850905dcf5"
+  },
+  {
+   "path": "layer-00044-experts-0000-0127.safetensors",
+   "status": "ok",
+   "hash": "43ba77225aedadb59ed3fd3f8fc3851732754ce3668a596b7ba915ca117b079f"
+  },
+  {
+   "path": "layer-00044-experts-0128-0255.complete.json",
+   "status": "ok",
+   "hash": "b083881f65090e7940d64cda4f22b05ff806973e"
+  },
+  {
+   "path": "layer-00044-experts-0128-0255.safetensors",
+   "status": "ok",
+   "hash": "9ac895c194e7a03ac64e191a4a05d64e71360fe256076a6b7bf13d79a8246498"
+  },
+  {
+   "path": "layer-00044-experts-0256-0383.complete.json",
+   "status": "ok",
+   "hash": "fef65b9b1e1a184f63c3d1606b022d7cdb7a889b"
+  },
+  {
+   "path": "layer-00044-experts-0256-0383.safetensors",
+   "status": "ok",
+   "hash": "7b88df75d991390e29bd22277101df43fae3c8814e2ab475e6c8f4c37b920fb2"
+  },
+  {
+   "path": "layer-00044-experts-0384-0511.complete.json",
+   "status": "ok",
+   "hash": "56333a211ce575210852d8fa36588ae963c7f70f"
+  },
+  {
+   "path": "layer-00044-experts-0384-0511.safetensors",
+   "status": "ok",
+   "hash": "e91039a72f3441d56ab33ba282ced4a19e6bdd304330668bbdc7a9d33a4836a3"
+  },
+  {
+   "path": "layer-00045-experts-0000-0127.complete.json",
+   "status": "ok",
+   "hash": "ab5d708ccd2585c7fa929d6d4d25d33aab79dc0a"
+  },
+  {
+   "path": "layer-00045-experts-0000-0127.safetensors",
+   "status": "ok",
+   "hash": "6b4663f20730626d814f11a50d90cc17b6e5be1dd87009e39ca4837538db54d0"
+  },
+  {
+   "path": "layer-00045-experts-0128-0255.complete.json",
+   "status": "ok",
+   "hash": "c90045ab5dfeefa7d3ae16da1445b76d57b07bf2"
+  },
+  {
+   "path": "layer-00045-experts-0128-0255.safetensors",
+   "status": "ok",
+   "hash": "af1babf5b99606b70c8678ada7f75fca9c7db39147ea1dd54eada8ca0ec71892"
+  },
+  {
+   "path": "layer-00045-experts-0256-0383.complete.json",
+   "status": "ok",
+   "hash": "cb55a11463f4b895eefa3abc6f932985f2c45785"
+  },
+  {
+   "path": "layer-00045-experts-0256-0383.safetensors",
+   "status": "ok",
+   "hash": "800bbc3b5b223fdef3d9279ec5264896cc1f0c06e2a6a12e923ebd2d939c9e87"
+  },
+  {
+   "path": "layer-00045-experts-0384-0511.complete.json",
+   "status": "ok",
+   "hash": "dca35b7850124f903f7e4e6fd733502d80ca370e"
+  },
+  {
+   "path": "layer-00045-experts-0384-0511.safetensors",
+   "status": "ok",
+   "hash": "6a674a58b9aad03755c21d42a1178ddcad06d65328e290910320946839c4ae9b"
+  },
+  {
+   "path": "layer-00046-experts-0000-0127.complete.json",
+   "status": "ok",
+   "hash": "fe3ebab119a1d692f6f884fdc2b5bd547a1351b2"
+  },
+  {
+   "path": "layer-00046-experts-0000-0127.safetensors",
+   "status": "ok",
+   "hash": "8e4e00860f4a7bd95b83ea2e31465a021fb3028ab74a39c98a15604d78ac1dc4"
+  },
+  {
+   "path": "layer-00046-experts-0128-0255.complete.json",
+   "status": "ok",
+   "hash": "4c6f25e743a9377aeb11bcebe3d2a2f489df92d3"
+  },
+  {
+   "path": "layer-00046-experts-0128-0255.safetensors",
+   "status": "ok",
+   "hash": "bae896040e1e3ac32f30f141f4fae5e61d0deac63814eab285b16f413dfb3c5c"
+  },
+  {
+   "path": "layer-00046-experts-0256-0383.complete.json",
+   "status": "ok",
+   "hash": "0b8aa13a74a68e5b11248dc9f89bd510bf98dc0f"
+  },
+  {
+   "path": "layer-00046-experts-0256-0383.safetensors",
+   "status": "ok",
+   "hash": "10d5537a449a1a2ed75187040a668111dfa42f13aa5dcd3686b099237dd465b4"
+  },
+  {
+   "path": "layer-00046-experts-0384-0511.complete.json",
+   "status": "ok",
+   "hash": "1a162a123e05d43f852754cbc31f390c46048a59"
+  },
+  {
+   "path": "layer-00046-experts-0384-0511.safetensors",
+   "status": "ok",
+   "hash": "02f108a39b01e72f8c745f52aeaa93b2048d3051bbe8858d45f19dbc06056ece"
+  },
+  {
+   "path": "layer-00047-experts-0000-0127.complete.json",
+   "status": "ok",
+   "hash": "c137f9332c8fdc829d772b4ec42a1d72836e9f2d"
+  },
+  {
+   "path": "layer-00047-experts-0000-0127.safetensors",
+   "status": "ok",
+   "hash": "ffb11d556f354b7cfbe516a48b3223c9a0b344498c36d60de384eaea9b056c33"
+  },
+  {
+   "path": "layer-00047-experts-0128-0255.complete.json",
+   "status": "ok",
+   "hash": "471a0eb1ac8ae6ac8d141cb5505c9391ce564c57"
+  },
+  {
+   "path": "layer-00047-experts-0128-0255.safetensors",
+   "status": "ok",
+   "hash": "86625a4d2f2e5a02f149e0a02255e85593c454812708d8f64dbe974f594ff123"
+  },
+  {
+   "path": "layer-00047-experts-0256-0383.complete.json",
+   "status": "ok",
+   "hash": "bbd023418164140e893dee04553f47d5795d6333"
+  },
+  {
+   "path": "layer-00047-experts-0256-0383.safetensors",
+   "status": "ok",
+   "hash": "49fc6dbad8e129fa444bfe0b263bd43e8b7b8625fa544c0aa95216e71e97327e"
+  },
+  {
+   "path": "layer-00047-experts-0384-0511.complete.json",
+   "status": "ok",
+   "hash": "17f44f339c3df2c5c4e735f0561cc9805bc425af"
+  },
+  {
+   "path": "layer-00047-experts-0384-0511.safetensors",
+   "status": "ok",
+   "hash": "38d3c582a5b60166c9e6747dae816bc0b4fc7da19a130545a055eb1261f7b90a"
+  },
+  {
+   "path": "merges.txt",
+   "status": "ok",
+   "hash": "a494e019ca1502219fd0128658b979e5f05ae8e8"
+  },
+  {
+   "path": "model-bf16-00001.safetensors",
+   "status": "ok",
+   "hash": "5990db4bb32ad7183a1ece76387e0c832c2c96b7cf2576a928e3439f606cef14"
+  },
+  {
+   "path": "model-bf16-00010.safetensors",
+   "status": "ok",
+   "hash": "0c2c3ef0030f5134edca0f3bbffc111cfa5da4b39b839cb8248ec762009be0aa"
+  },
+  {
+   "path": "model-bf16-00011.safetensors",
+   "status": "ok",
+   "hash": "d18b0db2e27fa066b3f8f86913686f572ee29406d971c8f5b0ec2902e3419ad9"
+  },
+  {
+   "path": "model-bf16-00012.safetensors",
+   "status": "ok",
+   "hash": "6c7c599218f8be53472c7b9ab0a9683b753cc187c5b7a49223e22348470b80e2"
+  },
+  {
+   "path": "model-plefp8-00000.safetensors",
+   "status": "ok",
+   "hash": "dc2e845b7edd35bda92834fba3626bf7d199e28d6aceac99fee654aade390cfd"
+  },
+  {
+   "path": "model-plefp8-00001.safetensors",
+   "status": "ok",
+   "hash": "899eaa0716e28594468a1389ee58cb065c23907f1270de3831f5ecb0a4f82d56"
+  },
+  {
+   "path": "model-plefp8-00002.safetensors",
+   "status": "ok",
+   "hash": "06fd8a11abf0419a669f89397b8d70dd6ff42d401e6b2a037c65e49704faaf71"
+  },
+  {
+   "path": "model-plefp8-00003.safetensors",
+   "status": "ok",
+   "hash": "c6aaa1fc08e84eced3c8151ac8679ed943888eba0fcef2556963693430f95bd9"
+  },
+  {
+   "path": "model-plefp8-00004.safetensors",
+   "status": "ok",
+   "hash": "d94e97c96d3ea09208614da016960f3f4b429f47a044c898a51b493f42f74ba2"
+  },
+  {
+   "path": "model-plefp8-00005.safetensors",
+   "status": "ok",
+   "hash": "03d5d4792e14a4ab55bae50bb459624b01786f818bbcfcaed1a5d0235af484c6"
+  },
+  {
+   "path": "model-plefp8-00006.safetensors",
+   "status": "ok",
+   "hash": "586cccbc12383021bc9bc02f206d9b19fbd1672373ed9a5d91e3b0ce34c2418f"
+  },
+  {
+   "path": "model-plefp8-00007.safetensors",
+   "status": "ok",
+   "hash": "c4a23bcc10f3cde6b633e82c282a9a518e3a64d433628283e1bc592c94cf3d6c"
+  },
+  {
+   "path": "model-plefp8-00008.safetensors",
+   "status": "ok",
+   "hash": "2dc8098c0d020bff277c9cf499a6b908e17836b70a5f949dfa24793371c9a87e"
+  },
+  {
+   "path": "model-plefp8-00009.safetensors",
+   "status": "ok",
+   "hash": "61de98b89bb79f386795787d7a76827a26f1e292c26edbb0a1b613da455f5a9c"
+  },
+  {
+   "path": "model.safetensors.index.json",
+   "status": "ok",
+   "hash": "da5ca9c3b65e48e151329e64e141c2fa700bf2f99aec53cc014e4b52a6ff7a84"
+  },
+  {
+   "path": "preprocessor_config.json",
+   "status": "ok",
+   "hash": "2ea84a437d448ff71b08df68fdd949d5cc4ebb64"
+  },
+  {
+   "path": "qualification-notes.md",
+   "status": "ok",
+   "hash": "9840e9481040db8ff62c5651c1304b490e31cb80"
+  },
+  {
+   "path": "smoke_report.json",
+   "status": "ok",
+   "hash": "4c5518dfa1a4994f47a33cfcf94dcb994bd6fa5c"
+  },
+  {
+   "path": "tokenizer.json",
+   "status": "ok",
+   "hash": "0997f410c57a1f4e53b09e4be8f4a172d90edd9564368fb0847030937229b9f3"
+  },
+  {
+   "path": "tokenizer_config.json",
+   "status": "ok",
+   "hash": "5de744b3fca2129d7186979ae47c06be33903243"
+  },
+  {
+   "path": "validate_checkpoint_report.json",
+   "status": "ok",
+   "hash": "777ced6cda16cadb819eb222490fcb5728e102e0"
+  },
+  {
+   "path": "validate_scales_report.json",
+   "status": "ok",
+   "hash": "3c3be68ef4f63f3c96cb9e712d2c01cd5aedceba"
+  },
+  {
+   "path": "video_preprocessor_config.json",
+   "status": "ok",
+   "hash": "3ba673a5ad7d4d13f54155ecd38b2a94a6dac8fe"
+  },
+  {
+   "path": "vocab.json",
+   "status": "ok",
+   "hash": "0aa0ce0658d60ac4a5d609f4eadb0e8e43514176"
+  }
+ ]
+}

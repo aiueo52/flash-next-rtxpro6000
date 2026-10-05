@@ -134,16 +134,34 @@ unit:
 
 The rejection-sampling package did **not** pass the adoption rule we set before measuring it: code-edit
 stayed unresolved. We shipped it anyway for the prose and agent gains (+6 to +10 %). Turn it off with
-`SGLANG_OPT_SPEC_SPARSE_RS=0`. `w4` and `w16` have run the new build only in single-prompt smokes.
+`SGLANG_OPT_SPEC_SPARSE_RS=0`. `w16` has run the new build only in single-prompt smokes (`w4` is in the table below).
 
-Absolute throughput of the shipped build has **not been measured yet** with the protocol above:
+Absolute throughput of the shipped build, measured on 2026-10-06 with the 32 held-out prompts of the
+September study (8 per workload, thinking on, one request at a time, one server start per row, launched the
+way LM Studio launches it). Full table and conditions: [`results/TABLES.md`](results/TABLES.md) section 8;
+raw (stripped) files: `results/runs-1002/pub1006/`.
 
-<!-- TODO-GPU: shipped production build (2026-10-02), greedy and LM Studio sampling, w4 and wa, 4 workloads (code-edit / prose-en / prose-ja / agent-loop), BN1 held-out prompts, several server starts; private MTP head v5 + private token map, as in the tables above -->
+| build | sampling | code-edit | prose-en | prose-ja | agent-loop |
+|---|---|---:|---:|---:|---:|
+| `wa`, private MTP head + private map | greedy | 584 | 253 | 290 | 359 |
+| `wa`, private MTP head + private map | LM Studio default | 568 | 240 | 310¹ | 340 |
+| `w4`, private MTP head + private map | greedy | 382 | 254 | 275 | 339 |
+| **`wa`, public components only**² | greedy | **468** | **232** | **248** | **307** |
+| **`w4`, public components only**² | greedy | **356** | **241** | **254** | **301** |
+| unmodified base fork, W4 (2026-09-02, section 1 prompts)³ | recommended | 211 | 129 | 117 | 174 |
 
-<!-- TODO-GPU: "public components only" row: the same build with the checkpoint's original MTP head + tokenmaps/public/public_49152.pt, same workloads and modes -->
+Mean decode t/s over 8 prompts per cell (client side, thinking tokens included).
+¹ One prompt reached 744 t/s; without it the mean is about 248.
+² The checkpoint's original MTP head (`RadixArk/Qwen3.8-Flash-Next-NVFP4`, all files hash-checked against
+the Hub) + `tokenmaps/public/public_49152.pt`. Same code, flags and launcher as the rows above; only the
+model directory and the token map differ. This is what you get from this repository without our private
+artefacts.
+³ Different, shorter prompts, so indicative only; it is the same baseline row as in the first table.
 
-Until those rows exist, the September tables above are the latest absolute numbers. With only public
-components, expect lower acceptance than with the private head and map. How much lower is not measured.
+Greedy numbers of the shipped build are within a few percent of the September study (`wa` 579 / 255 / 294 /
+358), so the September tables still describe greedy speed; the 2026-10 work mostly helped sampled
+requests. With only public components, `wa` loses about 20 % on code-edit and 8–15 % elsewhere, mainly
+through lower acceptance (code-edit 8.1 vs 10.5 tokens per step).
 
 ## How it works (short version)
 
@@ -215,7 +233,8 @@ build its venv, `patches/flashinfer/apply.sh`, download the NVFP4 checkpoint, us
   were derived from the author's private conversations and agent transcripts. With the public
   checkpoint's original MTP head expect lower acceptance on prose/agent text (the fine-tuned heads
   added roughly 5–10 % there). The published public-data token map shares 72.0 % of its ids with the private
-  one; its speed is not measured yet. Or build your own token map from text you may use (`tokenmaps/README.md`),
+  one. Measured together (original head + public map, 2026-10-06), `wa` was about 20 % slower on code-edit
+  and 8–15 % slower on prose and agent-loop than with the private pair (table in the 2026-10 update). Or build your own token map from text you may use (`tokenmaps/README.md`),
   and train your own head on your own data with [`docs/train-your-own-mtp-head.md`](docs/train-your-own-mtp-head.md)
   (code in [`mtp-train/`](mtp-train/)).
 - **Workloads are narrow.** The headline table uses one prompt per workload; code-edit is an extremely

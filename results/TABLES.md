@@ -158,3 +158,21 @@ measurement; the shipped server ran mem fraction 0.925, chunked prefill 4096 and
 | `runs-1002/ship/w4-greedy.jsonl` (2026-10-02 07:32 JST) | `w4` | greedy | 349 / 3.80 | 246 / 2.39 | 246 / 2.41 | 317 / 3.19 |
 | `runs-1002/ship/w16-lmstudio.jsonl` (2026-10-02 07:39 JST) | `w16` | lmstudio | 539 / 10.77 | 149 / 2.52 | 152 / 2.53 | 242 / 4.44 |
 | `runs-1002/ship/w16-greedy.jsonl` (2026-10-02 07:41 JST) | `w16` | greedy | 557 / 11.35 | 156 / 2.71 | 194 / 3.22 | 262 / 4.78 |
+
+## 8. Shipped build, 8 held-out prompts, private vs public components (2026-10-06 JST)
+
+The 2026-10-02 build (`launch/as-measured/serve-fast.sh`, worktree 7118260ce3) as LM Studio launches it: mem fraction
+0.925, `MAMBA_SLOTS=16`, context 262,144, chunked prefill 4096, one running request. 32 BN1 held-out prompts
+(`bench/workloads/sets/*-v1`, 8 per workload, same caps as section 2), thinking on, one request each,
+**one server start per run** (no restarts, unlike section 2). `public` = the checkpoint's original MTP head
+(`RadixArk/Qwen3.8-Flash-Next-NVFP4`, all 419 files hash-checked against the Hub, `verify-base.json`) +
+`tokenmaps/public/public_49152.pt`; everything else is identical (`effective-*.txt`). `private` = fine-tuned
+MTP head v5 + private 49k map, as in sections 1–7. Cells: mean t/s (min–max) / mean acceptance.
+
+| run | profile / note | sampling | code-edit | prose-en | prose-ja | agent-loop |
+|---|---|---|---|---|---|---|
+| `runs-1002/pub1006/A-prod-wa-greedy.jsonl` (2026-10-06 03:05 JST, n=8) | `wa`, private head + map | greedy | 584 (487–677) / 10.51 | 253 (242–277) / 2.44 | 290 (248–335) / 2.79 | 359 (326–381) / 4.38 |
+| `runs-1002/pub1006/B-prod-w4-greedy.jsonl` (2026-10-06 03:21 JST, n=8) | `w4`, private head + map | greedy | 382 (375–390) / 3.91 | 254 (248–258) / 2.35 | 275 (250–317) / 2.53 | 339 (326–350) / 3.20 |
+| `runs-1002/pub1006/C-prod-wa-lmstudio.jsonl` (2026-10-06 03:40 JST, n=8) | `wa`, private head + map | lmstudio | 568 (486–651) / 10.09 | 240 (218–253) / 2.35 | 310 (231–744) / 3.41 | 340 (322–367) / 4.04 |
+| `runs-1002/pub1006/D-public-wa-greedy.jsonl` (2026-10-06 03:57 JST, n=8) | `wa`, **public components only** | greedy | 468 (401–560) / 8.07 | 232 (224–241) / 2.28 | 248 (223–298) / 2.42 | 307 (291–343) / 3.36 |
+| `runs-1002/pub1006/E-public-w4-greedy.jsonl` (2026-10-06 04:15 JST, n=8) | `w4`, **public components only** | greedy | 356 (321–375) / 3.72 | 241 (224–266) / 2.29 | 254 (239–280) / 2.42 | 301 (294–313) / 2.91 |

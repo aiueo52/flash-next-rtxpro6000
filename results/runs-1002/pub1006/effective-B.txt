@@ -1,0 +1,21 @@
+TARGET_MODEL=/home/user/models/RadixArk/Qwen3.8-Flash-Next-NVFP4-mtpft5
+MEM_FRACTION=0.925
+MAMBA_SLOTS=16
+MAX_TOTAL_TOKENS=262144
+CONTEXT_LENGTH=262144
+PORT=8031
+SGLANG_ADAPTIVE_POLICY=
+SGLANG_OPT_SPEC_SPARSE_RS=1
+PYTHONPATH=/home/user/tools/flashinfer-prod-1002:/home/user/tools/sglang-prod-1002/python
+ARG --speculative-token-map
+ARG /home/user/tools/flash-next-bench/tokenmaps/hot2_49152.pt
+ARG --qwen4-exp-dense-fp8
+ARG shared_expert,attn,linear_attn,lm_head,mtp_dense
+ARG --speculative-draft-model-quantization
+ARG modelopt_fp4
+ARG --enable-metrics
+ARG --speculative-use-rejection-sampling
+ARG --chunked-prefill-size
+ARG 4096
+ARG --max-running-requests
+ARG 1

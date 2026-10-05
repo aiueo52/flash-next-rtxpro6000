@@ -256,6 +256,21 @@ def build() -> str:
           "One prompt per workload, one repeat, after the 2026-10-02 build was installed. Sanity check only, not a",
           "measurement; the shipped server ran mem fraction 0.925, chunked prefill 4096 and one running request.", ""]
     L += ship_table()
+    L += ["", "## 8. Shipped build, 8 held-out prompts, private vs public components (2026-10-06 JST)", "",
+          "The 2026-10-02 build (`launch/as-measured/serve-fast.sh`, worktree 7118260ce3) as LM Studio launches it: mem fraction",
+          "0.925, `MAMBA_SLOTS=16`, context 262,144, chunked prefill 4096, one running request. 32 BN1 held-out prompts",
+          "(`bench/workloads/sets/*-v1`, 8 per workload, same caps as section 2), thinking on, one request each,",
+          "**one server start per run** (no restarts, unlike section 2). `public` = the checkpoint's original MTP head",
+          "(`RadixArk/Qwen3.8-Flash-Next-NVFP4`, all 419 files hash-checked against the Hub, `verify-base.json`) +",
+          "`tokenmaps/public/public_49152.pt`; everything else is identical (`effective-*.txt`). `private` = fine-tuned",
+          "MTP head v5 + private 49k map, as in sections 1–7. Cells: mean t/s (min–max) / mean acceptance.", ""]
+    L += workload_table([
+        ("runs-1002/pub1006/A-prod-wa-greedy.jsonl", "`wa`, private head + map"),
+        ("runs-1002/pub1006/B-prod-w4-greedy.jsonl", "`w4`, private head + map"),
+        ("runs-1002/pub1006/C-prod-wa-lmstudio.jsonl", "`wa`, private head + map"),
+        ("runs-1002/pub1006/D-public-wa-greedy.jsonl", "`wa`, **public components only**"),
+        ("runs-1002/pub1006/E-public-w4-greedy.jsonl", "`w4`, **public components only**"),
+    ], ["code-edit", "prose-en", "prose-ja", "agent-loop"], with_range=True)
     L.append("")
     return "\n".join(L)
 
