@@ -1,4 +1,4 @@
-# The alternative kernel's GPU harness, archived from <worktree>/sv2_bench/gpu_check.py; needs sol_triton_topk.patch applied
+# The alternative kernel's GPU harness, archived from <worktree>/sv2_bench/gpu_check.py; needs alt_triton_topk.patch applied
 # and the file placed back at <worktree>/sv2_bench/ (WORKTREE_ROOT = parents[1]).
 import json
 import statistics

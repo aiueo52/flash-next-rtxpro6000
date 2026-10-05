@@ -1,5 +1,5 @@
 #!/bin/bash
-# Record of the 12:58 run on the worktree with sol_triton_topk.patch applied; that kernel was rejected,
+# Record of the 12:58 run on the worktree with alt_triton_topk.patch applied; that kernel was rejected,
 # so to rerun only the FlashInfer comparison, run step 2 (topk_bench.py) alone.
 # gpu1.sh -- SV2 on the GPU, one lock window after chain4 (FG1 ABBA) exits, so never inside an ABBA:
 #   1. the worktree's sv2_bench/gpu_check.py (the alternative kernel's harness): correctness at V=248320 + timing vs torch.topk;

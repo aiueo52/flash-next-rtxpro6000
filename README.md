@@ -103,7 +103,8 @@ fork. We do not claim to be the fastest.
 
 On 2026-10-01/02 we cut fixed per-step costs, fixed two correctness problems (one in the sampling verify, one in the draft), and
 added rejection sampling. The production build changed on 2026-10-02 (SGLang patches 0106–0121,
-FlashInfer patches 08–10). Every piece has its own flag in `launch/serve-fast.sh`, on by default. Details
+FlashInfer patches 08–10). Every SGLang-side piece has its own flag in `launch/serve-fast.sh`, on by default; the FlashInfer RQ2
+prologue change (patches 08 and 10) has none. Details
 and evidence: [`docs/optimizations.md`](docs/optimizations.md) §H; what did not ship:
 [`docs/rejected.md`](docs/rejected.md) §7; how it was measured: [`docs/measurement.md`](docs/measurement.md) §9.
 

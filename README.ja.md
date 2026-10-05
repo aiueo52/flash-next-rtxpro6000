@@ -93,7 +93,7 @@ AI の言語モデル **Qwen3.8-Flash-Next**(NVFP4 という 4 ビット形式�
 
 2026-10-01〜02 に、1 回の計算ごとにかかる固定の手間を削り、正しさの問題を 2 つ直し(答え合わせ側と先読み役側に 1 つずつ)、
 「確率で受け入れる」答え合わせ(リジェクションサンプリング)を加えました。本番版は 2026-10-02 に切り替えました
-(SGLang への変更 0106〜0121、FlashInfer への変更 08〜10)。どの工夫も `launch/serve-fast.sh` に個別のスイッチがあり、
+(SGLang への変更 0106〜0121、FlashInfer への変更 08〜10)。SGLang 側の工夫はどれも `launch/serve-fast.sh` に個別のスイッチがあり(FlashInfer の RQ2 の変更 08・10 だけはスイッチなし)、
 初期値は ON です。詳しくは `docs/optimizations.md` §H、採用しなかったものは `docs/rejected.md` §7、計測方法は
 `docs/measurement.md` §9(いずれも英語)。
 

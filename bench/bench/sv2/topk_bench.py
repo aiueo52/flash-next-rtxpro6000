@@ -1,6 +1,6 @@
 """SV2 candidates at the sparse verify's shapes (fp32 logits, V = 248320): torch.topk vs FlashInfer's radix
 top_k. Correctness against torch.topk, then GPU time per call. The "triton" rows in runs/sv2/topk1.jsonl come
-from the alternative Triton sparse_topk (bench/sv2/sol_triton_topk.patch on 4f9cf50619; rejected, slower than torch at n >= 8).
+from the alternative Triton sparse_topk (bench/sv2/alt_triton_topk.patch on 4f9cf50619; rejected, slower than torch at n >= 8).
 
 usage (p3 FlashInfer with the rq2u2h cache, no ninja; GPU lock held by the caller):
   PYTHONPATH=~/tools/flashinfer-p3:<wt>/python FLASHINFER_WORKSPACE_BASE=~/.cache/sglang-rq2u2h \

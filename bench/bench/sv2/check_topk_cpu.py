@@ -1,5 +1,5 @@
 """SV2 acceptance test on the CPU (Triton interpreter): sparse_topk(logits, kp) against torch.topk.
-Needs bench/sv2/sol_triton_topk.patch applied to the worktree (an alternative Triton top-k kernel; rejected, not in b92809af70).
+Needs bench/sv2/alt_triton_topk.patch applied to the worktree (an alternative Triton top-k kernel; rejected, not in b92809af70).
 
 usage: CUDA_VISIBLE_DEVICES= TRITON_INTERPRET=1 python check_topk_cpu.py <worktree>
 

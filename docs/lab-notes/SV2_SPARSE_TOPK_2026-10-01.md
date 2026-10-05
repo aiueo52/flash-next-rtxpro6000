@@ -50,8 +50,8 @@ queued behind a sleep; randn rows, peaked within 1 µs):
 
 - The server's rows are bs × draft tokens = 4, 8 or 16 at bs 1 (wa widths 3/7/15).
 - **the implementer's Triton `sparse_topk` (rejected):** correct, but slower than `torch.topk` from 8 rows on (2× at 16
-  rows; one program per row scans the whole row). Kept as `bench/sv2/sol_triton_topk.patch` (on 4f9cf50619)
-  with its tests (`check_topk_cpu.py`, `sol_gpu_check.py`).
+  rows; one program per row scans the whole row). Kept as `bench/sv2/alt_triton_topk.patch` (on 4f9cf50619)
+  with its tests (`check_topk_cpu.py`, `alt_gpu_check.py`).
 - **FI unsorted** is 5 µs faster still but needs a sort before `_sparse_target_probs_kernel` (pivot and cumulative
   top-p read sorted values). `torch.sort` + `gather` cost 8-9 µs (FI sorted, which is unsorted plus those two, minus
   FI unsorted), more than the 5 µs. Sorting inside the Triton kernel is possible (KP ≤ 256) but not done.

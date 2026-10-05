@@ -37,7 +37,7 @@ export SGLANG_FP8_W8A16_GEMV=1 SGLANG_GDN_BA_TRITON_GEMV=1
 export SGLANG_KV_FP8_FUSED_STORE=${SGLANG_KV_FP8_FUSED_STORE:-1}
 # Three-kernel HC norm+mix (~14.3 us vs 19.8 us per call)
 export SGLANG_HC_MIX2=${SGLANG_HC_MIX2:-1}
-# GDN verify reads q/k/v strided at T=16 (needs patches/flashinfer/gdn_wy_T16_strided.patch; bit-identical)
+# GDN verify reads q/k/v strided at T=16 (needs patches/flashinfer/07-gdn-wy-T16-strided-qkv.patch; bit-identical)
 export FLASHINFER_GDN_WY_STRIDED_QKV=${FLASHINFER_GDN_WY_STRIDED_QKV:-1}
 # Draft head writes the logits buffer directly (bit-identical)
 export SGLANG_DRAFT_LOGITS_OUT=${SGLANG_DRAFT_LOGITS_OUT:-1}
@@ -71,10 +71,10 @@ export SGLANG_MTP_LMHEAD_NVFP4=${SGLANG_MTP_LMHEAD_NVFP4:-0}
 export SGLANG_LMHEAD_NVFP4=${SGLANG_LMHEAD_NVFP4:-0}
 # Singleton-route MoE pruning (P1/P2), evaluated inside FlashInfer's fused routing prologue.
 # NOTE: changes the target model's computation (drops low-weight routes to experts used by exactly one
-# verify row). Requires patches/flashinfer/p2-prune-in-prologue.patch. PRUNE_TAU=0 disables it.
+# verify row). Requires patches/flashinfer/06-p2-prune-in-prologue.patch. PRUNE_TAU=0 disables it.
 export SGLANG_MOE_PRUNE_SINGLETON_TAU=${SGLANG_MOE_PRUNE_SINGLETON_TAU:-${PRUNE_TAU:-0.08}}
 export SGLANG_MOE_PRUNE_IN_PROLOGUE=${SGLANG_MOE_PRUNE_IN_PROLOGUE:-1}
-# FlashInfer MoE active-expert group packing (patches/flashinfer/g1-pack-only.patch; opt-in in the csrc)
+# FlashInfer MoE active-expert group packing (patches/flashinfer/05-g1-pack-only.patch; opt-in in the csrc)
 export FLASHINFER_MOE_PACK_GROUPS=${FLASHINFER_MOE_PACK_GROUPS:-1}
 # Programmatic dependent launch for the fork's Triton kernels
 export SGLANG_TRITON_PDL=${SGLANG_TRITON_PDL:-1}
