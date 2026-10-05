@@ -1,0 +1,581 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: aiueo52 <aiueo52@users.noreply.github.com>
+Date: Thu, 1 Oct 2026 13:26:55 +0900
+Subject: [PATCH 114/121] DT1: draft-phase tail glue (SGLANG_OPT_DRAFT_TAIL,
+ default off)
+
+Bit-exact, one flag:
+- EagerRunner: skip the registry input copy when it would be captured into
+  the draft decode graph (the graph already feeds its own static buffers);
+  saves 5-7 replayed copies per draft forward.
+- Draft decode graph: fp32 next_token_logits_buffer, so the draft lm_head
+  writes fp32 directly and the per-forward bf16->fp32 cast is gone.
+- _draft_extend_for_decode, topk=1: one Triton select pass (rows from
+  accept_lens in-kernel, split argmax, hidden row copy) replaces select_index,
+  two gathers, argmax and ones_like.
+
+SGLANG_OPT_DRAFT_TAIL_FUSED_CONF (default off, not bit-exact, ~2e-6 rel):
+the adaptive position-0 confidence comes from the same select pass instead
+of torch top1_prob.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../kernels/ops/speculative/__init__.py       |   1 +
+ .../sglang/kernels/ops/speculative/topk1.py   | 237 ++++++++++++++++++
+ python/sglang/srt/environ.py                  |   6 +
+ .../srt/model_executor/runner/eager_runner.py |  11 +-
+ .../eagle_draft_cuda_graph_runner.py          |  24 ++
+ .../sglang/srt/speculative/eagle_worker_v2.py |  80 +++++-
+ .../ops/speculative/test_spec_topk1.py        |  57 ++++-
+ 7 files changed, 404 insertions(+), 12 deletions(-)
+
+diff --git a/python/sglang/kernels/ops/speculative/__init__.py b/python/sglang/kernels/ops/speculative/__init__.py
+index a67dab0cc9..46553c5145 100644
+--- a/python/sglang/kernels/ops/speculative/__init__.py
++++ b/python/sglang/kernels/ops/speculative/__init__.py
+@@ -19,6 +19,7 @@ _TRITON_KERNELS = [
+     ("spec_tree", "sgl_build_tree_kernel_efficient_triton"),
+     ("spec_tree", "verify_tree_greedy_kernel_triton"),
+     ("topk1", "draft_topk1_postprocess"),
++    ("topk1", "draft_extend_select_topk1"),
+     ("ragged_verify_kernels", "pad_verify_lens_to_bucket"),
+     ("ragged_verify_kernels", "build_qo_indptr"),
+     ("reject_sampling", "chain_speculative_sampling_triton"),
+diff --git a/python/sglang/kernels/ops/speculative/topk1.py b/python/sglang/kernels/ops/speculative/topk1.py
+index 9d4e1e219c..f70069bb58 100644
+--- a/python/sglang/kernels/ops/speculative/topk1.py
++++ b/python/sglang/kernels/ops/speculative/topk1.py
+@@ -216,3 +216,240 @@ def draft_topk1_postprocess(
+         num_warps=1,
+     )
+     return topk_p, topk_index
++
++
++@triton.jit
++def _select_split_argmax(
++    logits_row,
++    rows_out_row,
++    partial_vals,
++    partial_indices,
++    partial_sums,
++    out_offset,
++    split,
++    vocab_size: tl.constexpr,
++    WRITE_ROWS: tl.constexpr,
++    WRITE_PROB: tl.constexpr,
++    BLOCK: tl.constexpr,
++):
++    offsets = split * BLOCK + tl.arange(0, BLOCK)
++    mask = offsets < vocab_size
++    vals = tl.load(logits_row + offsets, mask=mask, other=-float("inf"))
++    if WRITE_ROWS:
++        tl.store(rows_out_row + offsets, vals, mask=mask)
++    vals = vals.to(tl.float32)
++    vals = tl.where(vals == vals, vals, -1e30)
++    max_val = tl.max(vals, axis=0)
++    tl.store(partial_vals + out_offset, max_val)
++    tl.store(partial_indices + out_offset, split * BLOCK + tl.argmax(vals, axis=0))
++    if WRITE_PROB:
++        tl.store(partial_sums + out_offset, tl.sum(tl.exp(vals - max_val), axis=0))
++
++
++@triton.jit
++def _draft_extend_select_partial_kernel(
++    logits,
++    row_src,
++    partial_vals,
++    partial_indices,
++    partial_sums,
++    rows_out,
++    hidden,
++    hidden_out,
++    logits_row_stride,
++    hidden_row_stride,
++    num_rows,
++    hidden_num_rows,
++    num_tokens_per_req,
++    vocab_size: tl.constexpr,
++    hidden_size: tl.constexpr,
++    num_splits: tl.constexpr,
++    ROW_FROM_ACCEPT: tl.constexpr,
++    WRITE_ROWS: tl.constexpr,
++    WRITE_PROB: tl.constexpr,
++    COPY_HIDDEN: tl.constexpr,
++    BLOCK: tl.constexpr,
++    HIDDEN_BLOCK: tl.constexpr,
++):
++    # One program per (output row, vocab split); with COPY_HIDDEN the extra
++    # split index num_splits copies the selected hidden-state row instead.
++    out_row = tl.program_id(0).to(tl.int64)
++    split = tl.program_id(1)
++    row = tl.load(row_src + out_row).to(tl.int64)
++    if ROW_FROM_ACCEPT:
++        row = out_row * num_tokens_per_req + row - 1
++    # Negative rows wrap like torch advanced indexing.
++    lrow = tl.where(row < 0, row + num_rows, row)
++    if COPY_HIDDEN:
++        if split == num_splits:
++            hrow = tl.where(row < 0, row + hidden_num_rows, row)
++            offsets = tl.arange(0, HIDDEN_BLOCK)
++            mask = offsets < hidden_size
++            h = tl.load(hidden + hrow * hidden_row_stride + offsets, mask=mask)
++            tl.store(hidden_out + out_row * hidden_size + offsets, h, mask=mask)
++        else:
++            _select_split_argmax(
++                logits + lrow * logits_row_stride,
++                rows_out + out_row * vocab_size,
++                partial_vals,
++                partial_indices,
++                partial_sums,
++                out_row * num_splits + split,
++                split,
++                vocab_size,
++                WRITE_ROWS,
++                WRITE_PROB,
++                BLOCK,
++            )
++    else:
++        _select_split_argmax(
++            logits + lrow * logits_row_stride,
++            rows_out + out_row * vocab_size,
++            partial_vals,
++            partial_indices,
++            partial_sums,
++            out_row * num_splits + split,
++            split,
++            vocab_size,
++            WRITE_ROWS,
++            WRITE_PROB,
++            BLOCK,
++        )
++
++
++@triton.jit
++def _draft_extend_select_finalize_kernel(
++    partial_vals,
++    partial_indices,
++    partial_sums,
++    topk_p,
++    topk_index,
++    conf_out,
++    num_splits: tl.constexpr,
++    WRITE_PROB: tl.constexpr,
++    BLOCK: tl.constexpr,
++):
++    row = tl.program_id(0)
++    offsets = tl.arange(0, BLOCK)
++    mask = offsets < num_splits
++    vals = tl.load(
++        partial_vals + row * num_splits + offsets, mask=mask, other=-float("inf")
++    )
++    split = tl.argmax(vals, axis=0)
++    if WRITE_PROB:
++        m = tl.max(vals, axis=0)
++        sums = tl.load(
++            partial_sums + row * num_splits + offsets, mask=mask, other=0.0
++        )
++        tl.store(conf_out + row, 1.0 / tl.sum(sums * tl.exp(vals - m), axis=0))
++    index = tl.load(partial_indices + row * num_splits + split).to(tl.int64)
++    tl.store(topk_index + row, index)
++    tl.store(topk_p + row, 1.0)
++
++
++def draft_extend_select_topk1(
++    next_token_logits: torch.Tensor,
++    select_index: Optional[torch.Tensor] = None,
++    hidden_states: Optional[torch.Tensor] = None,
++    write_rows: bool = False,
++    write_prob: bool = False,
++    accept_lens: Optional[torch.Tensor] = None,
++    num_tokens_per_req: int = 0,
++):
++    """topk=1 draft-extend tail: argmax and hidden row of each selected row.
++
++    Rows are ``select_index``, or ``i * num_tokens_per_req + accept_lens[i] - 1``.
++    Returns (topk_p, topk_index, hidden, rows, conf); rows/conf are None unless asked.
++    """
++    assert next_token_logits.ndim == 2
++    assert next_token_logits.stride(1) == 1
++    assert (select_index is None) != (accept_lens is None)
++    row_from_accept = accept_lens is not None
++    row_src = accept_lens if row_from_accept else select_index
++    assert row_src.ndim == 1
++    assert row_src.is_contiguous()
++    assert row_src.device == next_token_logits.device
++    if row_from_accept:
++        assert accept_lens.dtype in (torch.int32, torch.int64)
++        assert num_tokens_per_req > 0
++    else:
++        assert select_index.dtype == torch.int64
++    copy_hidden = hidden_states is not None
++    # Rows may carry trailing dims (e.g. HC streams); the kernel copies flat rows.
++    hidden_rows = hidden_states.flatten(1) if copy_hidden else None
++    if copy_hidden:
++        assert hidden_rows.stride(1) == 1
++        assert hidden_states.device == next_token_logits.device
++
++    device = next_token_logits.device
++    bs = row_src.shape[0]
++    vocab_size = next_token_logits.shape[1]
++    topk_p = torch.empty((bs, 1), dtype=torch.float32, device=device)
++    topk_index = torch.empty((bs, 1), dtype=torch.int64, device=device)
++    hidden_out = (
++        torch.empty(
++            (bs, *hidden_states.shape[1:]), dtype=hidden_states.dtype, device=device
++        )
++        if copy_hidden
++        else None
++    )
++    rows_out = (
++        torch.empty((bs, vocab_size), dtype=next_token_logits.dtype, device=device)
++        if write_rows
++        else None
++    )
++    conf = (
++        torch.empty((bs,), dtype=torch.float32, device=device) if write_prob else None
++    )
++    if bs == 0:
++        return topk_p, topk_index, hidden_out, rows_out, conf
++
++    block = _DRAFT_TOPK1_BLOCK
++    num_splits = triton.cdiv(vocab_size, block)
++    partial_vals = torch.empty((bs, num_splits), dtype=torch.float32, device=device)
++    partial_indices = torch.empty((bs, num_splits), dtype=torch.int32, device=device)
++    partial_sums = (
++        torch.empty((bs, num_splits), dtype=torch.float32, device=device)
++        if write_prob
++        else partial_vals
++    )
++    hidden_size = hidden_rows.shape[1] if copy_hidden else 0
++    # Disabled operands get a valid dummy pointer; constexpr flags gate them off.
++    _draft_extend_select_partial_kernel[(bs, num_splits + int(copy_hidden))](
++        next_token_logits,
++        row_src,
++        partial_vals,
++        partial_indices,
++        partial_sums,
++        rows_out if write_rows else next_token_logits,
++        hidden_rows if copy_hidden else next_token_logits,
++        hidden_out if copy_hidden else next_token_logits,
++        next_token_logits.stride(0),
++        hidden_rows.stride(0) if copy_hidden else 0,
++        next_token_logits.shape[0],
++        hidden_rows.shape[0] if copy_hidden else 0,
++        num_tokens_per_req,
++        vocab_size,
++        hidden_size,
++        num_splits,
++        ROW_FROM_ACCEPT=row_from_accept,
++        WRITE_ROWS=write_rows,
++        WRITE_PROB=write_prob,
++        COPY_HIDDEN=copy_hidden,
++        BLOCK=block,
++        HIDDEN_BLOCK=triton.next_power_of_2(max(hidden_size, 1)),
++        num_warps=8,
++    )
++    _draft_extend_select_finalize_kernel[(bs,)](
++        partial_vals,
++        partial_indices,
++        partial_sums,
++        topk_p,
++        topk_index,
++        conf if write_prob else topk_p,
++        num_splits,
++        WRITE_PROB=write_prob,
++        BLOCK=triton.next_power_of_2(num_splits),
++        num_warps=1,
++    )
++    return topk_p, topk_index, hidden_out, rows_out, conf
+diff --git a/python/sglang/srt/environ.py b/python/sglang/srt/environ.py
+index 3222ec925f..62e81f1c23 100644
+--- a/python/sglang/srt/environ.py
++++ b/python/sglang/srt/environ.py
+@@ -1257,6 +1257,12 @@ class Envs:
+     # grows to claim them and a deployment tuned against the old (wasteful)
+     # footprint loses that much runtime headroom.
+     SGLANG_DRAFT_SKIP_VOCAB_WEIGHTS = EnvBool(False)
++    # Draft tail glue, bit-exact: no eager input copy in the draft graph, fp32
++    # draft logits buffer, fused draft-extend row select + argmax (topk=1).
++    SGLANG_OPT_DRAFT_TAIL = EnvBool(False)
++    # Draft-extend position-0 confidence from the fused argmax pass instead of
++    # torch top1_prob. Needs SGLANG_OPT_DRAFT_TAIL; not bit-exact (fp32 order).
++    SGLANG_OPT_DRAFT_TAIL_FUSED_CONF = EnvBool(False)
+ 
+     # ===================================================================
+     # Multimodal processing
+diff --git a/python/sglang/srt/model_executor/runner/eager_runner.py b/python/sglang/srt/model_executor/runner/eager_runner.py
+index 83caa44d6d..f68c22980d 100644
+--- a/python/sglang/srt/model_executor/runner/eager_runner.py
++++ b/python/sglang/srt/model_executor/runner/eager_runner.py
+@@ -143,6 +143,11 @@ class EagerRunner(BaseRunner):
+             ),
+             dp_size=get_parallel().config.dp_size,
+         )
++        # The draft decode graph already feeds its own static buffers; a copy
++        # captured into it would only be replayed every draft forward.
++        self._draft_capture_no_copy = (
++            envs.SGLANG_OPT_DRAFT_TAIL.get() and mr.is_draft_worker
++        )
+         # Eager has no capture step, so warm up here (run-once via mr._kernel_warmed_up).
+         self.warmup()
+ 
+@@ -177,7 +182,11 @@ class EagerRunner(BaseRunner):
+         """Copy the live batch into the fixed-max eager static buffers (sliced to
+         this batch's shape) — the eager counterpart of the cuda-graph runners'
+         load_batch."""
+-        if envs.SGLANG_EAGER_INPUT_NO_COPY.get():
++        if envs.SGLANG_EAGER_INPUT_NO_COPY.get() or (
++            self._draft_capture_no_copy
++            and forward_batch.forward_mode.is_decode()
++            and torch.cuda.is_current_stream_capturing()
++        ):
+             return replace(forward_batch)
+         raw_bs = forward_batch.batch_size
+         if forward_batch.input_ids is not None:
+diff --git a/python/sglang/srt/speculative/eagle_draft_cuda_graph_runner.py b/python/sglang/srt/speculative/eagle_draft_cuda_graph_runner.py
+index ef00c25b62..eacac26556 100644
+--- a/python/sglang/srt/speculative/eagle_draft_cuda_graph_runner.py
++++ b/python/sglang/srt/speculative/eagle_draft_cuda_graph_runner.py
+@@ -271,6 +271,25 @@ class EAGLEDraftCudaGraphRunner(DecodeCudaGraphRunner):
+             dsa_seed_topk=dsa_seed_topk,
+         )
+         self.buffers.share_buffers()
++        # fp32 target for the draft lm_head (SGLANG_DRAFT_LOGITS_OUT) so no
++        # per-forward bf16->fp32 cast is captured; private, never aliased.
++        hot_token_id = self.eagle_worker.hot_token_id
++        self.draft_logits_buffer = (
++            torch.zeros(
++                (
++                    self.max_num_token,
++                    (
++                        hot_token_id.shape[0]
++                        if hot_token_id is not None
++                        else model_runner.model_config.vocab_size
++                    ),
++                ),
++                dtype=torch.float32,
++                device=self.device,
++            )
++            if envs.SGLANG_OPT_DRAFT_TAIL.get()
++            else None
++        )
+ 
+         self.backend = resolve_decode_backend(self)
+ 
+@@ -447,6 +466,11 @@ class EAGLEDraftCudaGraphRunner(DecodeCudaGraphRunner):
+             capture_hidden_mode=(
+                 spec_info.capture_hidden_mode if spec_info else CaptureHiddenMode.NULL
+             ),
++            next_token_logits_buffer=(
++                self.draft_logits_buffer[:num_tokens]
++                if self.draft_logits_buffer is not None
++                else None
++            ),
+         )
+ 
+         def run_once():
+diff --git a/python/sglang/srt/speculative/eagle_worker_v2.py b/python/sglang/srt/speculative/eagle_worker_v2.py
+index dfd248ceb8..736f4b5278 100644
+--- a/python/sglang/srt/speculative/eagle_worker_v2.py
++++ b/python/sglang/srt/speculative/eagle_worker_v2.py
+@@ -7,7 +7,10 @@ from typing import List, Optional
+ 
+ import torch
+ 
+-from sglang.kernels.ops.speculative.topk1 import draft_topk1_postprocess
++from sglang.kernels.ops.speculative.topk1 import (
++    draft_extend_select_topk1,
++    draft_topk1_postprocess,
++)
+ from sglang.srt.distributed.parallel_state_wrapper import ParallelState
+ from sglang.srt.environ import envs
+ from sglang.srt.hardware_backend.npu.graph_runner.eagle_draft_extend_npu_graph_runner import (
+@@ -27,6 +30,7 @@ from sglang.srt.layers.attention.trtllm_mha_backend import TRTLLMHAAttnBackend
+ from sglang.srt.layers.attention.trtllm_mla_backend import (
+     TRTLLMMLABackend,
+ )
++from sglang.srt.layers.logits_processor import LogitsProcessorOutput
+ from sglang.srt.layers.moe.utils import (
+     draft_model_build_scope,
+     speculative_moe_a2a_backend_context,
+@@ -228,6 +232,23 @@ class EagleDraftWorker(EagleDraftWorkerBase):
+         self.tree_mask_mode = default_tree_mask_mode()
+ 
+         self.plan_stream, self.plan_stream_ctx = get_plan_stream(self.device)
++        # SGLANG_OPT_DRAFT_TAIL: fused row select + argmax for the topk=1 tail of
++        # _draft_extend_for_decode; FUSED_CONF also takes p0 from that pass.
++        self._draft_tail_select = (
++            envs.SGLANG_OPT_DRAFT_TAIL.get()
++            and self.topk == 1
++            and _is_cuda
++            and not get_spec().speculative_use_rejection_sampling
++        )
++        self._draft_tail_fused_conf = (
++            self._draft_tail_select and envs.SGLANG_OPT_DRAFT_TAIL_FUSED_CONF.get()
++        )
++        if envs.SGLANG_OPT_DRAFT_TAIL.get():
++            logger.info(
++                "SGLANG_OPT_DRAFT_TAIL on: draft-extend select %s, fused conf %s",
++                self._draft_tail_select,
++                self._draft_tail_fused_conf,
++            )
+ 
+     def alloc_memory_pool(
+         self,
+@@ -1266,6 +1287,33 @@ class EagleDraftWorker(EagleDraftWorkerBase):
+             self.dsa_extend_topk_buf = buf
+         return buf[:num_tokens]
+ 
++    def _draft_extend_select_tail(
++        self,
++        next_draft_input: EagleDraftInput,
++        draft_logits_output: LogitsProcessorOutput,
++        accept_lens: torch.Tensor,
++    ):
++        # The topk == 1 branch of _draft_extend_for_decode in two launches; p0 is
++        # top1_prob of the gathered rows (bit-exact) unless FUSED_CONF is on.
++        conf_on = self._conf_channel is not None
++        topk_p, topk_index, hidden_states, rows, conf = draft_extend_select_topk1(
++            next_token_logits=draft_logits_output.next_token_logits,
++            hidden_states=draft_logits_output.hidden_states,
++            write_rows=conf_on and not self._draft_tail_fused_conf,
++            write_prob=conf_on and self._draft_tail_fused_conf,
++            accept_lens=accept_lens,
++            num_tokens_per_req=self.speculative_num_draft_tokens,
++        )
++        if conf_on:
++            p0 = conf if self._draft_tail_fused_conf else top1_prob(rows)
++            self._conf_channel.record_position0(p0)
++            if self._chain_conf_buf is not None:
++                n = min(p0.shape[0], self._chain_conf_buf.shape[0])
++                self._chain_conf_buf[:n, 0].copy_(p0[:n])
++        next_draft_input.topk_p = topk_p
++        next_draft_input.topk_index = topk_index
++        next_draft_input.hidden_states = hidden_states
++
+     def _draft_extend_for_decode(
+         self, batch: ScheduleBatch, batch_result: GenerationBatchResult
+     ):
+@@ -1280,16 +1328,19 @@ class EagleDraftWorker(EagleDraftWorkerBase):
+             num_tokens_per_req=self.speculative_num_draft_tokens,
+             num_tokens_for_logprob_per_req=self.speculative_num_draft_tokens,
+         )
+-        select_index = (
+-            torch.arange(
+-                0,
+-                len(batch.seq_lens) * self.speculative_num_draft_tokens,
+-                self.speculative_num_draft_tokens,
+-                device=self.device,
++        # The fused draft tail derives these rows from accept_lens in-kernel.
++        select_index = None
++        if not self._draft_tail_select or self.seed_dsa_topk_from_draft_extend:
++            select_index = (
++                torch.arange(
++                    0,
++                    len(batch.seq_lens) * self.speculative_num_draft_tokens,
++                    self.speculative_num_draft_tokens,
++                    device=self.device,
++                )
++                + batch_result.accept_lens
++                - 1
+             )
+-            + batch_result.accept_lens
+-            - 1
+-        )
+ 
+         # Cast to int64 before entering plan stream to avoid cross-stream
+         # synchronization issues with .to() inside the plan stream context.
+@@ -1369,6 +1420,15 @@ class EagleDraftWorker(EagleDraftWorkerBase):
+             dsa_seed_topk_indices = dsa_extend_topk_capture[select_index]
+ 
+         # Reorganize the spec info for the next batch
++        if self._draft_tail_select:
++            self._draft_extend_select_tail(
++                next_draft_input=batch_result.next_draft_input,
++                draft_logits_output=draft_logits_output,
++                accept_lens=batch_result.accept_lens,
++            )
++            if self.seed_dsa_topk_from_draft_extend:
++                batch_result.next_draft_input.dsa_topk_indices = dsa_seed_topk_indices
++            return
+         draft_logits_output.next_token_logits = draft_logits_output.next_token_logits[
+             select_index
+         ]
+diff --git a/test/registered/kernels/ops/speculative/test_spec_topk1.py b/test/registered/kernels/ops/speculative/test_spec_topk1.py
+index c0396cf838..b83fccf630 100644
+--- a/test/registered/kernels/ops/speculative/test_spec_topk1.py
++++ b/test/registered/kernels/ops/speculative/test_spec_topk1.py
+@@ -6,7 +6,10 @@ import unittest
+ 
+ import torch
+ 
+-from sglang.kernels.ops.speculative.topk1 import draft_topk1_postprocess
++from sglang.kernels.ops.speculative.topk1 import (
++    draft_extend_select_topk1,
++    draft_topk1_postprocess,
++)
+ from sglang.test.test_utils import CustomTestCase
+ 
+ 
+@@ -158,6 +161,58 @@ class TestSpecTopk1Triton(CustomTestCase):
+         with self.assertRaises(AssertionError):
+             draft_topk1_postprocess(torch.empty((4, 16), device=self.device), positions)
+ 
++    def test_draft_extend_select_matches_torch_tail(self):
++        # Bit-identical to logits[sel].argmax / hidden[sel] (the torch tail it
++        # replaces), incl. first-max ties that span vocab splits.
++        bs, width, vocab_size, hidden_size = 3, 8, 49152, 640
++        g = torch.Generator(device=self.device).manual_seed(0)
++        logits = torch.randn(
++            (bs * width, vocab_size), device=self.device, generator=g
++        ).bfloat16()
++        logits = logits.float()
++        logits[:, [100, 9000, 40000]] = 10.0
++        hidden = torch.randn(
++            (bs * width, hidden_size), device=self.device, generator=g
++        ).bfloat16()
++        select_index = torch.tensor([5, 8, 23], device=self.device)
++
++        topk_p, topk_index, hidden_out, rows, _ = draft_extend_select_topk1(
++            next_token_logits=logits,
++            select_index=select_index,
++            hidden_states=hidden,
++            write_rows=True,
++        )
++        _, _, _, _, conf = draft_extend_select_topk1(
++            next_token_logits=logits, select_index=select_index, write_prob=True
++        )
++
++        expected_rows = logits[select_index]
++        torch.testing.assert_close(
++            topk_index,
++            torch.argmax(expected_rows, dim=-1, keepdim=True),
++            rtol=0,
++            atol=0,
++        )
++        self.assertEqual(topk_index.view(-1).tolist(), [100] * bs)
++        torch.testing.assert_close(topk_p, torch.ones_like(topk_p), rtol=0, atol=0)
++        torch.testing.assert_close(hidden_out, hidden[select_index], rtol=0, atol=0)
++        torch.testing.assert_close(rows, expected_rows, rtol=0, atol=0)
++        expected_conf = (
++            expected_rows.amax(dim=-1) - torch.logsumexp(expected_rows, dim=-1)
++        ).exp()
++        torch.testing.assert_close(conf, expected_conf, rtol=1e-5, atol=0)
++
++        # Same rows from accept_lens: i * width + accept_lens[i] - 1.
++        accept_lens = torch.tensor([6, 1, 8], dtype=torch.int32, device=self.device)
++        _, index_from_accept, hidden_from_accept, _, _ = draft_extend_select_topk1(
++            next_token_logits=logits,
++            hidden_states=hidden,
++            accept_lens=accept_lens,
++            num_tokens_per_req=width,
++        )
++        torch.testing.assert_close(index_from_accept, topk_index, rtol=0, atol=0)
++        torch.testing.assert_close(hidden_from_accept, hidden_out, rtol=0, atol=0)
++
+ 
+ if __name__ == "__main__":
+     unittest.main()
+-- 
+2.43.0
+

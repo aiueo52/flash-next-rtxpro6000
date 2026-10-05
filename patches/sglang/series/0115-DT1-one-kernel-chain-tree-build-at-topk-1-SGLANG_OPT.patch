@@ -1,0 +1,373 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: aiueo52 <aiueo52@users.noreply.github.com>
+Date: Thu, 1 Oct 2026 14:03:46 +0900
+Subject: [PATCH 115/121] DT1: one-kernel chain tree build at topk=1
+ (SGLANG_OPT_DRAFT_TAIL)
+
+Under SGLANG_OPT_DRAFT_TAIL, topk=1, CUDA, FULL_MASK or QLEN_ONLY bool mask:
+build_tree_kernel_efficient builds the chain tree (positions, retrieve
+index/next/sibling, verify tokens, mask cells) with one Triton kernel instead
+of torch.cat + retrieve torch.full + build_tree_efficient. The prefix mask fill
+is unchanged. Bit-exact vs the sgl_kernel path (84 GPU cases); epilogue
+-4.8 / -8.1..-8.6 / -21.2..-29.0 us per step at 3 / 7 / 15 draft steps.
+
+Also: inventory entry for build_chain_tree_topk1, black line fix in the
+draft-extend select finalize kernel.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../kernels/ops/speculative/__init__.py       |   1 +
+ .../sglang/kernels/ops/speculative/topk1.py   | 104 +++++++++++++++++-
+ python/sglang/srt/environ.py                  |   4 +-
+ python/sglang/srt/speculative/eagle_utils.py  |  38 ++++++-
+ .../srt/speculative/eagle_worker_common.py    |   2 +
+ .../sglang/srt/speculative/eagle_worker_v2.py |   7 +-
+ .../ops/speculative/test_spec_topk1.py        |  65 +++++++++++
+ 7 files changed, 214 insertions(+), 7 deletions(-)
+
+diff --git a/python/sglang/kernels/ops/speculative/__init__.py b/python/sglang/kernels/ops/speculative/__init__.py
+index 46553c5145..b31d4f157a 100644
+--- a/python/sglang/kernels/ops/speculative/__init__.py
++++ b/python/sglang/kernels/ops/speculative/__init__.py
+@@ -20,6 +20,7 @@ _TRITON_KERNELS = [
+     ("spec_tree", "verify_tree_greedy_kernel_triton"),
+     ("topk1", "draft_topk1_postprocess"),
+     ("topk1", "draft_extend_select_topk1"),
++    ("topk1", "build_chain_tree_topk1"),
+     ("ragged_verify_kernels", "pad_verify_lens_to_bucket"),
+     ("ragged_verify_kernels", "build_qo_indptr"),
+     ("reject_sampling", "chain_speculative_sampling_triton"),
+diff --git a/python/sglang/kernels/ops/speculative/topk1.py b/python/sglang/kernels/ops/speculative/topk1.py
+index f70069bb58..564ad51a05 100644
+--- a/python/sglang/kernels/ops/speculative/topk1.py
++++ b/python/sglang/kernels/ops/speculative/topk1.py
+@@ -338,9 +338,7 @@ def _draft_extend_select_finalize_kernel(
+     split = tl.argmax(vals, axis=0)
+     if WRITE_PROB:
+         m = tl.max(vals, axis=0)
+-        sums = tl.load(
+-            partial_sums + row * num_splits + offsets, mask=mask, other=0.0
+-        )
++        sums = tl.load(partial_sums + row * num_splits + offsets, mask=mask, other=0.0)
+         tl.store(conf_out + row, 1.0 / tl.sum(sums * tl.exp(vals - m), axis=0))
+     index = tl.load(partial_indices + row * num_splits + split).to(tl.int64)
+     tl.store(topk_index + row, index)
+@@ -453,3 +451,103 @@ def draft_extend_select_topk1(
+         num_warps=1,
+     )
+     return topk_p, topk_index, hidden_out, rows_out, conf
++
++
++@triton.jit
++def _chain_tree_topk1_kernel(
++    bonus_tokens,
++    draft_tokens,
++    seq_lens,
++    tree_mask,
++    positions,
++    retrieve,
++    tokens_out,
++    draft_tokens_stride,
++    bs,
++    num_tokens: tl.constexpr,
++    FULL_MASK: tl.constexpr,
++    BLOCK: tl.constexpr,
++):
++    pid = tl.program_id(0)
++    b = pid.to(tl.int64)
++    i = tl.arange(0, BLOCK)
++    valid = i < num_tokens
++    base = b * num_tokens
++    seq_len = tl.load(seq_lens + b).to(tl.int64)
++    tl.store(positions + base + i, seq_len + i, mask=valid)
++    # retrieve is [3, bs, num_tokens]: flat token index, next token, next sibling.
++    plane = bs * num_tokens
++    tl.store(retrieve + base + i, base + i, mask=valid)
++    next_token = tl.where(i < num_tokens - 1, i + 1, -1)
++    tl.store(retrieve + plane + base + i, next_token, mask=valid)
++    tl.store(
++        retrieve + 2 * plane + base + i, tl.full([BLOCK], -1, tl.int64), mask=valid
++    )
++    bonus = tl.load(bonus_tokens + b)
++    draft = tl.load(
++        draft_tokens + b * draft_tokens_stride + i - 1, mask=valid & (i > 0), other=0
++    )
++    tl.store(tokens_out + base + i, tl.where(i == 0, bonus, draft), mask=valid)
++    # Row x of the tree block attends to draft tokens 0..x.
++    x = tl.arange(0, BLOCK)[:, None]
++    j = tl.arange(0, BLOCK)[None, :]
++    if FULL_MASK:
++        prefix = seq_len * 0
++        for k in range(0, pid):
++            prefix += tl.load(seq_lens + k).to(tl.int64)
++        row = (
++            num_tokens * num_tokens * b
++            + prefix * num_tokens
++            + (seq_len + num_tokens) * x
++        )
++        offs = row + seq_len + j
++    else:
++        offs = num_tokens * num_tokens * b + num_tokens * x + j
++    tl.store(tree_mask + offs, j <= x, mask=(x < num_tokens) & (j < num_tokens))
++
++
++def build_chain_tree_topk1(
++    bonus_tokens: torch.Tensor,
++    draft_tokens: torch.Tensor,
++    seq_lens: torch.Tensor,
++    tree_mask: torch.Tensor,
++    full_mask: bool,
++):
++    """topk=1 ``build_tree_kernel_efficient``: the draft tree is a chain.
++
++    Writes the tree cells of the FULL_MASK or QLEN_ONLY bool ``tree_mask`` and
++    returns (positions, retrieve_index, retrieve_next_token, retrieve_next_sibling, tokens).
++    """
++    bs, num_steps = draft_tokens.shape
++    num_tokens = num_steps + 1
++    assert bonus_tokens.shape == (bs,) and bonus_tokens.is_contiguous()
++    assert seq_lens.shape == (bs,) and seq_lens.is_contiguous()
++    assert draft_tokens.stride(1) == 1
++    assert tree_mask.dtype == torch.bool
++    device = draft_tokens.device
++    positions = torch.empty((bs * num_tokens,), dtype=torch.long, device=device)
++    retrieve = torch.empty((3, bs, num_tokens), dtype=torch.long, device=device)
++    # torch.cat promotes the int32 bonus tokens to the draft dtype.
++    tokens = torch.empty(
++        (bs * num_tokens,),
++        dtype=torch.promote_types(bonus_tokens.dtype, draft_tokens.dtype),
++        device=device,
++    )
++    if bs > 0:
++        _chain_tree_topk1_kernel[(bs,)](
++            bonus_tokens,
++            draft_tokens,
++            seq_lens,
++            tree_mask,
++            positions,
++            retrieve,
++            tokens,
++            draft_tokens.stride(0),
++            bs,
++            num_tokens=num_tokens,
++            FULL_MASK=full_mask,
++            BLOCK=triton.next_power_of_2(num_tokens),
++            num_warps=1,
++        )
++    retrieve_index, retrieve_next_token, retrieve_next_sibling = retrieve
++    return positions, retrieve_index, retrieve_next_token, retrieve_next_sibling, tokens
+diff --git a/python/sglang/srt/environ.py b/python/sglang/srt/environ.py
+index 62e81f1c23..149b565904 100644
+--- a/python/sglang/srt/environ.py
++++ b/python/sglang/srt/environ.py
+@@ -1257,8 +1257,8 @@ class Envs:
+     # grows to claim them and a deployment tuned against the old (wasteful)
+     # footprint loses that much runtime headroom.
+     SGLANG_DRAFT_SKIP_VOCAB_WEIGHTS = EnvBool(False)
+-    # Draft tail glue, bit-exact: no eager input copy in the draft graph, fp32
+-    # draft logits buffer, fused draft-extend row select + argmax (topk=1).
++    # Draft tail glue, bit-exact: no eager input copy in the draft graph, fp32 draft
++    # logits, fused draft-extend select + argmax, one-kernel chain tree (topk=1).
+     SGLANG_OPT_DRAFT_TAIL = EnvBool(False)
+     # Draft-extend position-0 confidence from the fused argmax pass instead of
+     # torch top1_prob. Needs SGLANG_OPT_DRAFT_TAIL; not bit-exact (fp32 order).
+diff --git a/python/sglang/srt/speculative/eagle_utils.py b/python/sglang/srt/speculative/eagle_utils.py
+index 4779af5e95..f1454a954f 100644
+--- a/python/sglang/srt/speculative/eagle_utils.py
++++ b/python/sglang/srt/speculative/eagle_utils.py
+@@ -11,6 +11,7 @@ from sglang.kernels.ops.speculative.spec_tree import (
+     sgl_build_tree_kernel_efficient_triton,
+     verify_tree_greedy_kernel_triton,
+ )
++from sglang.kernels.ops.speculative.topk1 import build_chain_tree_topk1
+ from sglang.srt.hardware_backend.npu.dsv4.dsv4_common_hooks import (
+     maybe_build_dsv4_verify_bundle,
+ )
+@@ -166,8 +167,19 @@ def build_tree_kernel_efficient(
+     tree_mask_mode: TreeMaskMode = TreeMaskMode.FULL_MASK,
+     tree_mask_buf: Optional[torch.Tensor] = None,
+     fill_prefix_mask: bool = True,
++    chain_topk1: bool = False,
+ ):
+-    draft_tokens = torch.cat((bonus_tokens.unsqueeze(1), draft_tokens), dim=1).flatten()
++    # SGLANG_OPT_DRAFT_TAIL, topk=1: the tree is a chain; one kernel builds it.
++    chain_topk1 = (
++        chain_topk1
++        and _is_cuda
++        and tree_mask_mode in (TreeMaskMode.FULL_MASK, TreeMaskMode.QLEN_ONLY)
++        and (tree_mask_buf is None or tree_mask_buf.dtype == torch.bool)
++    )
++    if not chain_topk1:
++        draft_tokens = torch.cat(
++            (bonus_tokens.unsqueeze(1), draft_tokens), dim=1
++        ).flatten()
+ 
+     # seq_lens_sum == sum(seq_lens); seq_lens: sequence length without draft tokens
+     bs = seq_lens.numel()
+@@ -218,6 +230,30 @@ def build_tree_kernel_efficient(
+     else:
+         raise NotImplementedError(f"Invalid tree mask: {tree_mask_mode=}")
+ 
++    if chain_topk1:
++        assert draft_tokens.shape[1] + 1 == num_verify_tokens
++        (
++            positions,
++            retrieve_index,
++            retrieve_next_token,
++            retrieve_next_sibling,
++            tokens,
++        ) = build_chain_tree_topk1(
++            bonus_tokens=bonus_tokens,
++            draft_tokens=draft_tokens,
++            seq_lens=seq_lens,
++            tree_mask=tree_mask,
++            full_mask=tree_mask_mode == TreeMaskMode.FULL_MASK,
++        )
++        return (
++            tree_mask,
++            positions,
++            retrieve_index,
++            retrieve_next_token,
++            retrieve_next_sibling,
++            tokens,
++        )
++
+     # TODO: make them torch.empty and fuse them into `sgl_build_tree_kernel`
+     retrieve_buf = torch.full(
+         (3, bs, num_verify_tokens), -1, device=device, dtype=torch.long
+diff --git a/python/sglang/srt/speculative/eagle_worker_common.py b/python/sglang/srt/speculative/eagle_worker_common.py
+index 91ce8a1476..a531f35186 100644
+--- a/python/sglang/srt/speculative/eagle_worker_common.py
++++ b/python/sglang/srt/speculative/eagle_worker_common.py
+@@ -327,6 +327,7 @@ def build_eagle_verify_input(
+     num_draft_tokens: int,
+     tree_mask_mode: TreeMaskMode,
+     device: str,
++    chain_topk1: bool = False,
+ ) -> EagleVerifyInput:
+     """Shared draft() tail: idle input, tree-mask build, EagleVerifyInput assembly.
+ 
+@@ -383,6 +384,7 @@ def build_eagle_verify_input(
+         mask_mode,
+         tree_mask_buf,
+         fill_prefix_mask=fill_mask,
++        chain_topk1=chain_topk1,
+     )
+ 
+     return EagleVerifyInput(
+diff --git a/python/sglang/srt/speculative/eagle_worker_v2.py b/python/sglang/srt/speculative/eagle_worker_v2.py
+index 736f4b5278..77b2cad1c8 100644
+--- a/python/sglang/srt/speculative/eagle_worker_v2.py
++++ b/python/sglang/srt/speculative/eagle_worker_v2.py
+@@ -243,11 +243,15 @@ class EagleDraftWorker(EagleDraftWorkerBase):
+         self._draft_tail_fused_conf = (
+             self._draft_tail_select and envs.SGLANG_OPT_DRAFT_TAIL_FUSED_CONF.get()
+         )
++        # Chain tree build in the draft phase epilogue (build_tree_kernel_efficient).
++        self._draft_tail_chain = envs.SGLANG_OPT_DRAFT_TAIL.get() and self.topk == 1
+         if envs.SGLANG_OPT_DRAFT_TAIL.get():
+             logger.info(
+-                "SGLANG_OPT_DRAFT_TAIL on: draft-extend select %s, fused conf %s",
++                "SGLANG_OPT_DRAFT_TAIL on: draft-extend select %s, fused conf %s, "
++                "chain tree %s",
+                 self._draft_tail_select,
+                 self._draft_tail_fused_conf,
++                self._draft_tail_chain,
+             )
+ 
+     def alloc_memory_pool(
+@@ -856,6 +860,7 @@ class EagleDraftWorker(EagleDraftWorkerBase):
+             num_draft_tokens=self.speculative_num_draft_tokens,
+             tree_mask_mode=self.tree_mask_mode,
+             device=self.device,
++            chain_topk1=self._draft_tail_chain,
+         )
+ 
+     def _record_position0_confidence(self, next_token_logits: torch.Tensor):
+diff --git a/test/registered/kernels/ops/speculative/test_spec_topk1.py b/test/registered/kernels/ops/speculative/test_spec_topk1.py
+index b83fccf630..fe57e3c297 100644
+--- a/test/registered/kernels/ops/speculative/test_spec_topk1.py
++++ b/test/registered/kernels/ops/speculative/test_spec_topk1.py
+@@ -6,7 +6,11 @@ import unittest
+ 
+ import torch
+ 
++from sglang.kernels.ops.speculative.spec_tree import (
++    sgl_build_tree_kernel_efficient_triton,
++)
+ from sglang.kernels.ops.speculative.topk1 import (
++    build_chain_tree_topk1,
+     draft_extend_select_topk1,
+     draft_topk1_postprocess,
+ )
+@@ -213,6 +217,67 @@ class TestSpecTopk1Triton(CustomTestCase):
+         torch.testing.assert_close(index_from_accept, topk_index, rtol=0, atol=0)
+         torch.testing.assert_close(hidden_from_accept, hidden_out, rtol=0, atol=0)
+ 
++    def test_chain_tree_matches_reference_tree_build(self):
++        g = torch.Generator(device=self.device).manual_seed(5)
++        for bs, steps, full_mask in ((1, 3, True), (3, 7, True), (2, 15, False)):
++            T = steps + 1
++            seq_lens = torch.randint(
++                3, 400, (bs,), generator=g, device=self.device, dtype=torch.int64
++            )
++            numel = T * T * bs + (int(seq_lens.sum()) * T if full_mask else 0)
++            init = torch.randint(0, 2, (numel,), generator=g, device=self.device).bool()
++            parents = torch.arange(
++                -1, steps - 1, dtype=torch.long, device=self.device
++            ).repeat(bs, 1)
++            scores = torch.arange(steps, dtype=torch.long, device=self.device).repeat(
++                bs, 1
++            )
++            bonus = torch.randint(
++                0, 1000, (bs,), generator=g, device=self.device, dtype=torch.int32
++            )
++            draft = torch.randint(
++                0, 1000, (bs, steps), generator=g, device=self.device, dtype=torch.int64
++            )
++            mask_ref = init.clone()
++            retrieve_ref = torch.full(
++                (3, bs, T), -1, dtype=torch.long, device=self.device
++            )
++            positions_ref = torch.empty((bs * T,), dtype=torch.long, device=self.device)
++            sgl_build_tree_kernel_efficient_triton[(bs,)](
++                parents,
++                scores,
++                seq_lens,
++                torch.cumsum(seq_lens, dim=0) - seq_lens,
++                mask_ref,
++                positions_ref,
++                retrieve_ref[0],
++                retrieve_ref[1],
++                retrieve_ref[2],
++                topk=1,
++                depth=steps,
++                draft_token_num=T,
++                tree_mask_mode=0 if full_mask else 1,
++                batch_size=bs,
++                parent_list_stride=parents.stride(0),
++                selected_index_stride=scores.stride(0),
++            )
++            mask = init.clone()
++            positions, index, next_token, next_sibling, tokens = build_chain_tree_topk1(
++                bonus_tokens=bonus,
++                draft_tokens=draft,
++                seq_lens=seq_lens,
++                tree_mask=mask,
++                full_mask=full_mask,
++            )
++            self.assertTrue(torch.equal(mask, mask_ref))
++            self.assertTrue(torch.equal(positions, positions_ref))
++            self.assertTrue(torch.equal(index, retrieve_ref[0]))
++            self.assertTrue(torch.equal(next_token, retrieve_ref[1]))
++            self.assertTrue(torch.equal(next_sibling, retrieve_ref[2]))
++            self.assertTrue(
++                torch.equal(tokens, torch.cat((bonus[:, None], draft), dim=1).flatten())
++            )
++
+ 
+ if __name__ == "__main__":
+     unittest.main()
+-- 
+2.43.0
+

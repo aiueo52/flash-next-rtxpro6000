@@ -1,0 +1,158 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: aiueo52 <aiueo52@users.noreply.github.com>
+Date: Thu, 1 Oct 2026 03:22:47 +0900
+Subject: [PATCH 107/121] spec: honor min_p in the sampling verify and the RS
+ draft proposal
+
+The speculative sampling verify applied only top-k/top-p, so requests
+with min_p (LM Studio sends 0.05 by default) were verified against a
+wider distribution than the non-speculative sampler uses. Behind
+SGLANG_SPEC_MIN_P (default off), drop p < min_p * max(p) in the verify
+and apply the same rule to the truncated RS draft proposal.
+
+Also registers SGLANG_RS_DRAFT_TOPK in Envs instead of reading
+os.environ directly.
+
+Offline check (N=20000, T=0.8 top_k=40 top_p=0.95 min_p=0.05): output
+distribution matches the target (chi2 p=0.28-0.90); min_p on the
+proposal raises mean accepted length 1.086 -> 1.174.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ python/sglang/srt/environ.py                             | 6 ++++++
+ .../srt/speculative/eagle_draft_cuda_graph_runner.py     | 4 +++-
+ python/sglang/srt/speculative/eagle_utils.py             | 9 +++++++++
+ python/sglang/srt/speculative/eagle_worker_v2.py         | 2 ++
+ python/sglang/srt/speculative/spec_utils.py              | 9 ++++++---
+ 5 files changed, 26 insertions(+), 4 deletions(-)
+
+diff --git a/python/sglang/srt/environ.py b/python/sglang/srt/environ.py
+index 5101bb25c3..90156f9bf1 100644
+--- a/python/sglang/srt/environ.py
++++ b/python/sglang/srt/environ.py
+@@ -1219,6 +1219,12 @@ class Envs:
+     # drafts) -- to this path.  Also turns the confidence side channel on.
+     # Offline-analysis only; never set in production.
+     SGLANG_ADAPTIVE_TRACE = EnvStr("")
++    # Support cap of the truncated rejection-sampling draft proposal; 0 = the
++    # untruncated proposal (A/B only: it also samples greedy requests' drafts).
++    SGLANG_RS_DRAFT_TOPK = EnvInt(64)
++    # Honor min_p in the sampling verify and the RS draft proposal, as the
++    # non-speculative sampler does; off = the verify's top-k/top-p only.
++    SGLANG_SPEC_MIN_P = EnvBool(False)
+     # Kill-switch for the draft-extend cuda graph. Draft extend then always runs
+     # eager. Escape hatch for setups where the capture's memory pool costs more
+     # than the graph saves (e.g. DeepEP MoE workspace captured at full dispatch
+diff --git a/python/sglang/srt/speculative/eagle_draft_cuda_graph_runner.py b/python/sglang/srt/speculative/eagle_draft_cuda_graph_runner.py
+index 078f2bfb3c..ef00c25b62 100644
+--- a/python/sglang/srt/speculative/eagle_draft_cuda_graph_runner.py
++++ b/python/sglang/srt/speculative/eagle_draft_cuda_graph_runner.py
+@@ -217,6 +217,7 @@ class EAGLEDraftCudaGraphRunner(DecodeCudaGraphRunner):
+             # truncates p, so the graph reads the per-request top-k/top-p too.
+             self.top_ks = torch.full((self.max_bs,), TOP_K_ALL, dtype=torch.int32)
+             self.top_ps = torch.ones((self.max_bs,), dtype=torch.float)
++            self.min_ps = torch.zeros((self.max_bs,), dtype=torch.float)
+ 
+             if self.require_gathered_buffer:
+                 if self.require_mlp_tp_gather:
+@@ -411,7 +412,7 @@ class EAGLEDraftCudaGraphRunner(DecodeCudaGraphRunner):
+             temperatures=self.temperatures[:num_seqs],
+             top_ps=self.top_ps[:num_seqs],
+             top_ks=self.top_ks[:num_seqs],
+-            min_ps=torch.zeros((num_seqs,), dtype=torch.float),
++            min_ps=self.min_ps[:num_seqs],
+             is_all_greedy=False,
+             is_any_greedy=False,
+             need_top_p_sampling=False,
+@@ -619,6 +620,7 @@ class EAGLEDraftCudaGraphRunner(DecodeCudaGraphRunner):
+             )
+             self.top_ks[:raw_bs].copy_(forward_batch.sampling_info.top_ks[:raw_bs])
+             self.top_ps[:raw_bs].copy_(forward_batch.sampling_info.top_ps[:raw_bs])
++            self.min_ps[:raw_bs].copy_(forward_batch.sampling_info.min_ps[:raw_bs])
+ 
+         # TODO(ch-wan): support num_token_non_padded
+         if self.require_gathered_buffer:
+diff --git a/python/sglang/srt/speculative/eagle_utils.py b/python/sglang/srt/speculative/eagle_utils.py
+index 28cf4610c7..ae129951e4 100644
+--- a/python/sglang/srt/speculative/eagle_utils.py
++++ b/python/sglang/srt/speculative/eagle_utils.py
+@@ -29,6 +29,7 @@ from sglang.srt.utils import (
+     is_npu,
+     is_xpu,
+ )
++from sglang.srt.speculative.spec_utils import SPEC_MIN_P
+ from sglang.srt.utils.async_probe import maybe_detect_oob
+ 
+ if TYPE_CHECKING:
+@@ -807,6 +808,14 @@ def eagle_sample(
+                 maybe_detect_nan(
+                     target_probs, "v2 verify: target_probs after top_p_renorm"
+                 )
++            if SPEC_MIN_P and sampling_info.need_min_p_sampling:
++                # Same rule as the non-speculative sampler: drop p < min_p * max(p).
++                min_ps = torch.repeat_interleave(
++                    sampling_info.min_ps, verify_input.draft_token_num, dim=0
++                ).unsqueeze(1)
++                keep = target_probs >= target_probs.amax(dim=-1, keepdim=True) * min_ps
++                target_probs = target_probs * keep
++                target_probs = target_probs / target_probs.sum(dim=-1, keepdim=True)
+             target_probs = target_probs.reshape(bs, verify_input.draft_token_num, -1)
+             draft_probs = (
+                 verify_input.draft_probs
+diff --git a/python/sglang/srt/speculative/eagle_worker_v2.py b/python/sglang/srt/speculative/eagle_worker_v2.py
+index 4ae4a4fe32..dfd248ceb8 100644
+--- a/python/sglang/srt/speculative/eagle_worker_v2.py
++++ b/python/sglang/srt/speculative/eagle_worker_v2.py
+@@ -100,6 +100,7 @@ from sglang.srt.speculative.spec_utils import (
+     get_plan_stream,
+     load_token_map,
+     RS_DRAFT_TOPK,
++    SPEC_MIN_P,
+     renorm_draft_probs,
+     sample_draft_proposal,
+     sample_draft_proposal_truncated,
+@@ -869,6 +870,7 @@ class EagleDraftWorker(EagleDraftWorkerBase):
+                 sampling_info.top_ks,
+                 sampling_info.top_ps,
+                 RS_DRAFT_TOPK,
++                min_ps=sampling_info.min_ps if SPEC_MIN_P else None,
+             )
+             if self.hot_token_id is not None:
+                 ids = self.hot_token_id[ids]
+diff --git a/python/sglang/srt/speculative/spec_utils.py b/python/sglang/srt/speculative/spec_utils.py
+index 7f92384aa2..499bc03fd9 100644
+--- a/python/sglang/srt/speculative/spec_utils.py
++++ b/python/sglang/srt/speculative/spec_utils.py
+@@ -180,9 +180,8 @@ def sample_draft_proposal(next_token_logits: torch.Tensor, temperatures: torch.T
+     return probs, topk_p, topk_index
+ 
+ 
+-# Support cap of the truncated rejection-sampling proposal; 0 = the untruncated
+-# sample_draft_proposal above (A/B only: it also samples greedy requests' drafts).
+-RS_DRAFT_TOPK = int(os.environ.get("SGLANG_RS_DRAFT_TOPK", "64"))
++RS_DRAFT_TOPK = envs.SGLANG_RS_DRAFT_TOPK.get()
++SPEC_MIN_P = envs.SGLANG_SPEC_MIN_P.get()
+ 
+ 
+ def sample_draft_proposal_truncated(
+@@ -191,6 +190,7 @@ def sample_draft_proposal_truncated(
+     top_ks: torch.Tensor,
+     top_ps: torch.Tensor,
+     k_cap: int,
++    min_ps: Optional[torch.Tensor] = None,
+ ):
+     """Leviathan draft proposal on a truncated support.
+ 
+@@ -216,6 +216,9 @@ def sample_draft_proposal_truncated(
+     # same rule top_p_renorm_prob applies to p; rank 0 always survives.
+     exclusive = torch.cumsum(probs, dim=-1) - probs
+     probs = probs * (exclusive < top_ps.unsqueeze(1))
++    if min_ps is not None:
++        # Column 0 is the row max (sorted, and never masked above).
++        probs = probs * (probs >= probs[:, :1] * min_ps.unsqueeze(1))
+     probs = probs / probs.sum(dim=-1, keepdim=True)
+     # X ~ probs by the exponential race (Gumbel-max); zero-mass slots score 0
+     # and rank 0 always has mass, so they are never drawn.
+-- 
+2.43.0
+

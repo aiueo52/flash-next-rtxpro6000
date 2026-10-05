@@ -1,0 +1,133 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: aiueo52 <aiueo52@users.noreply.github.com>
+Date: Thu, 1 Oct 2026 13:10:49 +0900
+Subject: [PATCH 113/121] spec: FlashInfer radix top-k for the sparse verify
+ (SGLANG_OPT_SPEC_SPARSE_TOPK)
+
+torch.topk over the fp32 verify logits (V = 248320) is the largest piece of
+the sparse verify. FlashInfer's top_k with sorted=True, deterministic=True
+sorts on device (no torch.sort + gather) and matches torch.topk values bit for
+bit on randn/peaked/ties/masked rows (k 64/128, 1-32 rows). CUDA-graph GPU time
+per call on RTX PRO 6000 (k=64): 63.6 -> 28.0 us at 4 rows, 60.9 -> 28.9 us at
+8, 68.6 -> 30.4 us at 16.
+
+Off by default. The topk module is JIT-built on first use, so enable it only
+with a FlashInfer cache that already holds a built topk module.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../kernels/ops/speculative/sparse_verify.py  | 11 ++++++++--
+ python/sglang/srt/environ.py                  |  3 +++
+ python/sglang/srt/speculative/eagle_utils.py  | 21 ++++++++++++-------
+ python/sglang/srt/speculative/spec_utils.py   |  1 +
+ 4 files changed, 26 insertions(+), 10 deletions(-)
+
+diff --git a/python/sglang/kernels/ops/speculative/sparse_verify.py b/python/sglang/kernels/ops/speculative/sparse_verify.py
+index 2c3a30c925..3fcbb4be4c 100644
+--- a/python/sglang/kernels/ops/speculative/sparse_verify.py
++++ b/python/sglang/kernels/ops/speculative/sparse_verify.py
+@@ -8,7 +8,8 @@ makes a full-row pass for the final draw. When every request has
+ top_k <= KP, only the KP largest logits of a row can end up non-zero, so this
+ path works on those:
+ 
+-1. torch.topk over the logits (sorted, KP >= max top_k + a margin for ties).
++1. The KP largest logits, sorted (KP >= max top_k + a margin for ties):
++   torch.topk, or FlashInfer's radix top-k with SGLANG_OPT_SPEC_SPARSE_TOPK.
+ 2. `_sparse_target_probs_kernel`, one program per row: temperature, softmax
+    over the kept entries, top-k keeping ties (FlashInfer: p >= pivot), top-p
+    keeping ties (AIR top-p: p >= the value where the cumulative mass reaches
+@@ -26,6 +27,7 @@ cut (KP leaves a margin of at least 8 entries past max top_k).
+ import torch
+ import triton
+ import triton.language as tl
++from flashinfer import top_k as flashinfer_top_k
+ 
+ # Largest top_k the sparse verify accepts; larger (or TOP_K_ALL) -> dense path.
+ SPARSE_VERIFY_MAX_K = 248
+@@ -95,10 +97,15 @@ def sparse_target_probs(
+     kp: int,
+     apply_top_p: bool,
+     apply_min_p: bool,
++    use_flashinfer_topk: bool,
+ ):
+     """Returns (probs [N, kp] float32, token ids [N, kp] int64) for the
+     N = bs * num_draft_tokens rows of `logits`."""
+-    vals, idx = torch.topk(logits, kp, dim=-1, largest=True, sorted=True)
++    if use_flashinfer_topk:
++        # deterministic=True sorts inside the top-k kernel (no torch.sort + gather).
++        vals, idx = flashinfer_top_k(input=logits, k=kp, sorted=True, deterministic=True)
++    else:
++        vals, idx = torch.topk(input=logits, k=kp, dim=-1, largest=True, sorted=True)
+     out = torch.empty((logits.shape[0], kp), dtype=torch.float32, device=logits.device)
+     _sparse_target_probs_kernel[(logits.shape[0],)](
+         vals,
+diff --git a/python/sglang/srt/environ.py b/python/sglang/srt/environ.py
+index 7bf707ed28..3222ec925f 100644
+--- a/python/sglang/srt/environ.py
++++ b/python/sglang/srt/environ.py
+@@ -1235,6 +1235,9 @@ class Envs:
+     # Target-only sampling verify on the top-KP logits instead of full-vocabulary
+     # probabilities, when every request has top_k <= 248; off = the dense verify.
+     SGLANG_OPT_SPEC_SPARSE_VERIFY = EnvBool(False)
++    # FlashInfer radix top-k in that verify instead of torch.topk; the FlashInfer cache
++    # must already hold a built topk module, or the first call JIT-compiles it.
++    SGLANG_OPT_SPEC_SPARSE_TOPK = EnvBool(False)
+     # Kill-switch for the draft-extend cuda graph. Draft extend then always runs
+     # eager. Escape hatch for setups where the capture's memory pool costs more
+     # than the graph saves (e.g. DeepEP MoE workspace captured at full dispatch
+diff --git a/python/sglang/srt/speculative/eagle_utils.py b/python/sglang/srt/speculative/eagle_utils.py
+index 5ccaa1512c..4779af5e95 100644
+--- a/python/sglang/srt/speculative/eagle_utils.py
++++ b/python/sglang/srt/speculative/eagle_utils.py
+@@ -29,7 +29,11 @@ from sglang.srt.utils import (
+     is_npu,
+     is_xpu,
+ )
+-from sglang.srt.speculative.spec_utils import SPEC_MIN_P, SPEC_SPARSE_VERIFY
++from sglang.srt.speculative.spec_utils import (
++    SPEC_MIN_P,
++    SPEC_SPARSE_TOPK,
++    SPEC_SPARSE_VERIFY,
++)
+ from sglang.srt.utils.async_probe import maybe_detect_oob
+ 
+ if TYPE_CHECKING:
+@@ -779,15 +783,16 @@ def eagle_sample(
+ 
+         num_draft = verify_input.draft_token_num
+         target_probs, target_index = sparse_target_probs(
+-            next_token_logits,
+-            sampling_info.temperatures,
+-            sampling_info.top_ks,
+-            sampling_info.top_ps,
+-            sampling_info.min_ps,
+-            num_draft,
+-            sparse_kp,
++            logits=next_token_logits,
++            temperatures=sampling_info.temperatures,
++            top_ks=sampling_info.top_ks,
++            top_ps=sampling_info.top_ps,
++            min_ps=sampling_info.min_ps,
++            num_draft_tokens=num_draft,
++            kp=sparse_kp,
+             apply_top_p=sampling_info.need_top_p_sampling,
+             apply_min_p=SPEC_MIN_P and sampling_info.need_min_p_sampling,
++            use_flashinfer_topk=SPEC_SPARSE_TOPK,
+         )
+         maybe_detect_nan(target_probs, "sparse verify: target_probs")
+         coins, coins_for_final_sampling = _verify_coins(
+diff --git a/python/sglang/srt/speculative/spec_utils.py b/python/sglang/srt/speculative/spec_utils.py
+index 9d974a2b77..ef3e10b0ce 100644
+--- a/python/sglang/srt/speculative/spec_utils.py
++++ b/python/sglang/srt/speculative/spec_utils.py
+@@ -183,6 +183,7 @@ def sample_draft_proposal(next_token_logits: torch.Tensor, temperatures: torch.T
+ RS_DRAFT_TOPK = envs.SGLANG_RS_DRAFT_TOPK.get()
+ SPEC_MIN_P = envs.SGLANG_SPEC_MIN_P.get()
+ SPEC_SPARSE_VERIFY = envs.SGLANG_OPT_SPEC_SPARSE_VERIFY.get()
++SPEC_SPARSE_TOPK = envs.SGLANG_OPT_SPEC_SPARSE_TOPK.get()
+ 
+ 
+ def sample_draft_proposal_truncated(
+-- 
+2.43.0
+

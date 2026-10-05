@@ -1,15 +1,16 @@
 #!/bin/bash
-# Apply the 105-patch series to jpezzulli/sglang-rtxpro6000 at the base commit it was developed on.
+# Apply the 121-patch series to jpezzulli/sglang-rtxpro6000 at the base commit it was developed on.
 #
 #   patches/sglang/apply.sh <path to a clone of https://github.com/jpezzulli/sglang-rtxpro6000>
 #
 # Creates branch `flash-next-fast` at 16e5682aad (branch pennyroyal-main-sm120-final, 2026-08-27) and
-# `git am`s the series. The resulting tree equals the measured production tree (codex/perf-v1 @ 7b4d539f9b)
-# except for publication edits: genericised home paths and project names in scripts/docs, generated
-# text stripped from prof-pdl/greedy-*.json, and the development shell scripts dbg/*.sh and
-# prof-pdl/gpu_session*.sh left out (see patches/README.md). Under python/ and test/ only comments and
-# docstrings in four files were reworded, and the default NVFP4 weight-cache directory in
-# nvfp4_dense.py moved from a path in the author's tools tree to <SGLANG_CACHE_DIR>/nvfp4.
+# `git am`s the series. The resulting tree equals the production tree of 2026-10-02 (7118260ce3, the
+# 0121 merge; through 0105 it is the 2026-09-08 measured tree codex/perf-v1 @ 7b4d539f9b) except for
+# publication edits: genericised home paths and project names in scripts/docs, generated text stripped
+# from prof-pdl/greedy-*.json, and the development shell scripts dbg/*.sh and prof-pdl/gpu_session*.sh
+# left out (see patches/README.md). Under python/ and test/ only comments and docstrings in four files
+# were reworded, and the default NVFP4 weight-cache directory in nvfp4_dense.py moved from a path in
+# the author's tools tree to <SGLANG_CACHE_DIR>/nvfp4. Patches 0106-0121 are unedited.
 set -euo pipefail
 REPO="${1:?usage: $0 <sglang-rtxpro6000 clone>}"
 HERE="$(cd "$(dirname "$0")" && pwd)"

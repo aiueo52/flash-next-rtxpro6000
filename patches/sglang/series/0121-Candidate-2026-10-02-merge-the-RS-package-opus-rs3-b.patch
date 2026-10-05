@@ -1,0 +1,703 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: aiueo52 <aiueo52@users.noreply.github.com>
+Date: Fri, 2 Oct 2026 02:49:49 +0900
+Subject: [PATCH 121/121] Candidate 2026-10-02: merge the RS package
+ (opus/rs3-bv) and XA1 on ST1 (opus/xa-st1)
+
+Both branches contain the stack (73e379d725) and DT1; the merge is clean (only environ.py has
+changes from both sides). Every feature stays behind its env flag, default off. Not shipped: the
+shipping call is the user's (flash-next-bench STACK spec section 5, RS2d spec).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+[linearised for this patch series: this commit is the net effect of merging a side branch; its side-branch commits were:]
+  - QSA decode attention: scan only below seq_len on shared-tail-prefix rows
+  - QSA: opt-in split-KV Triton decode attention (SGLANG_OPT_TRITON_DECODE_ATTN)
+  - QSA MTP shared indices: prefix lookup at 8 warps
+  - QSA MTP shared indices: drafted tail after the valid prefix (SGLANG_ENABLE_QSA_SHARED_TAIL_PREFIX)
+---
+ python/sglang/srt/environ.py                  |   6 +
+ .../srt/layers/attention/qsa/decode_attn.py   | 387 ++++++++++++++++++
+ .../attention/qwen_sparse_attn_backend.py     | 172 +++++++-
+ 3 files changed, 559 insertions(+), 6 deletions(-)
+ create mode 100644 python/sglang/srt/layers/attention/qsa/decode_attn.py
+
+diff --git a/python/sglang/srt/environ.py b/python/sglang/srt/environ.py
+index 514b476efe..df8354f3c3 100644
+--- a/python/sglang/srt/environ.py
++++ b/python/sglang/srt/environ.py
+@@ -320,6 +320,9 @@ class Envs:
+     # Select the FP8 (deep_gemm) tokenwise QSA indexer; only the BF16 reference
+     # path is ported, so setting this fails loudly instead of degrading.
+     SGLANG_QWEN_DSA_USE_FP8_INDEXER = EnvBool(False)
++    # QSA sparse decode/verify attention as one split-KV Triton kernel over the
++    # fp8 KV pool (layers/attention/qsa/decode_attn.py) instead of compaction + XQA.
++    SGLANG_OPT_TRITON_DECODE_ATTN = EnvBool(False)
+     SGLANG_PREFETCH_BLOCK_SIZE_MB = EnvInt(16)
+     SGLANG_GEMMA_OUT_OF_PLACE_POSITION_MUTATION = EnvBool(False)
+     SGLANG_ENABLE_WEIGHT_LOADER_V2 = EnvBool(False)
+@@ -1270,6 +1273,9 @@ class Envs:
+     # Draft-extend position-0 confidence from the fused argmax pass instead of
+     # torch top1_prob. Needs SGLANG_OPT_DRAFT_TAIL; not bit-exact (fp32 order).
+     SGLANG_OPT_DRAFT_TAIL_FUSED_CONF = EnvBool(False)
++    # Index-shared MTP draft rows put the drafted tail right after the valid frozen
++    # entries; the packed sparse attention path attends only a valid prefix.
++    SGLANG_ENABLE_QSA_SHARED_TAIL_PREFIX = EnvBool(False)
+ 
+     # ===================================================================
+     # Multimodal processing
+diff --git a/python/sglang/srt/layers/attention/qsa/decode_attn.py b/python/sglang/srt/layers/attention/qsa/decode_attn.py
+new file mode 100644
+index 0000000000..29ff2e81a6
+--- /dev/null
++++ b/python/sglang/srt/layers/attention/qsa/decode_attn.py
+@@ -0,0 +1,387 @@
++"""Split-KV Triton decode attention over QSA sparse top-k rows.
++
++Opt-in replacement (SGLANG_OPT_TRITON_DECODE_ATTN) for the valid-count, KV
++compaction and trtllm-gen XQA decode sequence of QwenSparseAttnBackend. The
++kernel reads the fp8 KV pool directly through the top-k logical indices and
++req_to_token, so nothing is packed. A column is attended iff
++0 <= index < seq_lens[row], checked per column: index-shared MTP draft rows
++(frozen anchor selection plus the drafted tail) keep -1 holes mid-row, which the
++packed path, attending only a valid prefix, mis-handles.
++
++Grid (splits, kv heads, rows). A program covers one contiguous column chunk for
++one kv head and all of its query heads (padded to 16 MMA rows): f16 MMAs on
++e4m3 K/V (exact conversion), fp32 accumulation. Each program stores its
++partial (acc / l in f16, lse = m + log2(l) in fp32); the last arriver per
++(row, kv head), found with one acq_rel atomic, combines the partials in split
++order and resets its counter to 0. The result is deterministic, and the
++counters are zero again after every launch (CUDA graph replay safe).
++"""
++
++from __future__ import annotations
++
++import os
++
++import torch
++import triton
++import triton.language as tl
++
++from sglang.kernels.triton_pdl import PDL, pdl_trigger, pdl_wait
++
++_LOG2E = 1.4426950408889634
++_BLOCK_H = 16
++_HEAD_DIM = 256
++# The interpreter has no inline asm, and its low-precision dot is unreliable.
++_INTERPRET = os.environ.get("TRITON_INTERPRET") == "1"
++
++# (max rows, (num_splits, block_n, num_warps, kv_stages, v_asm)), first match
++# wins. Measured on RTX PRO 6000 Max-Q (sm120, 188 SMs) at 2051 top-k columns,
++# fp8 KV, 2 kv heads x 12 query heads x 256 (flash-next-bench bench/xa1, job4).
++_LAUNCH_BY_ROWS = (
++    (1, (22, 32, 4, 3, True)),
++    (4, (22, 32, 4, 3, True)),
++    (8, (11, 64, 4, 3, False)),
++    (16, (11, 32, 4, 3, False)),
++)
++# Past the last bucket splits shrink as rows grow (see _launch_config), so a
++# split launch never needs more than this many (row, split) partials per kv head.
++_MAX_ROW_SPLITS = max(max_rows * config[0] for max_rows, config in _LAUNCH_BY_ROWS)
++
++
++@triton.jit
++def _e4m3_to_f16(x):
++    # Opaque on purpose: V then goes through smem as f16 (ldmatrix operand)
++    # instead of fp8 read byte by byte; a pure asm gets hoisted past the copy.
++    return tl.inline_asm_elementwise(
++        "{ .reg .b16 lo, hi; mov.b32 {lo, hi}, $2; cvt.rn.f16x2.e4m3x2 $0, lo; "
++        "cvt.rn.f16x2.e4m3x2 $1, hi; }",
++        "=r,=r,r",
++        [x.to(tl.uint8, bitcast=True)],
++        dtype=tl.float16,
++        is_pure=False,
++        pack=4,
++    )
++
++
++@triton.jit
++def _combine_splits(
++    partial_out_ptr,
++    partial_lse_ptr,
++    out_ptr,
++    grp,
++    offs_h,
++    offs_d,
++    hmask,
++    GROUP: tl.constexpr,
++    BLOCK_H: tl.constexpr,
++    D: tl.constexpr,
++    NUM_SPLITS: tl.constexpr,
++):
++    # Per-split lse loads land in the row slice of the [heads, D] layout:
++    # the combine needs no smem and no barrier. Empty splits carry -1e30.
++    lse_max = tl.full([BLOCK_H], -1.0e30, tl.float32)
++    for s in tl.static_range(NUM_SPLITS):
++        lse = tl.load(
++            partial_lse_ptr + (grp * NUM_SPLITS + s) * BLOCK_H + offs_h,
++            cache_modifier=".cg",
++        )
++        lse_max = tl.maximum(lse_max, lse)
++    den = tl.zeros([BLOCK_H], tl.float32)
++    o = tl.zeros([BLOCK_H, D], tl.float32)
++    for s in tl.static_range(NUM_SPLITS):
++        part = grp * NUM_SPLITS + s
++        w = tl.exp2(
++            tl.load(partial_lse_ptr + part * BLOCK_H + offs_h, cache_modifier=".cg")
++            - lse_max
++        )
++        den += w
++        o_s = tl.load(
++            partial_out_ptr + (part * BLOCK_H + offs_h)[:, None] * D + offs_d[None, :],
++            mask=hmask[:, None],
++            other=0.0,
++            cache_modifier=".cg",
++        )
++        o += o_s.to(tl.float32) * w[:, None]
++    o = o / den[:, None]
++    tl.store(
++        out_ptr + (grp * GROUP + offs_h)[:, None] * D + offs_d[None, :],
++        o.to(out_ptr.dtype.element_ty),
++        mask=hmask[:, None],
++    )
++
++
++@triton.jit
++def _store_split(
++    acc,
++    m_i,
++    l_i,
++    out_ptr,
++    partial_out_ptr,
++    partial_lse_ptr,
++    arrivals_ptr,
++    grp,
++    sid,
++    qo_off,
++    offs_h,
++    offs_d,
++    hmask,
++    GROUP: tl.constexpr,
++    BLOCK_H: tl.constexpr,
++    D: tl.constexpr,
++    NUM_SPLITS: tl.constexpr,
++):
++    o = acc / tl.where(l_i > 0, l_i, 1.0)[:, None]
++    if NUM_SPLITS == 1:
++        tl.store(out_ptr + qo_off, o.to(out_ptr.dtype.element_ty), mask=hmask[:, None])
++    else:
++        part = grp * NUM_SPLITS + sid
++        tl.store(
++            partial_out_ptr + (part * BLOCK_H + offs_h)[:, None] * D + offs_d[None, :],
++            o.to(partial_out_ptr.dtype.element_ty),
++            mask=hmask[:, None],
++            cache_modifier=".cg",
++        )
++        lse = tl.where(l_i > 0, m_i + tl.log2(tl.where(l_i > 0, l_i, 1.0)), -1.0e30)
++        tl.store(partial_lse_ptr + part * BLOCK_H + offs_h, lse, cache_modifier=".cg")
++        tl.debug_barrier()
++        arrived = tl.atomic_add(arrivals_ptr + grp, 1, sem="acq_rel", scope="gpu")
++        if arrived == NUM_SPLITS - 1:
++            _combine_splits(
++                partial_out_ptr,
++                partial_lse_ptr,
++                out_ptr,
++                grp,
++                offs_h,
++                offs_d,
++                hmask,
++                GROUP=GROUP,
++                BLOCK_H=BLOCK_H,
++                D=D,
++                NUM_SPLITS=NUM_SPLITS,
++            )
++            tl.store(arrivals_ptr + grp, 0)
++
++
++@triton.jit
++def _qsa_decode_attn_kernel(
++    q_ptr,
++    k_ptr,
++    v_ptr,
++    out_ptr,
++    seq_lens_ptr,
++    topk_ptr,
++    req_to_token_ptr,
++    row_req_ptr,
++    partial_out_ptr,
++    partial_lse_ptr,
++    arrivals_ptr,
++    qk_scale,
++    topk_stride,
++    req_to_token_stride,
++    NCOLS: tl.constexpr,
++    HKV: tl.constexpr,
++    GROUP: tl.constexpr,
++    BLOCK_H: tl.constexpr,
++    D: tl.constexpr,
++    NUM_SPLITS: tl.constexpr,
++    BLOCK_N: tl.constexpr,
++    PREFIX_VALID: tl.constexpr,
++    USE_PDL: tl.constexpr,
++    V_ASM: tl.constexpr,
++    F32_DOT: tl.constexpr,
++):
++    sid = tl.program_id(0)
++    kvh = tl.program_id(1)
++    row = tl.program_id(2)
++    grp = row * HKV + kvh
++    offs_h = tl.arange(0, BLOCK_H)
++    offs_d = tl.arange(0, D)
++    offs_n = tl.arange(0, BLOCK_N)
++    hmask = offs_h < GROUP
++    qo_off = (grp * GROUP + offs_h)[:, None] * D + offs_d[None, :]
++    hd_off = kvh * D + offs_d
++
++    pdl_wait(USE_PDL)
++    q = tl.load(q_ptr + qo_off, mask=hmask[:, None], other=0.0).to(tl.float16)
++    length = tl.load(seq_lens_ptr + row)
++    req = tl.load(row_req_ptr + row).to(tl.int64)
++    # Indexer rows and tail-after-prefix shared rows keep every valid column in front,
++    # all below seq_len; other index-shared rows have holes, so every column is scanned.
++    ncols = tl.minimum(length, NCOLS) if PREFIX_VALID else NCOLS
++    chunk = tl.cdiv(tl.cdiv(ncols, NUM_SPLITS), BLOCK_N) * BLOCK_N
++    start = sid * chunk
++    end = tl.minimum(start + chunk, ncols)
++
++    m_i = tl.full([BLOCK_H], -1.0e30, tl.float32)
++    l_i = tl.zeros([BLOCK_H], tl.float32)
++    acc = tl.zeros([BLOCK_H, D], tl.float32)
++    for n0 in range(start, end, BLOCK_N):
++        cols = n0 + offs_n
++        pos = tl.load(topk_ptr + row * topk_stride + cols, mask=cols < end, other=-1)
++        valid = (pos >= 0) & (pos < length)
++        slot = tl.load(
++            req_to_token_ptr + req * req_to_token_stride + pos, mask=valid, other=0
++        )
++        # Invalid columns gather the pool's padding slot 0 and are masked in
++        # the scores, so the K/V loads stay unmasked 16-byte cp.async.
++        kv_off = slot.to(tl.int64)[:, None] * (HKV * D) + hd_off[None, :]
++        k = tl.load(k_ptr + kv_off).to(tl.float16)
++        v = tl.load(v_ptr + kv_off)
++        if V_ASM:
++            v = _e4m3_to_f16(v)
++        else:
++            v = v.to(tl.float16)
++        if F32_DOT:
++            s = tl.dot(q.to(tl.float32), tl.trans(k.to(tl.float32)), input_precision="ieee")
++        else:
++            s = tl.dot(q, tl.trans(k))
++        s = tl.where(valid[None, :], s * qk_scale, -1.0e30)
++        m_new = tl.maximum(m_i, tl.max(s, 1))
++        alpha = tl.exp2(m_i - m_new)
++        p = tl.where(valid[None, :], tl.exp2(s - m_new[:, None]), 0.0)
++        l_i = l_i * alpha + tl.sum(p, 1)
++        acc = acc * alpha[:, None]
++        if F32_DOT:
++            acc += tl.dot(p, v.to(tl.float32), input_precision="ieee")
++        else:
++            acc += tl.dot(p.to(tl.float16), v)
++        m_i = m_new
++
++    _store_split(
++        acc,
++        m_i,
++        l_i,
++        out_ptr,
++        partial_out_ptr,
++        partial_lse_ptr,
++        arrivals_ptr,
++        grp,
++        sid,
++        qo_off,
++        offs_h,
++        offs_d,
++        hmask,
++        GROUP=GROUP,
++        BLOCK_H=BLOCK_H,
++        D=D,
++        NUM_SPLITS=NUM_SPLITS,
++    )
++    pdl_trigger(USE_PDL)
++
++
++def _launch_config(rows: int):
++    for max_rows, config in _LAUNCH_BY_ROWS:
++        if rows <= max_rows:
++            return config
++    # Arbitrary for rows past the measured buckets: keep the last bucket's
++    # tile and shrink splits so the CTA count stays about the same.
++    max_rows, (num_splits, block_n, num_warps, kv_stages, v_asm) = _LAUNCH_BY_ROWS[-1]
++    num_splits = max(1, num_splits * max_rows // rows)
++    return num_splits, block_n, num_warps, kv_stages, v_asm
++
++
++class QSADecodeAttnWorkspace:
++    """Split partials plus per-(row, kv head) arrival counters (zero between calls).
++
++    Fixed size for any row count: about 3 MB for 2 kv heads x 256.
++    """
++
++    def __init__(self, *, num_kv_heads: int, head_dim: int, device) -> None:
++        self.max_parts = _MAX_ROW_SPLITS * num_kv_heads
++        self.partial_out = torch.empty(
++            self.max_parts * _BLOCK_H * head_dim, dtype=torch.float16, device=device
++        )
++        self.partial_lse = torch.empty(
++            self.max_parts * _BLOCK_H, dtype=torch.float32, device=device
++        )
++        self.arrivals = torch.zeros(self.max_parts, dtype=torch.int32, device=device)
++
++
++def qsa_decode_attention_supported(
++    *,
++    q: torch.Tensor,
++    k_buffer: torch.Tensor,
++    v_buffer: torch.Tensor,
++    topk_indices: torch.Tensor,
++) -> bool:
++    """The measured shape only: bf16 q, fp8 e4m3 KV pool, head_dim 256, GQA <= 16."""
++    if q.dim() != 3 or k_buffer.dim() != 3 or topk_indices.dim() != 2:
++        return False
++    rows, num_q_heads, head_dim = q.shape
++    num_kv_heads = k_buffer.shape[1]
++    return (
++        q.dtype == torch.bfloat16
++        and k_buffer.dtype == torch.float8_e4m3fn
++        and v_buffer.dtype == k_buffer.dtype
++        and v_buffer.shape == k_buffer.shape
++        and head_dim == _HEAD_DIM
++        and k_buffer.shape[2] == head_dim
++        and k_buffer.is_contiguous()
++        and v_buffer.is_contiguous()
++        and num_q_heads % num_kv_heads == 0
++        and num_q_heads // num_kv_heads <= _BLOCK_H
++        and topk_indices.shape[0] == rows
++    )
++
++
++def qsa_decode_attention(
++    *,
++    q: torch.Tensor,
++    k_buffer: torch.Tensor,
++    v_buffer: torch.Tensor,
++    req_to_token: torch.Tensor,
++    row_req_pool_indices: torch.Tensor,
++    topk_indices: torch.Tensor,
++    seq_lens: torch.Tensor,
++    sm_scale: float,
++    workspace: QSADecodeAttnWorkspace,
++    prefix_valid: bool,
++) -> torch.Tensor:
++    """Attention of q [rows, q heads, D] bf16 over the KV pool [slots, kv heads, D]
++    fp8 at the top-k logical indices [rows, C] int32 of each row's request.
++
++    prefix_valid: valid columns come first, all below seq_lens (indexer rows, and
++    index-shared rows with the drafted tail after the valid prefix), so columns at
++    or past seq_lens are skipped.
++    """
++    rows, num_q_heads, head_dim = q.shape
++    num_kv_heads = k_buffer.shape[1]
++    num_splits, block_n, num_warps, kv_stages, v_asm = _launch_config(rows)
++    if num_splits > 1 and rows * num_kv_heads * num_splits > workspace.max_parts:
++        raise ValueError(
++            f"QSA decode attention workspace too small: rows={rows}, splits={num_splits}"
++        )
++    q = q.contiguous()
++    out = torch.empty_like(q)
++    _qsa_decode_attn_kernel[(num_splits, num_kv_heads, rows)](
++        q,
++        k_buffer,
++        v_buffer,
++        out,
++        seq_lens,
++        topk_indices,
++        req_to_token,
++        row_req_pool_indices,
++        workspace.partial_out,
++        workspace.partial_lse,
++        workspace.arrivals,
++        sm_scale * _LOG2E,
++        topk_indices.stride(0),
++        req_to_token.stride(0),
++        NCOLS=topk_indices.shape[1],
++        HKV=num_kv_heads,
++        GROUP=num_q_heads // num_kv_heads,
++        BLOCK_H=_BLOCK_H,
++        D=head_dim,
++        NUM_SPLITS=num_splits,
++        BLOCK_N=block_n,
++        PREFIX_VALID=prefix_valid,
++        USE_PDL=PDL,
++        V_ASM=v_asm and not _INTERPRET,
++        F32_DOT=_INTERPRET,
++        num_warps=num_warps,
++        # The pipeliner splits num_stages over the topk -> slot -> K/V chain;
++        # 3 * kv_stages - 2 leaves kv_stages buffers for the K/V tiles.
++        num_stages=3 * kv_stages - 2,
++        launch_pdl=PDL,
++    )
++    return out
+diff --git a/python/sglang/srt/layers/attention/qwen_sparse_attn_backend.py b/python/sglang/srt/layers/attention/qwen_sparse_attn_backend.py
+index 2a306c3df2..ee04879100 100644
+--- a/python/sglang/srt/layers/attention/qwen_sparse_attn_backend.py
++++ b/python/sglang/srt/layers/attention/qwen_sparse_attn_backend.py
+@@ -18,12 +18,18 @@ import torch.nn.functional as F
+ import triton
+ import triton.language as tl
+ 
++from sglang.srt.environ import envs
+ from sglang.srt.layers.attention.base_attn_backend import AttentionBackend
+ from sglang.srt.layers.attention.qsa.config import (
+     QSA_VARIANT_COMPRESSED,
+     is_qwen_qsa,
+     parse_qsa_profile,
+ )
++from sglang.srt.layers.attention.qsa.decode_attn import (
++    QSADecodeAttnWorkspace,
++    qsa_decode_attention,
++    qsa_decode_attention_supported,
++)
+ from sglang.srt.layers.attention.qsa.kernel import qsa_sparse_attention
+ from sglang.srt.layers.attention.qsa.metadata import (
+     QSAIndexerMetadata,
+@@ -40,6 +46,7 @@ from sglang.srt.layers.attention.qsa.sparse_attn import (
+     sparse_gqa_fwd_interface_triton_ck,
+ )
+ from sglang.srt.model_executor.forward_batch_info import ForwardMode
++from sglang.srt.utils.common import print_warning_once
+ 
+ logger = logging.getLogger(__name__)
+ 
+@@ -82,6 +89,49 @@ def _mtp_shared_sparse_indices_lookup_kernel(
+     tl.store(out + row * out_row_stride + columns, value, mask=column_mask)
+ 
+ 
++@triton.jit
++def _mtp_shared_sparse_indices_lookup_prefix_kernel(
++    indices,
++    captured_len,
++    req_pool_indices,
++    current_positions,
++    out,
++    indices_row_stride,
++    req_pool_indices_stride,
++    current_positions_stride,
++    out_row_stride,
++    num_columns: tl.constexpr,
++    tail_width: tl.constexpr,
++    BLOCK: tl.constexpr,
++):
++    row = tl.program_id(0)
++    columns = tl.arange(start=0, end=BLOCK)
++    source_row = tl.load(req_pool_indices + row * req_pool_indices_stride).to(tl.int64)
++    frozen = tl.load(
++        pointer=indices + source_row * indices_row_stride + columns,
++        mask=columns < num_columns - tail_width,
++        other=-1,
++    )
++    valid = frozen >= 0
++    ranks = tl.cumsum(input=valid.to(tl.int32), axis=0) - 1
++    num_frozen = tl.sum(input=valid.to(tl.int32), axis=0)
++    base = tl.load(captured_len + source_row).to(tl.int64)
++    position = tl.load(current_positions + row * current_positions_stride).to(tl.int64)
++    tail_offset = columns - num_frozen
++    tail_value = base + tail_offset
++    tail_value = tl.where(
++        condition=(tail_offset < tail_width) & (tail_value <= position),
++        x=tail_value,
++        y=-1,
++    )
++    tl.store(
++        pointer=out + row * out_row_stride + columns,
++        value=tail_value,
++        mask=(columns >= num_frozen) & (columns < num_columns),
++    )
++    tl.store(pointer=out + row * out_row_stride + ranks, value=frozen, mask=valid)
++
++
+ @lru_cache(maxsize=1)
+ def _resolve_trtllm_sparse_decode():
+     """trtllm-gen paged decode for the post-gather sparse attention.
+@@ -176,6 +226,12 @@ class QSAMTPSharedSparseIndices:
+     ) -> None:
+         self.layer_slots = {int(l): i for i, l in enumerate(sorted(layer_ids))}
+         self.tail_width = tail_width
++        self.shared_tail_prefix = envs.SGLANG_ENABLE_QSA_SHARED_TAIL_PREFIX.get()
++        if self.shared_tail_prefix:
++            logger.info(
++                "QSA MTP shared indices: tail after the valid prefix "
++                "(SGLANG_ENABLE_QSA_SHARED_TAIL_PREFIX)"
++            )
+         self.trash_row = num_requests
+         # Logical index 0 keeps never-captured rows (graph warmup dummies)
+         # attending exactly the first token instead of an empty/invalid set.
+@@ -211,12 +267,7 @@ class QSAMTPSharedSparseIndices:
+         current_positions: torch.Tensor,
+         layer_id: int,
+     ) -> torch.Tensor:
+-        """Frozen selection plus the positions drafted since the capture.
+-
+-        The tail columns append exactly ``[captured_len, current_position]``
+-        -- disjoint from the frozen set by construction, -1 (dropped
+-        downstream) where the gap is shorter than the tail width.
+-        """
++        """Frozen selection and draft tail, optionally contiguous for packed attention."""
+         slot = self.layer_slots[int(layer_id)]
+         if self.indices.is_cuda:
+             indices = self.indices[slot]
+@@ -228,6 +279,25 @@ class QSAMTPSharedSparseIndices:
+             )
+             if num_rows == 0:
+                 return out
++            if self.shared_tail_prefix:
++                _mtp_shared_sparse_indices_lookup_prefix_kernel[(num_rows,)](
++                    indices=indices,
++                    captured_len=captured_len,
++                    req_pool_indices=req_pool_indices,
++                    current_positions=current_positions,
++                    out=out,
++                    indices_row_stride=indices.stride(0),
++                    req_pool_indices_stride=req_pool_indices.stride(0),
++                    current_positions_stride=current_positions.stride(0),
++                    out_row_stride=out.stride(0),
++                    num_columns=num_columns,
++                    tail_width=self.tail_width,
++                    BLOCK=triton.next_power_of_2(num_columns),
++                    # Measured on RTX PRO 6000 at 2055 columns: 4 warps 3.1 us,
++                    # 8 warps 2.5 us, 16 warps 2.6 us.
++                    num_warps=8,
++                )
++                return out
+             block = 256
+             _mtp_shared_sparse_indices_lookup_kernel[
+                 (num_rows, triton.cdiv(num_columns, block))
+@@ -250,6 +320,12 @@ class QSAMTPSharedSparseIndices:
+ 
+         rows = req_pool_indices.to(torch.long)
+         out = self.indices[slot, rows]
++        if self.shared_tail_prefix:
++            return self._lookup_prefix_cpu(
++                out=out,
++                base=self.captured_len[slot, rows].to(torch.int64),
++                current_positions=current_positions,
++            )
+         base = self.captured_len[slot, rows].to(torch.int64)
+         tail = base.unsqueeze(1) + self._tail_offsets.unsqueeze(0)
+         valid = tail <= current_positions.to(torch.int64).unsqueeze(1)
+@@ -258,6 +334,27 @@ class QSAMTPSharedSparseIndices:
+         )
+         return out
+ 
++    def _lookup_prefix_cpu(self, *, out, base, current_positions):
++        num_columns = out.shape[1]
++        frozen_width = num_columns - self.tail_width
++        frozen = out[:, :frozen_width]
++        order = torch.arange(end=frozen_width, device=out.device).unsqueeze(0)
++        valid = frozen >= 0
++        sort_key = torch.where(condition=valid, input=order, other=order + frozen_width)
++        frozen = frozen.gather(
++            dim=1, index=torch.argsort(input=sort_key, dim=1, stable=True)
++        )
++        out[:, :frozen_width] = frozen
++        num_frozen = valid.sum(dim=1, keepdim=True)
++        columns = torch.arange(end=num_columns, device=out.device).unsqueeze(0)
++        tail_offset = columns - num_frozen
++        tail = base.unsqueeze(1) + tail_offset
++        tail_valid = (tail_offset < self.tail_width) & (
++            tail <= current_positions.to(torch.int64).unsqueeze(1)
++        )
++        tail = torch.where(condition=tail_valid, input=tail, other=-1).to(out.dtype)
++        return torch.where(condition=columns < num_frozen, input=out, other=tail)
++
+ 
+ class QwenSparseAttnBackend(AttentionBackend):
+     """QSA backend using trtllm-gen decode with a packed FA2/FA4 fallback."""
+@@ -315,6 +412,8 @@ class QwenSparseAttnBackend(AttentionBackend):
+         self._trtllm_sparse_tables = {}
+         self._mtp_shared_sparse_indices = None
+         self._trtllm_workspace = None
++        self._triton_decode_attn = envs.SGLANG_OPT_TRITON_DECODE_ATTN.get()
++        self._decode_attn_workspace: Optional[QSADecodeAttnWorkspace] = None
+         self._graph_extend_lens = None
+         self._graph_extend_lens_pin = None
+ 
+@@ -1679,6 +1778,50 @@ class QwenSparseAttnBackend(AttentionBackend):
+         )
+         return output.reshape(q.shape[0], -1)
+ 
++    def _forward_triton_decode(
++        self,
++        *,
++        q: torch.Tensor,
++        k_buffer: torch.Tensor,
++        v_buffer: torch.Tensor,
++        layer,
++        forward_batch,
++        metadata,
++        topk_indices: torch.Tensor,
++    ) -> torch.Tensor:
++        if self._decode_attn_workspace is None:
++            # The arrival counters must be zeroed eagerly, not inside a capture;
++            # graph capture runs eager warmups first.
++            if torch.cuda.is_current_stream_capturing():
++                raise RuntimeError("QSA decode attention workspace not allocated")
++            self._decode_attn_workspace = QSADecodeAttnWorkspace(
++                num_kv_heads=k_buffer.shape[1],
++                head_dim=k_buffer.shape[2],
++                device=q.device,
++            )
++        output = qsa_decode_attention(
++            q=q,
++            k_buffer=k_buffer,
++            v_buffer=v_buffer,
++            req_to_token=self.req_to_token_pool.req_to_token,
++            row_req_pool_indices=(
++                metadata.row_req_pool_indices
++                if metadata.row_req_pool_indices is not None
++                else forward_batch.req_pool_indices
++            ),
++            topk_indices=topk_indices,
++            seq_lens=metadata.sequence_lengths,
++            sm_scale=layer.scaling,
++            workspace=self._decode_attn_workspace,
++            # Draft decode rows reuse the draft-extend selection, which leaves -1 holes
++            # before the drafted tail unless the tail follows the valid prefix.
++            prefix_valid=(
++                not self.should_reuse_mtp_sparse_indices(forward_batch)
++                or self._mtp_shared_sparse_indices.shared_tail_prefix
++            ),
++        )
++        return output.reshape(q.shape[0], -1)
++
+     def forward_decode(
+         self,
+         q: torch.Tensor,
+@@ -1717,6 +1860,23 @@ class QwenSparseAttnBackend(AttentionBackend):
+ 
+         metadata = self._resolve_metadata(forward_batch)
+         topk_indices = topk_indices.to(torch.int32).contiguous()
++        if self._triton_decode_attn:
++            if qsa_decode_attention_supported(
++                q=q, k_buffer=k_buffer, v_buffer=v_buffer, topk_indices=topk_indices
++            ):
++                return self._forward_triton_decode(
++                    q=q,
++                    k_buffer=k_buffer,
++                    v_buffer=v_buffer,
++                    layer=layer,
++                    forward_batch=forward_batch,
++                    metadata=metadata,
++                    topk_indices=topk_indices,
++                )
++            print_warning_once(
++                "SGLANG_OPT_TRITON_DECODE_ATTN: unsupported QSA attention shape, "
++                "falling back to the packed path"
++            )
+         trtllm_decode = _resolve_trtllm_sparse_decode()
+         if trtllm_decode is not None:
+             return self._forward_trtllm_sparse(
+-- 
+2.43.0
+

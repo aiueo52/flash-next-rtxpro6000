@@ -1,0 +1,254 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: aiueo52 <aiueo52@users.noreply.github.com>
+Date: Thu, 1 Oct 2026 11:29:40 +0900
+Subject: [PATCH 110/121] moe router: packed-key softmax top-k
+ (SGLANG_ROUTER_FAST_TOPK=1, default off)
+
+One int64 max per pick instead of three dependent warp reductions; row max/sum and
+the routed-sum order are the Triton router's, so weights and ids are bit-identical
+(flash-next-bench bench/rt1/route_bench.py --check).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../ops/moe/moe_router_softmax_fast.py        | 184 ++++++++++++++++++
+ python/sglang/srt/layers/moe/topk.py          |  26 ++-
+ 2 files changed, 203 insertions(+), 7 deletions(-)
+ create mode 100644 python/sglang/kernels/ops/moe/moe_router_softmax_fast.py
+
+diff --git a/python/sglang/kernels/ops/moe/moe_router_softmax_fast.py b/python/sglang/kernels/ops/moe/moe_router_softmax_fast.py
+new file mode 100644
+index 0000000000..b2c82bab42
+--- /dev/null
++++ b/python/sglang/kernels/ops/moe/moe_router_softmax_fast.py
+@@ -0,0 +1,184 @@
++"""Softmax top-k router with one packed-key reduction per pick (SGLANG_ROUTER_FAST_TOPK=1).
++
++Same results as the Triton router (``moe_fused_gate(..., scoring_func="softmax")``), bit for bit,
++for the call ``fused_topk`` makes on CUDA: fp32 zero bias, no shared experts / groups / softcap /
++scaling, at most 512 experts, one warp per row.
++
++``_router_triton_kernel`` picks each expert with three dependent warp reductions: the max of the
++biased logits, the min lane id among the maxima (lowest id wins ties) and a masked sum that fetches
++the winner's softmax weight.  Here every logit is packed with its inverted lane id into one int64,
++
++    key = (order-preserving int32 of the float) << 32 | (BLOCK_N - 1 - lane)
++
++so a single int64 max gives both the winner and the tie-break, and the winner's weight is
++recomputed from the float decoded out of the key with the instructions the Triton router uses for
++every lane (fsub, fmul by log2e + ex2.approx, div.full by the row sum).
++
++Why the results are identical:
++  * everything up to ``row_sum`` is the Triton router's code (same layout, so the same in-thread
++    chain + xor 16/8/4/2/1 butterfly for the row sum);
++  * key order is float order with ties broken by the lower lane; -0.0 never occurs because the
++    logit gets ``+ bias`` (+0.0), so the int32 order map is exact; NaN is floored to -1e30 first;
++  * the routed sum is taken in the Triton router's order for top-10 (slots 0..7 in sequence, plus
++    slots 8 + 9; ``EXPLICIT_SUM``) or as its ``tl.sum`` over the [1, BLOCK_K] slot tensor.
++The one difference: a NaN winner gets the weight of the -1e30 floor instead of NaN.
++"""
++
++from __future__ import annotations
++
++from typing import Tuple
++
++import torch
++import triton
++import triton.language as tl
++
++from sglang.kernels.jit.utils import is_arch_support_pdl
++
++
++@triton.jit
++def _router_softmax_fast_kernel(
++    scores_ptr,  # [M, N] router logits
++    bias_ptr,  # [N] fp32 (zeros)
++    out_weights_ptr,  # [M, K] fp32
++    out_indices_ptr,  # [M, K] int32
++    M,
++    N: tl.constexpr,
++    K: tl.constexpr,
++    BLOCK_N: tl.constexpr,
++    BLOCK_K: tl.constexpr,
++    RENORMALIZE: tl.constexpr,
++    USE_PDL: tl.constexpr,
++    EXPLICIT_SUM: tl.constexpr,
++    stride_sm,
++    stride_sn,
++    stride_wm,
++    stride_wk,
++    stride_im,
++    stride_ik,
++):
++    # ---- _router_triton_kernel, SCORING_FUNC == 2 (softmax), BLOCK_M == 1 ----
++    pid = tl.program_id(0)
++    offs_m = pid * 1 + tl.arange(0, 1)
++    offs_n = tl.arange(0, BLOCK_N)
++    mask_m = offs_m < M
++    mask_n = offs_n < N
++
++    bias = tl.load(bias_ptr + offs_n, mask=mask_n, other=0.0).to(tl.float32)
++
++    if USE_PDL:
++        tl.extra.cuda.gdc_wait()
++
++    row_ptr = scores_ptr + offs_m[:, None] * stride_sm + offs_n[None, :] * stride_sn
++    mask2d = mask_m[:, None] & mask_n[None, :]
++    scores = tl.load(row_ptr, mask=mask2d, other=0.0).to(tl.float32)
++
++    logit = scores
++    biased = logit + bias[None, :]
++    biased = tl.where(mask_n[None, :], biased, -float("inf"))
++    row_max = tl.max(biased, axis=1)[:, None]  # [1, 1]
++    exp_row = tl.where(mask_n[None, :], tl.exp(biased - row_max), 0.0)
++    row_sum = tl.sum(exp_row, axis=1)[:, None]  # [1, 1]
++
++    biased = tl.where(mask_n[None, :], biased, -float("inf"))
++    biased = tl.where(biased == biased, biased, -1e30)
++
++    # ---- packed-key pick loop ----
++    bits = biased.to(tl.int32, bitcast=True)
++    sbits = bits ^ ((bits >> 31) & 0x7FFFFFFF)  # signed-int order == float order (no NaN, no -0)
++    lo = (BLOCK_N - 1) - offs_n  # lower lane -> larger key on ties
++    keys = (sbits.to(tl.int64) << 32) | lo[None, :].to(tl.int64)
++    gone = tl.full([1, BLOCK_N], -9223372036854775807, tl.int64)
++
++    offs_k = tl.arange(0, BLOCK_K)
++    mask_k = offs_k < K
++    selected_vals = tl.zeros([1, BLOCK_K], dtype=tl.float32)
++    selected_idx = tl.zeros([1, BLOCK_K], dtype=tl.int32)
++    cur = keys
++    for k in tl.static_range(K):
++        kmax = tl.max(cur, axis=1)[:, None]  # [1, 1] int64
++        cur = tl.where(cur == kmax, gone, cur)
++        win_lane = (BLOCK_N - 1) - kmax.to(tl.int32)  # low word = BLOCK_N - 1 - lane
++        hi = (kmax >> 32).to(tl.int32)
++        wb = (hi ^ ((hi >> 31) & 0x7FFFFFFF)).to(tl.float32, bitcast=True)
++        win_activated = tl.exp(wb - row_max) / row_sum  # the Triton router's activated[win]
++        slot = offs_k[None, :] == k
++        selected_vals = tl.where(slot, win_activated, selected_vals)
++        selected_idx = tl.where(slot, win_lane, selected_idx)
++        if EXPLICIT_SUM:
++            if k == 0:
++                s_lo = win_activated
++            elif k < 8:
++                s_lo = s_lo + win_activated
++            elif k == 8:
++                s_hi = win_activated
++            else:
++                s_hi = s_hi + win_activated
++
++    if EXPLICIT_SUM:
++        routed_sum = s_lo + s_hi  # K == 10 only (asserted by the wrapper)
++    else:
++        routed_sum = tl.sum(tl.where(mask_k[None, :], selected_vals, 0.0), axis=1)[:, None]
++
++    if USE_PDL:
++        tl.extra.cuda.gdc_launch_dependents()
++
++    if RENORMALIZE:
++        norm = tl.where(routed_sum > 0.0, routed_sum, 1.0)
++        selected_vals = selected_vals / norm
++
++    out_w_ptr = out_weights_ptr + offs_m[:, None] * stride_wm + offs_k[None, :] * stride_wk
++    out_i_ptr = out_indices_ptr + offs_m[:, None] * stride_im + offs_k[None, :] * stride_ik
++    store_mask = mask_m[:, None] & mask_k[None, :]
++    tl.store(out_w_ptr, selected_vals, mask=store_mask)
++    tl.store(out_i_ptr, selected_idx, mask=store_mask)
++
++
++def covered(scores: torch.Tensor, bias: torch.Tensor, topk: int) -> bool:
++    """One warp per row (BLOCK_N <= 512, as the Triton router), fp32 bias."""
++    return (
++        scores.dim() == 2
++        and bias.dim() == 1
++        and scores.size(1) == bias.size(0)
++        and scores.size(1) <= 512
++        and bias.dtype == torch.float32
++        and scores.dtype in (torch.float32, torch.float16, torch.bfloat16)
++        and 0 < int(topk) <= scores.size(1)
++    )
++
++
++def route_softmax_fast(
++    scores: torch.Tensor,
++    bias: torch.Tensor,
++    topk: int,
++    renormalize: bool,
++) -> Tuple[torch.Tensor, torch.Tensor]:
++    """Same outputs as moe_fused_gate(scores, bias, topk, "softmax", renormalize=renormalize)
++    with no shared experts, groups, softcap or scaling. Caller must have checked covered()."""
++    M, N = scores.shape
++    weights = torch.empty((M, topk), dtype=torch.float32, device=scores.device)
++    indices = torch.empty((M, topk), dtype=torch.int32, device=scores.device)
++    use_pdl = is_arch_support_pdl()
++    extra = {"launch_pdl": True} if use_pdl else {}
++    _router_softmax_fast_kernel[(M,)](
++        scores,
++        bias,
++        weights,
++        indices,
++        M,
++        N=N,
++        K=topk,
++        BLOCK_N=triton.next_power_of_2(N),
++        BLOCK_K=triton.next_power_of_2(topk),
++        RENORMALIZE=bool(renormalize),
++        USE_PDL=use_pdl,
++        EXPLICIT_SUM=(topk == 10),
++        stride_sm=scores.stride(0),
++        stride_sn=scores.stride(1),
++        stride_wm=weights.stride(0),
++        stride_wk=weights.stride(1),
++        stride_im=indices.stride(0),
++        stride_ik=indices.stride(1),
++        num_warps=1,
++        **extra,
++    )
++    return weights, indices
+diff --git a/python/sglang/srt/layers/moe/topk.py b/python/sglang/srt/layers/moe/topk.py
+index 625e9a9b75..883ef1bd9f 100644
+--- a/python/sglang/srt/layers/moe/topk.py
++++ b/python/sglang/srt/layers/moe/topk.py
+@@ -157,6 +157,11 @@ def _get_zero_bias(num_experts: int, device: torch.device) -> torch.Tensor:
+ # an accuracy run before becoming the default.
+ _skip_hip_pad_mask = get_bool_env_var("SGLANG_MORI_NO_PAD_MASK", "False")
+ 
++# RT1 (2026-10-01): softmax router with one packed-key reduction per pick
++# (kernels/ops/moe/moe_router_softmax_fast.py), bit-identical to the Triton router
++# for the fused_topk call. Default off.
++_router_fast_topk = get_bool_env_var("SGLANG_ROUTER_FAST_TOPK", "False")
++
+ 
+ if _is_cuda:
+     try:
+@@ -897,13 +902,20 @@ def fused_topk(
+             zero_bias = _get_zero_bias(
+                 gating_output.shape[1], gating_output.device
+             )
+-            topk_weights, topk_ids = _jit_moe_fused_gate(
+-                gating_output,
+-                zero_bias,
+-                topk,
+-                scoring_func="softmax",
+-                renormalize=renormalize,
+-            )
++            if _router_fast_topk:
++                from sglang.kernels.ops.moe import moe_router_softmax_fast as _rfast
++            if _router_fast_topk and _rfast.covered(gating_output, zero_bias, topk):
++                topk_weights, topk_ids = _rfast.route_softmax_fast(
++                    gating_output, zero_bias, topk, renormalize
++                )
++            else:
++                topk_weights, topk_ids = _jit_moe_fused_gate(
++                    gating_output,
++                    zero_bias,
++                    topk,
++                    scoring_func="softmax",
++                    renormalize=renormalize,
++                )
+         else:
+             topk_softmax(
+                 topk_weights,
+-- 
+2.43.0
+

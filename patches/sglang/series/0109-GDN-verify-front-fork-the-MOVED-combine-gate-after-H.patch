@@ -1,0 +1,409 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: aiueo52 <aiueo52@users.noreply.github.com>
+Date: Thu, 1 Oct 2026 08:52:02 +0900
+Subject: [PATCH 109/121] GDN verify front: fork the MOVED combine gate after
+ HC mix K0, qkvz on the alt stream
+
+SGLANG_OPT_GDN_FRONT_OVERLAP=1 (default off) changes stream placement only:
+- hc_norm_mix2 takes an after_normed hook, called right after the launch
+  that completes normed; the attention HC's MOVED gate forks onto the GDN
+  alt stream there and overlaps K1/K2.
+- _forward_input_proj_direct puts qkvz on the alt stream and b/a on the
+  main stream, so b/a's 3 CTAs are no longer starved behind the qkvz wave.
+  Its existing join also joins the forked gate.
+The fork is only offered when the layer will take the two-stream direct
+projection (front_gate_stream), so every fork has a join inside the graph.
+
+Microbench (fc-glue bench_gdn_front, graph replay): -3.6 us (M=4) and
+-3.2 us (M=16) per GDN layer front; kernels and inputs are unchanged.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ python/sglang/srt/environ.py                |  3 +
+ python/sglang/srt/layers/hc_mix2_triton.py  | 11 ++++
+ python/sglang/srt/layers/hyperconnection.py | 63 ++++++++++++++++--
+ python/sglang/srt/models/qwen3_5.py         | 72 ++++++++++++++-------
+ python/sglang/srt/models/qwen4_exp.py       | 20 +++++-
+ 5 files changed, 142 insertions(+), 27 deletions(-)
+
+diff --git a/python/sglang/srt/environ.py b/python/sglang/srt/environ.py
+index 159616a5da..7ae4444c58 100644
+--- a/python/sglang/srt/environ.py
++++ b/python/sglang/srt/environ.py
+@@ -1052,6 +1052,9 @@ class Envs:
+     # becomes the prologue of layer L+1's attention HC mix K0. Needs the
+     # combine deferred across the model loop, so it is a separate flag.
+     SGLANG_HC_LAYER_APPLY_FUSED = EnvBool(False)
++    # GDN verify front, stream placement only: the MOVED combine gate forks onto the
++    # GDN alt stream after HC mix K0, and qkvz takes the alt stream so b/a launches first.
++    SGLANG_OPT_GDN_FRONT_OVERLAP = EnvBool(False)
+     SGLANG_DEEPGEMM_STANDARD_LAYOUT = EnvStr("auto")
+     SGLANG_DEEPGEMM_MASKED_MEMORY_BUDGET_FRACTION = EnvFloat(0.25)
+     # Cap the DeepGEMM masked grouped-GEMM per-expert padded capacity at
+diff --git a/python/sglang/srt/layers/hc_mix2_triton.py b/python/sglang/srt/layers/hc_mix2_triton.py
+index edd9bbe9e5..fb839dd52b 100644
+--- a/python/sglang/srt/layers/hc_mix2_triton.py
++++ b/python/sglang/srt/layers/hc_mix2_triton.py
+@@ -42,6 +42,7 @@ scale, both exact w.r.t. the split. ``SGLANG_HC_MIX2_FP8=1`` turns it on in
+ from __future__ import annotations
+ 
+ import os
++from collections.abc import Callable
+ 
+ import msgspec
+ import torch
+@@ -574,6 +575,8 @@ def hc_norm_mix2(
+     s_up: torch.Tensor | None = None,
+     inject_weight: torch.Tensor | None = None,
+     apply_inputs: tuple | None = None,
++    *,
++    after_normed: Callable[[torch.Tensor], None] | None = None,
+ ) -> tuple[torch.Tensor, torch.Tensor]:
+     """Per-branch Gemma RMSNorm followed by the gated low-rank mix.
+ 
+@@ -593,6 +596,10 @@ def hc_norm_mix2(
+     and the return grows to ``(mixed, normed, gate_partials, applied)`` where
+     ``applied`` is the combined residual. Check
+     `hc_apply_norm_mix2_supported` before passing it.
++
++    ``after_normed(normed)`` is called right after the launch that completes
++    ``normed`` (K0 in the "norm" stats mode, K1 otherwise), so a caller can
++    fork work that only reads it onto another stream.
+     """
+     w_fp8 = w_down.dtype == torch.float8_e4m3fn
+     if config is None:
+@@ -695,6 +702,8 @@ def hc_norm_mix2(
+             launch_pdl=PDL,
+             num_warps=config.stats_warps,
+         )
++        if after_normed is not None and read_normed:
++            after_normed(normed)
+ 
+     _hc_down_kernel[
+         (k // (config.block_k * config.block_g), triton.cdiv(lowrank, config.block_n))
+@@ -725,6 +734,8 @@ def hc_norm_mix2(
+         launch_pdl=PDL,
+         num_warps=config.down_warps,
+     )
++    if after_normed is not None and not read_normed:
++        after_normed(normed)
+ 
+     _hc_up_kernel[(triton.cdiv(hs, config.block_j),)](
+         normed,
+diff --git a/python/sglang/srt/layers/hyperconnection.py b/python/sglang/srt/layers/hyperconnection.py
+index aaeed4ad3a..b87625e372 100644
+--- a/python/sglang/srt/layers/hyperconnection.py
++++ b/python/sglang/srt/layers/hyperconnection.py
+@@ -154,7 +154,13 @@ class HyperConnectionBase(nn.Module):
+         self.hidden_size = config.hidden_size
+         self.params_dtype = config.params_dtype
+ 
+-    def mix(self, hyper_input: torch.Tensor):
++    def mix(
++        self,
++        hyper_input: torch.Tensor,
++        *,
++        gate_stream: Optional[torch.cuda.Stream] = None,
++    ):
++        # No combine gate here, so `gate_stream` is unused.
+         assert hyper_input.shape[-1] == self.hc_count * self.hidden_size
+         mixed_input = hyper_input.view(
+             *hyper_input.shape[:-1], self.hc_count, self.hidden_size
+@@ -484,7 +490,14 @@ class GatedResidual(HyperConnectionBase):
+             for w in weights
+         )
+ 
+-    def mix(self, hyper_input: torch.Tensor):
++    def mix(
++        self,
++        hyper_input: torch.Tensor,
++        *,
++        gate_stream: Optional[torch.cuda.Stream] = None,
++    ):
++        """`gate_stream` lets the MOVED combine gate run beside the rest of the mix;
++        the caller must join it into the current stream before the combine."""
+         assert hyper_input.shape[-1] == self.hc_count * self.hidden_size
+         if hyper_input.shape[0] == 0:
+             mixed_input = hyper_input.new_empty(
+@@ -520,6 +533,7 @@ class GatedResidual(HyperConnectionBase):
+                         gate_partials,
+                     )
+                 return mixed_input, self._early_gate(hyper_input, hyper_input_normed)
++            side_gate, side_partials = self._side_gate(hyper_input, gate_stream)
+             mixed_input, hyper_input_normed = hc_norm_mix2(
+                 hyper_input,
+                 self.hc_norm.weight,
+@@ -531,7 +545,10 @@ class GatedResidual(HyperConnectionBase):
+                 None,
+                 s_down,
+                 s_up,
++                after_normed=side_gate,
+             )
++            if side_partials is not None:
++                return mixed_input, (hyper_input, hyper_input_normed, side_partials)
+             if self._gate_early_ok(hyper_input):
+                 return mixed_input, self._early_gate(hyper_input, hyper_input_normed)
+             return mixed_input, (hyper_input, hyper_input_normed)
+@@ -679,6 +696,38 @@ class GatedResidual(HyperConnectionBase):
+         )
+         return hyper_input, hyper_input_normed, partials
+ 
++    def _side_gate(
++        self, hyper_input: torch.Tensor, gate_stream: Optional[torch.cuda.Stream]
++    ):
++        """`_early_gate` as an `hc_norm_mix2` `after_normed` hook on `gate_stream`.
++
++        Returns ``(hook, partials)``, or ``(None, None)`` to keep the gate inline.
++        """
++        from sglang.srt.environ import HCGateEarly
++
++        if (
++            gate_stream is None
++            or not self._gate_early_ok(hyper_input)
++            or self._gate_early != HCGateEarly.MOVED
++        ):
++            return None, None
++        from sglang.kernels.ops.elementwise.hc_combine import hc_combine_gate
++
++        partials = self._early_partials_buf[: hyper_input.shape[0]]
++
++        def hook(hyper_input_normed: torch.Tensor) -> None:
++            gate_stream.wait_stream(torch.cuda.current_stream())
++            with torch.cuda.stream(gate_stream):
++                hc_combine_gate(
++                    hyper_input_normed,
++                    self.block_inject_weight.weight.data,
++                    self.hc_count,
++                    self.hidden_size,
++                    partials=partials,
++                )
++
++        return hook, partials
++
+     def combine(
+         self,
+         block_output: torch.Tensor,
+@@ -805,6 +854,7 @@ class GatedResidual(HyperConnectionBase):
+         shared_output: Optional[torch.Tensor] = None,
+         shared_gate: Optional[torch.Tensor] = None,
+         fused_attr: str = "_apply_mix_fused",
++        gate_stream: Optional[torch.cuda.Stream] = None,
+     ):
+         """Combine this boundary and norm/mix the next one in one launch.
+ 
+@@ -812,7 +862,7 @@ class GatedResidual(HyperConnectionBase):
+         which the fused prologue folds in the way `hc_combine_apply` would.
+         `fused_attr` names the flag that authorises the fold: R7's
+         `_apply_mix_fused` for the attention->MoE seam inside a layer, H2's
+-        `_layer_apply_fused` for the layer->layer one.
++        `_layer_apply_fused` for the layer->layer one. `gate_stream` is as in `mix`.
+         """
+         hyper_input, hyper_input_normed = residuals[0], residuals[1]
+         gate_partials = residuals[2] if len(residuals) > 2 else None
+@@ -852,6 +902,7 @@ class GatedResidual(HyperConnectionBase):
+                 # branch CTA that norms the row is the one that would have
+                 # written it, so the apply launch and the residual round trip
+                 # both go away.
++                side_gate, side_partials = next_hc._side_gate(hyper_input, gate_stream)
+                 mixed, normed, next_partials, applied = hc_norm_mix2(
+                     hyper_input,
+                     next_hc.hc_norm.weight,
+@@ -878,8 +929,11 @@ class GatedResidual(HyperConnectionBase):
+                             shared_gate,
+                         )
+                     ),
++                    after_normed=side_gate,
+                 )
+                 assert applied is not None
++                if side_partials is not None:
++                    return mixed, (applied, normed, side_partials)
+                 if next_partials is None:
+                     return mixed, next_hc._early_gate(applied, normed)
+                 return mixed, (applied, normed, next_partials)
+@@ -917,7 +971,8 @@ class GatedResidual(HyperConnectionBase):
+             )
+             return mixed, (new_residual, normed)
+         return next_hc.mix(
+-            self.combine(block_output, residuals, shared_output, shared_gate)
++            self.combine(block_output, residuals, shared_output, shared_gate),
++            gate_stream=gate_stream,
+         )
+ 
+ 
+diff --git a/python/sglang/srt/models/qwen3_5.py b/python/sglang/srt/models/qwen3_5.py
+index 9aea1a3a45..14ef308071 100644
+--- a/python/sglang/srt/models/qwen3_5.py
++++ b/python/sglang/srt/models/qwen3_5.py
+@@ -54,6 +54,7 @@ from sglang.srt.configs.qwen3_5 import (
+ 
+ # Distributed
+ from sglang.srt.distributed import get_pp_group
++from sglang.srt.environ import envs
+ from sglang.srt.eplb.expert_distribution import get_global_expert_distribution_recorder
+ from sglang.srt.eplb.expert_location import ModelConfigForExpertLocation
+ from sglang.srt.layers.attention.mamba.mamba import mamba_v2_sharded_weight_loader
+@@ -155,6 +156,7 @@ _gdn_use_alt_stream = _is_cuda or (
+ # SGLANG_GDN_ALT_STREAM=0 forces the in_proj_ba projection onto the main stream
+ # (no multi-stream branch inside the CUDA graph).
+ _gdn_use_alt_stream = _gdn_use_alt_stream and _os.environ.get("SGLANG_GDN_ALT_STREAM", "1") == "1"
++_GDN_FRONT_OVERLAP = envs.SGLANG_OPT_GDN_FRONT_OVERLAP.get()
+ _qknorm_use_alt_stream = _is_cuda or (
+     get_bool_env_var("SGLANG_QK_NORM_ALT_STREAM", "False") and _hip_use_alt_stream
+ )
+@@ -827,6 +829,36 @@ class Qwen3_5GatedDeltaNet(nn.Module):
+             self.in_proj_ba.weight.device,
+         )
+ 
++    def _direct_use_alt(self, num_tokens: int) -> bool:
++        """Whether `_forward_input_proj_direct` splits qkvz and b/a over two streams."""
++        # Same dual-stream gate as `_forward_input_proj`, including the
++        # TC-piecewise prefill graph which forces the threshold to 0.
++        dual_stream_threshold = (
++            0 if check_cuda_graph_backend(Phase.PREFILL, Backend.TC_PIECEWISE) else 1024
++        )
++        return (
++            self.alt_stream is not None
++            and get_is_capture_mode()
++            and num_tokens < dual_stream_threshold
++            and _gdn_use_alt_stream
++        )
++
++    def front_gate_stream(self, num_tokens: int) -> Optional[torch.cuda.Stream]:
++        """Stream for this layer's attention combine gate, or None to keep it inline.
++
++        Only a direct projection that runs on two streams joins the alt stream
++        before the MLP seam reads the gate partials, so only that case says yes.
++        """
++        if not (
++            _GDN_FRONT_OVERLAP
++            and _GDN_PROJ_DIRECT_LAYOUT
++            and 0 < num_tokens <= 16
++            and self._direct_layout_ok()
++            and self._direct_use_alt(num_tokens)
++        ):
++            return None
++        return self.alt_stream
++
+     def _forward_input_proj_direct(self, hidden_states: torch.Tensor, ab_out):
+         """Project straight into (mixed_qkv, z, b, a); None if not applicable."""
+         if not self._direct_layout_ok():
+@@ -864,38 +896,34 @@ class Qwen3_5GatedDeltaNet(nn.Module):
+                 split_n=self.num_v_heads,
+             )
+ 
+-        # Same dual-stream gate as `_forward_input_proj`, including the
+-        # TC-piecewise prefill graph which forces the threshold to 0.
+-        dual_stream_threshold = (
+-            0 if check_cuda_graph_backend(Phase.PREFILL, Backend.TC_PIECEWISE) else 1024
+-        )
+-        use_alt = (
+-            self.alt_stream is not None
+-            and get_is_capture_mode()
+-            and num_tokens < dual_stream_threshold
+-            and _gdn_use_alt_stream
+-        )
+-        if use_alt:
+-            current_stream = torch.cuda.current_stream()
+-            self.alt_stream.wait_stream(current_stream)
+-            written = self.in_proj_qkvz.quant_method.apply_into_split(
++        def _run_qkvz() -> bool:
++            return self.in_proj_qkvz.quant_method.apply_into_split(
+                 self.in_proj_qkvz,
+                 hidden_states,
+                 mixed_qkv,
+                 z.view(num_tokens, -1),
+                 qkv_dim,
+             )
++
++        if self._direct_use_alt(num_tokens) and _GDN_FRONT_OVERLAP:
++            # Measured: b/a's 3 CTAs on the alt stream start ~26 us late, behind the
++            # qkvz wave; on the main stream their PDL launch goes first.
++            current_stream = torch.cuda.current_stream()
++            self.alt_stream.wait_stream(current_stream)
++            with torch.cuda.stream(self.alt_stream):
++                written = _run_qkvz()
++            _run_ba()
++            # Also joins the combine gate forked by `front_gate_stream`.
++            current_stream.wait_stream(self.alt_stream)
++        elif self._direct_use_alt(num_tokens):
++            current_stream = torch.cuda.current_stream()
++            self.alt_stream.wait_stream(current_stream)
++            written = _run_qkvz()
+             with torch.cuda.stream(self.alt_stream):
+                 _run_ba()
+             current_stream.wait_stream(self.alt_stream)
+         else:
+-            written = self.in_proj_qkvz.quant_method.apply_into_split(
+-                self.in_proj_qkvz,
+-                hidden_states,
+-                mixed_qkv,
+-                z.view(num_tokens, -1),
+-                qkv_dim,
+-            )
++            written = _run_qkvz()
+             _run_ba()
+         if not written:
+             # The qkvz projection could not take the GEMV path (an unexpected
+diff --git a/python/sglang/srt/models/qwen4_exp.py b/python/sglang/srt/models/qwen4_exp.py
+index 31b5cebd94..1815d81015 100644
+--- a/python/sglang/srt/models/qwen4_exp.py
++++ b/python/sglang/srt/models/qwen4_exp.py
+@@ -1347,7 +1347,9 @@ class Qwen4ExpLayerExtensionMixin:
+         forward_batch: ForwardBatch,
+         *,
+         ple_batch: Optional[_PLEBatch],
++        gate_stream: Optional[torch.cuda.Stream] = None,
+     ):
++        """`gate_stream` goes to the attention HC mix; the block must join it."""
+         if isinstance(hidden_states, _PendingHCCombine):
+             pending = hidden_states
+             if self.ple is None:
+@@ -1361,6 +1363,7 @@ class Qwen4ExpLayerExtensionMixin:
+                     shared_output=pending.shared_output,
+                     shared_gate=pending.shared_gate,
+                     fused_attr="_layer_apply_fused",
++                    gate_stream=gate_stream,
+                 )
+             # The PLE reads the combined residual as its query, so it has to
+             # exist before the mix; `_hc_defer_to_next_layer` keeps the
+@@ -1389,7 +1392,9 @@ class Qwen4ExpLayerExtensionMixin:
+                     ple_query, forward_batch, ple_batch
+                 )
+ 
+-        hidden_states, residual = self.attn_hyper_connection.mix(hidden_states)
++        hidden_states, residual = self.attn_hyper_connection.mix(
++            hidden_states, gate_stream=gate_stream
++        )
+         return hidden_states, residual
+ 
+     def _prepare_qwen4_exp_mlp(
+@@ -1523,6 +1528,18 @@ class Qwen4ExpLinearDecoderLayer(
+         super().__init__(config, layer_id, quant_config, prefix, alt_stream, is_nextn)
+         self._init_qwen4_exp_layer_extensions(config, layer_id, quant_config, prefix)
+ 
++    def _attn_gate_stream(
++        self, hidden_states, forward_batch: ForwardBatch
++    ) -> Optional[torch.cuda.Stream]:
++        """Side stream for the attention combine gate, joined by `linear_attn`."""
++        if forward_batch.forward_mode.is_idle():
++            return None
++        if isinstance(hidden_states, _PendingHCCombine):
++            num_tokens = hidden_states.block_output.shape[0]
++        else:
++            num_tokens = hidden_states.shape[0]
++        return self.linear_attn.front_gate_stream(num_tokens)
++
+     def forward(
+         self,
+         hidden_states: torch.Tensor,
+@@ -1536,6 +1553,7 @@ class Qwen4ExpLinearDecoderLayer(
+             residual,
+             forward_batch,
+             ple_batch=kwargs.get("ple_batch"),
++            gate_stream=self._attn_gate_stream(hidden_states, forward_batch),
+         )
+ 
+         if not forward_batch.forward_mode.is_idle():
+-- 
+2.43.0
+

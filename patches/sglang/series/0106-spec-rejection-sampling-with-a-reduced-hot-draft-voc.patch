@@ -1,0 +1,352 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: aiueo52 <aiueo52@users.noreply.github.com>
+Date: Thu, 1 Oct 2026 02:45:33 +0900
+Subject: [PATCH 106/121] spec: rejection sampling with a reduced (hot) draft
+ vocab
+
+Scatter every draft proposal q into the target vocab (zero off the hot set)
+instead of refusing --speculative-use-rejection-sampling when a token map is
+set. q is truncated like the verify truncates p (top-k cap 64, then the
+request's top-k/top-p; SGLANG_RS_DRAFT_TOPK=0 keeps the untruncated q), which
+keeps greedy requests on the argmax chain and raises sum(min(p, q)). The draft
+graph now reads per-request top-k/top-p buffers; the RS draft-extend records
+the C1 position-0 confidence like the greedy path. Draft rows are written in
+place into one (bs, steps, vocab) tensor instead of a per-step stack.
+
+Offline check (Triton interpreter, 20k rows/case): emitted-token distributions
+match p at every chain position (chi2), greedy reproduces the target argmax.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../eagle_draft_cuda_graph_runner.py          |  11 +-
+ .../sglang/srt/speculative/eagle_worker_v2.py | 146 ++++++++++++------
+ python/sglang/srt/speculative/spec_utils.py   |  45 ++++++
+ 3 files changed, 155 insertions(+), 47 deletions(-)
+
+diff --git a/python/sglang/srt/speculative/eagle_draft_cuda_graph_runner.py b/python/sglang/srt/speculative/eagle_draft_cuda_graph_runner.py
+index 1774ac25c4..078f2bfb3c 100644
+--- a/python/sglang/srt/speculative/eagle_draft_cuda_graph_runner.py
++++ b/python/sglang/srt/speculative/eagle_draft_cuda_graph_runner.py
+@@ -40,6 +40,7 @@ from sglang.srt.runtime_context import (
+     get_spec,
+ )
+ from sglang.srt.sampling.sampling_batch_info import SamplingBatchInfo
++from sglang.srt.sampling.sampling_params import TOP_K_ALL
+ from sglang.srt.speculative.eagle_info import EagleDraftInput
+ from sglang.srt.speculative.eagle_utils import get_draft_recurrent_hidden_state_spec
+ from sglang.srt.speculative.spec_utils import resolve_num_tokens_per_req
+@@ -212,6 +213,10 @@ class EAGLEDraftCudaGraphRunner(DecodeCudaGraphRunner):
+             )
+ 
+             self.temperatures = torch.ones((self.max_bs, 1), dtype=torch.float)
++            # Rejection sampling truncates the draft proposal like the verify
++            # truncates p, so the graph reads the per-request top-k/top-p too.
++            self.top_ks = torch.full((self.max_bs,), TOP_K_ALL, dtype=torch.int32)
++            self.top_ps = torch.ones((self.max_bs,), dtype=torch.float)
+ 
+             if self.require_gathered_buffer:
+                 if self.require_mlp_tp_gather:
+@@ -404,8 +409,8 @@ class EAGLEDraftCudaGraphRunner(DecodeCudaGraphRunner):
+ 
+         sampling_info = SamplingBatchInfo(
+             temperatures=self.temperatures[:num_seqs],
+-            top_ps=torch.ones((num_seqs,), dtype=torch.float),
+-            top_ks=torch.full((num_seqs,), -1, dtype=torch.int32),
++            top_ps=self.top_ps[:num_seqs],
++            top_ks=self.top_ks[:num_seqs],
+             min_ps=torch.zeros((num_seqs,), dtype=torch.float),
+             is_all_greedy=False,
+             is_any_greedy=False,
+@@ -612,6 +617,8 @@ class EAGLEDraftCudaGraphRunner(DecodeCudaGraphRunner):
+             self.temperatures[:raw_bs].copy_(
+                 forward_batch.sampling_info.temperatures[:raw_bs]
+             )
++            self.top_ks[:raw_bs].copy_(forward_batch.sampling_info.top_ks[:raw_bs])
++            self.top_ps[:raw_bs].copy_(forward_batch.sampling_info.top_ps[:raw_bs])
+ 
+         # TODO(ch-wan): support num_token_non_padded
+         if self.require_gathered_buffer:
+diff --git a/python/sglang/srt/speculative/eagle_worker_v2.py b/python/sglang/srt/speculative/eagle_worker_v2.py
+index a3567b7349..4ae4a4fe32 100644
+--- a/python/sglang/srt/speculative/eagle_worker_v2.py
++++ b/python/sglang/srt/speculative/eagle_worker_v2.py
+@@ -99,8 +99,10 @@ from sglang.srt.speculative.spec_utils import (
+     fast_sample,
+     get_plan_stream,
+     load_token_map,
++    RS_DRAFT_TOPK,
+     renorm_draft_probs,
+     sample_draft_proposal,
++    sample_draft_proposal_truncated,
+     select_top_k_tokens,
+     spec_stage_span,
+ )
+@@ -244,19 +246,17 @@ class EagleDraftWorker(EagleDraftWorkerBase):
+         self.init_lm_head()
+ 
+         if get_spec().speculative_use_rejection_sampling:
+-            target_vocab_size = self.target_worker.model_config.vocab_size
+-            draft_vocab_size = (
+-                self.hot_token_id.shape[0]
+-                if self.hot_token_id is not None
+-                else target_vocab_size
+-            )
+-            # FIXME: support reduced (hot) draft vocab by scattering draft probs
+-            # into the target vocab via the d2t map before the sampling kernel.
+-            if draft_vocab_size != target_vocab_size:
++            # A reduced (hot) draft vocab is fine: every draft q is scattered
++            # into the target vocab (zero off the hot set) before it reaches
++            # the verify, see _rs_draft_proposal. The draft graph's draft_probs
++            # buffer is sized by the draft config, so the two must agree.
++            self._rs_vocab_size = self.target_worker.model_config.vocab_size
++            draft_config_vocab = self.draft_runner.model_config.vocab_size
++            if draft_config_vocab != self._rs_vocab_size:
+                 raise ValueError(
+-                    "--speculative-use-rejection-sampling requires the draft and "
+-                    f"target to share one vocab, but the draft vocab "
+-                    f"({draft_vocab_size}) != target vocab ({target_vocab_size})."
++                    "--speculative-use-rejection-sampling needs the draft config "
++                    f"vocab ({draft_config_vocab}) to equal the target vocab "
++                    f"({self._rs_vocab_size})."
+                 )
+ 
+     def init_attention_backends(self):
+@@ -836,6 +836,64 @@ class EagleDraftWorker(EagleDraftWorkerBase):
+             device=self.device,
+         )
+ 
++    def _record_position0_confidence(self, next_token_logits: torch.Tensor):
++        # C1: the confidence the adaptive controller decides on. This is the
++        # only chain position whose probability exists before the next step's
++        # state swap, because the draft loop itself is one captured CUDA graph.
++        if self._conf_channel is None:
++            return
++        p0 = top1_prob(next_token_logits)
++        self._conf_channel.record_position0(p0)
++        if self._chain_conf_buf is not None:
++            n = min(p0.shape[0], self._chain_conf_buf.shape[0])
++            self._chain_conf_buf[:n, 0].copy_(p0[:n])
++
++    def _rs_draft_proposal(
++        self,
++        next_token_logits: torch.Tensor,
++        sampling_info,
++        out: Optional[torch.Tensor] = None,
++    ):
++        """Rejection-sampling draft proposal on the target vocab.
++
++        Returns (q, q(X), X): q is (bs, target vocab) and zero off the draft's
++        support, X is a draft-vocab id (the callers map it through
++        hot_token_id). `out`, when given, must be zero-filled (bs, vocab) and
++        receives q in place.
++        """
++        bs = next_token_logits.shape[0]
++        if RS_DRAFT_TOPK > 0:
++            probs, ids, topk_p, topk_index = sample_draft_proposal_truncated(
++                next_token_logits,
++                sampling_info.temperatures,
++                sampling_info.top_ks,
++                sampling_info.top_ps,
++                RS_DRAFT_TOPK,
++            )
++            if self.hot_token_id is not None:
++                ids = self.hot_token_id[ids]
++        else:
++            probs, topk_p, topk_index = sample_draft_proposal(
++                next_token_logits, sampling_info.temperatures
++            )
++            ids = self.hot_token_id
++            if ids is None:
++                if out is None:
++                    return probs, topk_p, topk_index
++                out.copy_(probs)
++                return out, topk_p, topk_index
++        if out is None:
++            out = torch.zeros(
++                (bs, self._rs_vocab_size),
++                dtype=torch.float32,
++                device=next_token_logits.device,
++            )
++        if ids.dim() == 1:
++            out.index_copy_(1, ids, probs.float())
++        else:
++            out.scatter_(1, ids, probs)
++        return out, topk_p, topk_index
++
+     def draft_forward(self, forward_batch: ForwardBatch):
+         # Parse args
+         spec_info: EagleDraftInput = forward_batch.spec_info
+@@ -865,8 +923,21 @@ class EagleDraftWorker(EagleDraftWorkerBase):
+         score_list: List[torch.Tensor] = []
+         token_list: List[torch.Tensor] = []
+         parents_list: List[torch.Tensor] = []
++        # Rejection sampling: q per chain position on the target vocab. Row 0
++        # came from the previous draft-extend; each draft step fills the next
++        # row in place, so no per-step stack of vocab-wide rows is needed.
++        draft_probs = None
+         if get_spec().speculative_use_rejection_sampling:
+-            draft_probs_list: List[torch.Tensor] = [spec_info.draft_probs]
++            draft_probs = torch.zeros(
++                (
++                    topk_index.shape[0],
++                    self.speculative_num_steps,
++                    spec_info.draft_probs.shape[-1],
++                ),
++                dtype=torch.float32,
++                device=spec_info.draft_probs.device,
++            )
++            draft_probs[:, 0].copy_(spec_info.draft_probs)
+ 
+         topk1_chain_fits = (
+             self.topk == 1
+@@ -957,11 +1028,11 @@ class EagleDraftWorker(EagleDraftWorkerBase):
+                     logits_output.next_token_logits, f"draft_forward step {i}"
+                 )
+                 if get_spec().speculative_use_rejection_sampling:
+-                    probs, topk_p, topk_index = sample_draft_proposal(
++                    _, topk_p, topk_index = self._rs_draft_proposal(
+                         logits_output.next_token_logits,
+-                        forward_batch.sampling_info.temperatures,
++                        forward_batch.sampling_info,
++                        out=draft_probs[:, i + 1],
+                     )
+-                    draft_probs_list.append(probs)
+                     forward_batch.positions.add_(1)
+                 elif self.topk == 1 and not _is_hip:
+                     if _is_cuda:
+@@ -1011,12 +1082,6 @@ class EagleDraftWorker(EagleDraftWorkerBase):
+                     topk_index = self.hot_token_id[topk_index]
+                 hidden_states = logits_output.hidden_states
+ 
+-        draft_probs = (
+-            torch.stack(draft_probs_list, dim=1)
+-            if get_spec().speculative_use_rejection_sampling
+-            else None
+-        )
+-
+         # Organize the results
+         if draft_tokens_topk1 is not None:
+             bs = draft_tokens_topk1.shape[0]
+@@ -1165,20 +1230,20 @@ class EagleDraftWorker(EagleDraftWorkerBase):
+             prefill_dsa_topk = self.dsa_extend_topk_buf[:bs].clone()
+ 
+         # Assemble the next-iter draft spec_info from the extend output.
+-        use_rejection_sampling = get_spec().speculative_use_rejection_sampling
+-        probs = renorm_draft_probs(
+-            logits_output.next_token_logits,
+-            batch.sampling_info,
+-            use_rejection_sampling,
+-        )
+-        if use_rejection_sampling:
+-            topk_p, topk_index = fast_sample(probs, num_samples=1)
++        draft_probs = None
++        if get_spec().speculative_use_rejection_sampling:
++            draft_probs, topk_p, topk_index = self._rs_draft_proposal(
++                logits_output.next_token_logits, batch.sampling_info
++            )
+         else:
++            probs = renorm_draft_probs(
++                logits_output.next_token_logits, batch.sampling_info, False
++            )
+             topk_p, topk_index = fast_topk(probs, self.topk, dim=-1)
+         return EagleDraftInput(
+             topk_p=topk_p,
+             topk_index=topk_index,
+-            draft_probs=probs if use_rejection_sampling else None,
++            draft_probs=draft_probs,
+             hidden_states=logits_output.hidden_states,
+             bonus_tokens=next_token_ids,
+             num_tokens_per_req=1,
+@@ -1312,10 +1377,10 @@ class EagleDraftWorker(EagleDraftWorkerBase):
+         # The draft-extend graph only anchors full logits; selected-row topk is
+         # owned by the worker for both graph and eager paths.
+         if get_spec().speculative_use_rejection_sampling:
+-            ret_draft_probs, ret_topk_p, ret_topk_index = sample_draft_proposal(
+-                draft_logits_output.next_token_logits,
+-                batch.sampling_info.temperatures,
++            ret_draft_probs, ret_topk_p, ret_topk_index = self._rs_draft_proposal(
++                draft_logits_output.next_token_logits, batch.sampling_info
+             )
++            self._record_position0_confidence(draft_logits_output.next_token_logits)
+         elif self.topk == 1 and not _is_hip:
+             # Gated to CUDA: see #26358 — ROCm's argmax tie-break corrupts
+             # MTP draft selection on FP8 logits.
+@@ -1324,17 +1389,8 @@ class EagleDraftWorker(EagleDraftWorkerBase):
+             )
+             ret_topk_p = torch.ones_like(ret_topk_index, dtype=torch.float32)
+             ret_draft_probs = None
+-            if self._conf_channel is not None:
+-                # C1: the confidence the adaptive controller decides on.  This
+-                # is the only chain position whose probability exists before
+-                # the next step's state swap, because the draft loop itself is
+-                # one captured CUDA graph.  ret_topk_p stays 1.0 so every
+-                # existing consumer is unchanged.
+-                p0 = top1_prob(draft_logits_output.next_token_logits)
+-                self._conf_channel.record_position0(p0)
+-                if self._chain_conf_buf is not None:
+-                    n = min(p0.shape[0], self._chain_conf_buf.shape[0])
+-                    self._chain_conf_buf[:n, 0].copy_(p0[:n])
++            # ret_topk_p stays 1.0 so every existing consumer is unchanged.
++            self._record_position0_confidence(draft_logits_output.next_token_logits)
+         else:
+             probs = renorm_draft_probs(
+                 draft_logits_output.next_token_logits,
+diff --git a/python/sglang/srt/speculative/spec_utils.py b/python/sglang/srt/speculative/spec_utils.py
+index 511564b953..7f92384aa2 100644
+--- a/python/sglang/srt/speculative/spec_utils.py
++++ b/python/sglang/srt/speculative/spec_utils.py
+@@ -180,6 +180,51 @@ def sample_draft_proposal(next_token_logits: torch.Tensor, temperatures: torch.T
+     return probs, topk_p, topk_index
+ 
+ 
++# Support cap of the truncated rejection-sampling proposal; 0 = the untruncated
++# sample_draft_proposal above (A/B only: it also samples greedy requests' drafts).
++RS_DRAFT_TOPK = int(os.environ.get("SGLANG_RS_DRAFT_TOPK", "64"))
++
++
++def sample_draft_proposal_truncated(
++    next_token_logits: torch.Tensor,
++    temperatures: torch.Tensor,
++    top_ks: torch.Tensor,
++    top_ps: torch.Tensor,
++    k_cap: int,
++):
++    """Leviathan draft proposal on a truncated support.
++
++    q is softmax(logits / T) restricted to the k_cap largest draft logits, then
++    to the request's own top-k and top-p (the filters the verify applies to p),
++    renormalised. Any q keeps the verify lossless as long as X ~ q and that same
++    q reaches the verify; truncating like p only moves q's mass off tokens p can
++    never emit, which raises sum(min(p, q)). A greedy request (top_k == 1) gets
++    q one-hot on the draft argmax, i.e. the ordinary greedy chain.
++
++    Returns (q on the support (bs, K), support ids (bs, K) in the draft vocab,
++    q(X) (bs, 1), X (bs, 1) in the draft vocab); K = min(k_cap, draft vocab).
++    """
++    k = min(k_cap, next_token_logits.shape[-1])
++    top_logits, top_ids = torch.topk(next_token_logits.float(), k, dim=-1)
++    weights = torch.exp((top_logits - top_logits[:, :1]) / temperatures)
++    ranks = torch.arange(k, device=weights.device)
++    top_ks = top_ks.unsqueeze(1)
++    # top_k <= 0 (the draft graph's capture-time filler) means no top-k.
++    weights = weights * ((ranks < top_ks) | (top_ks <= 0))
++    probs = weights / weights.sum(dim=-1, keepdim=True)
++    # Keep the shortest prefix reaching top_p (exclusive cumsum < top_p), the
++    # same rule top_p_renorm_prob applies to p; rank 0 always survives.
++    exclusive = torch.cumsum(probs, dim=-1) - probs
++    probs = probs * (exclusive < top_ps.unsqueeze(1))
++    probs = probs / probs.sum(dim=-1, keepdim=True)
++    # X ~ probs by the exponential race (Gumbel-max); zero-mass slots score 0
++    # and rank 0 always has mass, so they are never drawn.
++    race = torch.empty_like(probs).exponential_(1.0)
++    race.clamp_min_(torch.finfo(torch.float32).tiny)
++    pick = (probs / race).argmax(dim=-1, keepdim=True)
++    return probs, top_ids, probs.gather(1, pick), top_ids.gather(1, pick)
++
++
+ # Simulate acceptance length for benchmarking purposes
+ SIMULATE_ACC_LEN = envs.SGLANG_SIMULATE_ACC_LEN.get()  # turn off if < 0
+ SIMULATE_ACC_METHOD = envs.SGLANG_SIMULATE_ACC_METHOD.get()
+-- 
+2.43.0
+

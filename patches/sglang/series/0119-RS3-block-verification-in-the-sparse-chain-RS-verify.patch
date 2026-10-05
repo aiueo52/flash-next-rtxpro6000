@@ -1,0 +1,238 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: aiueo52 <aiueo52@users.noreply.github.com>
+Date: Thu, 1 Oct 2026 22:14:04 +0900
+Subject: [PATCH 119/121] RS3: block verification in the sparse chain RS verify
+ (SGLANG_RS_BLOCK_VERIFY)
+
+Sun et al. block verification for RS2's draft chain: pi/h per position,
+tau = last position whose coin passes, final draw from max(pi_tau p - q, 0)
+or p at tau = G. Constexpr-gated; with the flag unset the kernel and call
+kwargs are the G1 commit's. Requires SGLANG_OPT_SPEC_SPARSE_RS.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../kernels/ops/speculative/sparse_rs.py      | 93 ++++++++++++++-----
+ python/sglang/srt/environ.py                  |  1 +
+ python/sglang/srt/speculative/eagle_utils.py  |  2 +
+ .../sglang/srt/speculative/eagle_worker_v2.py |  3 +-
+ python/sglang/srt/speculative/spec_info.py    |  2 +
+ python/sglang/srt/speculative/spec_utils.py   |  1 +
+ 6 files changed, 78 insertions(+), 24 deletions(-)
+
+diff --git a/python/sglang/kernels/ops/speculative/sparse_rs.py b/python/sglang/kernels/ops/speculative/sparse_rs.py
+index 3b43ed5a92..4b1d9663dc 100644
+--- a/python/sglang/kernels/ops/speculative/sparse_rs.py
++++ b/python/sglang/kernels/ops/speculative/sparse_rs.py
+@@ -212,7 +212,7 @@ def _chain_sampling_sparse_kernel(
+     Predicts, AcceptIndex, AcceptTokenNum, Candidates, RetriveIndex,
+     Coins, CoinsFinal, P, PI, Q, QI,
+     NUM_SLOTS: tl.constexpr, K: tl.constexpr, KQ: tl.constexpr,
+-    KP: tl.constexpr, VOCAB: tl.constexpr,
++    KP: tl.constexpr, VOCAB: tl.constexpr, BLOCK_VERIFY: tl.constexpr,
+ ):
+     bx = tl.program_id(0).to(tl.int64)
+     poffs = tl.arange(start=0, end=KP)
+@@ -221,38 +221,85 @@ def _chain_sampling_sparse_kernel(
+     last = tl.load(RetriveIndex + base)
+     tl.store(pointer=AcceptIndex + base, value=last)
+     num_correct = 0
+-    walking = 1
+-    step = 1
+-    while (step < NUM_SLOTS) & (walking == 1):
+-        token = tl.load(Candidates + base + step)
+-        p = tl.load(P + (base + step - 1) * KP + poffs)
+-        pi = tl.load(PI + (base + step - 1) * KP + poffs)
+-        qbase = (bx * (NUM_SLOTS - 1) + step - 1) * K
+-        q = tl.load(pointer=Q + qbase + qoffs, mask=qoffs < K, other=0.0)
+-        qi = tl.load(pointer=QI + qbase + qoffs, mask=qoffs < K, other=-1)
+-        q = tl.where(condition=q == q, x=q, y=0.0)
+-        pt = tl.sum(tl.where(condition=pi == token, x=p, y=0.0), axis=0)
+-        qt = tl.sum(tl.where(condition=qi == token, x=q, y=0.0), axis=0)
+-        coin = tl.load(Coins + base + step - 1)
+-        if coin * qt < pt:
++    if BLOCK_VERIFY:
++        path_pi = tl.full(shape=(), value=1.0, dtype=tl.float32)
++        final_pi = path_pi
++        step = 1
++        while (step < NUM_SLOTS) & (path_pi > 0):
++            token = tl.load(pointer=Candidates + base + step)
++            p = tl.load(pointer=P + (base + step - 1) * KP + poffs).to(dtype=tl.float32)
++            pi = tl.load(pointer=PI + (base + step - 1) * KP + poffs)
++            qbase = (bx * (NUM_SLOTS - 1) + step - 1) * K
++            q = tl.load(pointer=Q + qbase + qoffs, mask=qoffs < K, other=0.0).to(dtype=tl.float32)
++            qi = tl.load(pointer=QI + qbase + qoffs, mask=qoffs < K, other=-1)
++            q = tl.where(condition=q == q, x=q, y=0.0)
++            pt = tl.sum(input=tl.where(condition=pi == token, x=p, y=0.0), axis=0)
++            qt = tl.sum(input=tl.where(condition=qi == token, x=q, y=0.0), axis=0)
++            path_pi = tl.where(condition=pt <= 0, x=0.0,
++                               y=tl.where(condition=qt == 0, x=1.0, y=tl.minimum(x=path_pi * pt / qt, y=1.0)))
++            h = path_pi
++            if step < NUM_SLOTS - 1:
++                p = tl.load(pointer=P + (base + step) * KP + poffs).to(dtype=tl.float32)
++                pi = tl.load(pointer=PI + (base + step) * KP + poffs)
++                qbase = (bx * (NUM_SLOTS - 1) + step) * K
++                q = tl.load(pointer=Q + qbase + qoffs, mask=qoffs < K, other=0.0).to(dtype=tl.float32)
++                qi = tl.load(pointer=QI + qbase + qoffs, mask=qoffs < K, other=-1)
++                q = tl.where(condition=q == q, x=q, y=0.0)
++                matched = tl.sum(input=tl.where(condition=pi[:, None] == qi[None, :], x=q[None, :], y=0.0), axis=1)
++                n = tl.sum(input=tl.maximum(x=path_pi * p - matched, y=0.0), axis=0)
++                denominator = n + 1.0 - path_pi
++                h = tl.where(condition=denominator > 0, x=n / denominator, y=1.0)
++            if tl.load(pointer=Coins + base + step - 1) < h:
++                num_correct = step
++                final_pi = path_pi
++            step += 1
++        step = 1
++        while step <= num_correct:
++            token = tl.load(pointer=Candidates + base + step)
+             tl.store(pointer=Predicts + last, value=token)
+-            last = tl.load(RetriveIndex + base + step)
+-            num_correct += 1
+-            tl.store(pointer=AcceptIndex + base + num_correct, value=last)
++            last = tl.load(pointer=RetriveIndex + base + step)
++            tl.store(pointer=AcceptIndex + base + step, value=last)
+             step += 1
+-        else:
+-            walking = 0
++    else:
++        walking = 1
++        step = 1
++        while (step < NUM_SLOTS) & (walking == 1):
++            token = tl.load(Candidates + base + step)
++            p = tl.load(P + (base + step - 1) * KP + poffs)
++            pi = tl.load(PI + (base + step - 1) * KP + poffs)
++            qbase = (bx * (NUM_SLOTS - 1) + step - 1) * K
++            q = tl.load(pointer=Q + qbase + qoffs, mask=qoffs < K, other=0.0)
++            qi = tl.load(pointer=QI + qbase + qoffs, mask=qoffs < K, other=-1)
++            q = tl.where(condition=q == q, x=q, y=0.0)
++            pt = tl.sum(tl.where(condition=pi == token, x=p, y=0.0), axis=0)
++            qt = tl.sum(tl.where(condition=qi == token, x=q, y=0.0), axis=0)
++            coin = tl.load(Coins + base + step - 1)
++            if coin * qt < pt:
++                tl.store(pointer=Predicts + last, value=token)
++                last = tl.load(RetriveIndex + base + step)
++                num_correct += 1
++                tl.store(pointer=AcceptIndex + base + num_correct, value=last)
++                step += 1
++            else:
++                walking = 0
+     tl.store(pointer=AcceptTokenNum + bx, value=num_correct)
+     p = tl.load(P + (base + num_correct) * KP + poffs)
+     pi = tl.load(PI + (base + num_correct) * KP + poffs)
++    if BLOCK_VERIFY:
++        p = p.to(tl.float32)
+     weights = p
+     if num_correct < NUM_SLOTS - 1:
+         qbase = (bx * (NUM_SLOTS - 1) + num_correct) * K
+         q = tl.load(pointer=Q + qbase + qoffs, mask=qoffs < K, other=0.0)
+         qi = tl.load(pointer=QI + qbase + qoffs, mask=qoffs < K, other=-1)
++        if BLOCK_VERIFY:
++            q = q.to(tl.float32)
+         q = tl.where(condition=q == q, x=q, y=0.0)
+         matched = tl.sum(tl.where(condition=pi[:, None] == qi[None, :], x=q[None, :], y=0.0), axis=1)
+-        weights = tl.maximum(x=p - matched, y=0.0)
++        if BLOCK_VERIFY:
++            weights = tl.maximum(x=final_pi * p - matched, y=0.0)
++        else:
++            weights = tl.maximum(x=p - matched, y=0.0)
+         # Deliberately draw P on a zero residual; dense RS returns VOCAB - 1.
+         weights = tl.where(condition=tl.sum(weights, axis=0) > 0, x=weights, y=p)
+     order_keys = (pi << 32) | poffs.to(tl.int64)
+@@ -273,7 +320,7 @@ def chain_speculative_sampling_sparse(
+     candidates: torch.Tensor, retrive_index: torch.Tensor, uniform_samples: torch.Tensor,
+     uniform_samples_for_final_sampling: torch.Tensor, target_probs: torch.Tensor,
+     target_index: torch.Tensor, draft_support_probs: torch.Tensor,
+-    draft_support_tokens: torch.Tensor, vocab_size: int,
++    draft_support_tokens: torch.Tensor, vocab_size: int, block_verify: bool = False,
+ ):
+     bs, num_slots = candidates.shape
+     kp = target_probs.shape[-1]
+@@ -290,6 +337,6 @@ def chain_speculative_sampling_sparse(
+         Coins=uniform_samples.contiguous(), CoinsFinal=uniform_samples_for_final_sampling.contiguous(),
+         P=target_probs.contiguous(), PI=target_index.contiguous(),
+         Q=draft_support_probs.contiguous(), QI=draft_support_tokens.contiguous(),
+-        NUM_SLOTS=num_slots, K=k, KQ=triton.next_power_of_2(k), KP=kp, VOCAB=vocab_size,
++        NUM_SLOTS=num_slots, K=k, KQ=triton.next_power_of_2(k), KP=kp, VOCAB=vocab_size, BLOCK_VERIFY=block_verify,
+         num_warps=4,
+     )
+diff --git a/python/sglang/srt/environ.py b/python/sglang/srt/environ.py
+index 12d93e33e5..514b476efe 100644
+--- a/python/sglang/srt/environ.py
++++ b/python/sglang/srt/environ.py
+@@ -1233,6 +1233,7 @@ class Envs:
+     SGLANG_RS_DRAFT_ONEHOT_ABOVE = EnvFloat(0.0)
+     SGLANG_RS_GREEDY_FAST = EnvBool(False)
+     SGLANG_RS_DUMP_DIR = EnvStr("")
++    SGLANG_RS_BLOCK_VERIFY = EnvBool(False)
+     # Honor min_p in the sampling verify and the RS draft proposal, as the
+     # non-speculative sampler does; off = the verify's top-k/top-p only.
+     SGLANG_SPEC_MIN_P = EnvBool(False)
+diff --git a/python/sglang/srt/speculative/eagle_utils.py b/python/sglang/srt/speculative/eagle_utils.py
+index 66d15888eb..cce4ded3e7 100644
+--- a/python/sglang/srt/speculative/eagle_utils.py
++++ b/python/sglang/srt/speculative/eagle_utils.py
+@@ -58,6 +58,7 @@ _is_cpu = is_cpu()
+ 
+ logger = logging.getLogger(__name__)
+ RS_DUMP_DIR = envs.SGLANG_RS_DUMP_DIR.get()
++RS_BLOCK_VERIFY = envs.SGLANG_RS_BLOCK_VERIFY.get()
+ 
+ if _is_cuda or _is_hip or _is_musa:
+     from sgl_kernel import (
+@@ -863,6 +864,7 @@ def eagle_sample(
+                 draft_support_probs=verify_input.draft_support_probs,
+                 draft_support_tokens=verify_input.draft_support_tokens,
+                 vocab_size=next_token_logits.shape[-1],
++                **({"block_verify": RS_BLOCK_VERIFY} if RS_BLOCK_VERIFY else {}),
+             )
+             if RS_DUMP_DIR:
+                 from sglang.srt.speculative.rs_dump import record_verify
+diff --git a/python/sglang/srt/speculative/eagle_worker_v2.py b/python/sglang/srt/speculative/eagle_worker_v2.py
+index a0fdf2f10d..50a37244af 100644
+--- a/python/sglang/srt/speculative/eagle_worker_v2.py
++++ b/python/sglang/srt/speculative/eagle_worker_v2.py
+@@ -108,6 +108,7 @@ from sglang.srt.speculative.spec_utils import (
+     RS_DRAFT_TEMP_SCALE,
+     RS_DRAFT_ONEHOT_ABOVE,
+     RS_GREEDY_FAST,
++    RS_BLOCK_VERIFY,
+     SPEC_MIN_P,
+     SPEC_SPARSE_RS,
+     renorm_draft_probs,
+@@ -197,7 +198,7 @@ class EagleDraftWorker(EagleDraftWorkerBase):
+                 raise ValueError("SGLANG_OPT_SPEC_SPARSE_RS requires rejection sampling and SGLANG_RS_DRAFT_TOPK > 0")
+             if server_args.enable_multi_layer_eagle:
+                 raise ValueError("SGLANG_OPT_SPEC_SPARSE_RS does not support multi-layer EAGLE")
+-            logger.info(f"SGLANG_OPT_SPEC_SPARSE_RS on: sparse chain RS, draft support K={RS_DRAFT_TOPK}, temp_scale={RS_DRAFT_TEMP_SCALE}, onehot_above={RS_DRAFT_ONEHOT_ABOVE}, greedy_fast={RS_GREEDY_FAST}")
++            logger.info(f"SGLANG_OPT_SPEC_SPARSE_RS on: sparse chain RS, draft support K={RS_DRAFT_TOPK}, temp_scale={RS_DRAFT_TEMP_SCALE}, onehot_above={RS_DRAFT_ONEHOT_ABOVE}, greedy_fast={RS_GREEDY_FAST}, block_verify={RS_BLOCK_VERIFY}")
+         self.topk = get_spec().speculative_eagle_topk
+         if get_spec().speculative_use_rejection_sampling:
+             assert self.topk == 1, "Chain speculative sampling supports only topk=1"
+diff --git a/python/sglang/srt/speculative/spec_info.py b/python/sglang/srt/speculative/spec_info.py
+index 20ae3478b2..4e103008d6 100644
+--- a/python/sglang/srt/speculative/spec_info.py
++++ b/python/sglang/srt/speculative/spec_info.py
+@@ -264,6 +264,8 @@ class SpeculativeAlgorithm(Enum):
+         cfg = resolving_view(server_args)
+         from sglang.srt.environ import envs
+ 
++        if envs.SGLANG_RS_BLOCK_VERIFY.get() and not envs.SGLANG_OPT_SPEC_SPARSE_RS.get():
++            raise ValueError("SGLANG_RS_BLOCK_VERIFY requires SGLANG_OPT_SPEC_SPARSE_RS")
+         if envs.SGLANG_OPT_SPEC_SPARSE_RS.get():
+             if not cfg.speculative_use_rejection_sampling:
+                 raise ValueError("SGLANG_OPT_SPEC_SPARSE_RS requires rejection sampling")
+diff --git a/python/sglang/srt/speculative/spec_utils.py b/python/sglang/srt/speculative/spec_utils.py
+index 6d1651cd45..6bc31c2c3c 100644
+--- a/python/sglang/srt/speculative/spec_utils.py
++++ b/python/sglang/srt/speculative/spec_utils.py
+@@ -184,6 +184,7 @@ RS_DRAFT_TOPK = envs.SGLANG_RS_DRAFT_TOPK.get()
+ RS_DRAFT_TEMP_SCALE = envs.SGLANG_RS_DRAFT_TEMP_SCALE.get()
+ RS_DRAFT_ONEHOT_ABOVE = envs.SGLANG_RS_DRAFT_ONEHOT_ABOVE.get()
+ RS_GREEDY_FAST = envs.SGLANG_RS_GREEDY_FAST.get()
++RS_BLOCK_VERIFY = envs.SGLANG_RS_BLOCK_VERIFY.get()
+ SPEC_MIN_P = envs.SGLANG_SPEC_MIN_P.get()
+ SPEC_SPARSE_VERIFY = envs.SGLANG_OPT_SPEC_SPARSE_VERIFY.get()
+ SPEC_SPARSE_RS = envs.SGLANG_OPT_SPEC_SPARSE_RS.get()
+-- 
+2.43.0
+

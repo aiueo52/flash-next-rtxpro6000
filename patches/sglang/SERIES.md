@@ -1,6 +1,6 @@
 # Patch series index
 
-Base: `jpezzulli/sglang-rtxpro6000` @ `16e5682aad` (branch `pennyroyal-main-sm120-final`). "original" is the commit hash on the author's development branch, which the documentation cites; patch 0040 folds a side-branch merge (its side-branch commits are listed in the second column). Dates are author dates (JST). The patches were regenerated for publication (see `../README.md`): results files with generated text were stripped, the development shell scripts under `dbg/` and `prof-pdl/` were left out (so the file counts of 0061–0066 and 0074 are lower than in the original commits), and names of the author's other projects genericised; subjects, authorship dates and runtime code are unchanged.
+Base: `jpezzulli/sglang-rtxpro6000` @ `16e5682aad` (branch `pennyroyal-main-sm120-final`). "original" is the commit hash on the author's development branch, which the documentation cites; patches 0040 and 0121 each fold a side-branch merge (their side-branch commits are listed in the second column and in the commit message). 0001–0105 are the 2026-09-08 measured tree; 0106–0121 were added on 2026-10-01/02 and 0121 is the 2026-10-02 production build. Dates are author dates (JST). The patches were regenerated for publication (see `../README.md`): results files with generated text were stripped, the development shell scripts under `dbg/` and `prof-pdl/` were left out (so the file counts of 0061–0066 and 0074 are lower than in the original commits), and names of the author's other projects genericised; subjects, authorship dates and runtime code are unchanged.
 
 | # | original | date | subject | files |
 |---:|---|---|---|---:|
@@ -109,3 +109,19 @@ Base: `jpezzulli/sglang-rtxpro6000` @ `16e5682aad` (branch `pennyroyal-main-sm12
 | 0103 | 14d4c4c985 | 09-06 | P2: hand the singleton-route prune to FlashInfer's fused routing prologue | 2 |
 | 0104 | 446c801189 | 09-07 | adaptive runtime: run target warmup/autotune before capturing candidate graphs (SGLANG_ADAPTIVE_TARGET_AUTOTUNE=1, default off; 49 tests) | 3 |
 | 0105 | 7b4d539f9b | 09-07 | adaptive_confidence: config-driven max_grace_batches, down_margin (per-target), adjacent_only_promotion (inert by default; 54 unit tests) | 2 |
+| 0106 | 3cf2750621 | 10-01 | spec: rejection sampling with a reduced (hot) draft vocab | 3 |
+| 0107 | e49eb3393a | 10-01 | spec: honor min_p in the sampling verify and the RS draft proposal | 5 |
+| 0108 | 77dabf210a | 10-01 | spec: sparse target-only sampling verify on the top-KP logits | 4 |
+| 0109 | ef95a68b66 | 10-01 | GDN verify front: fork the MOVED combine gate after HC mix K0, qkvz on the alt stream | 5 |
+| 0110 | 77bcc6d1d0 | 10-01 | moe router: packed-key softmax top-k (SGLANG_ROUTER_FAST_TOPK=1, default off) | 2 |
+| 0111 | 714cf581de | 10-01 | moe router: 32-bit packed keys for bf16 logits; drop the int64 kernel | 2 |
+| 0112 | 714eba5ab6 | 10-01 | DG1: one-token draft MoE as a W4A16 NVFP4 Triton GEMV (opt-in) | 4 |
+| 0113 | 73e379d725 | 10-01 | spec: FlashInfer radix top-k for the sparse verify (SGLANG_OPT_SPEC_SPARSE_TOPK) | 4 |
+| 0114 | ee132e0e53 | 10-01 | DT1: draft-phase tail glue (SGLANG_OPT_DRAFT_TAIL, default off) | 7 |
+| 0115 | c868f2ee86 | 10-01 | DT1: one-kernel chain tree build at topk=1 (SGLANG_OPT_DRAFT_TAIL) | 7 |
+| 0116 | cf1e515722 | 10-01 | RS2: sparse draft proposal and chain rejection sampling (SGLANG_OPT_SPEC_SPARSE_RS) | 10 |
+| 0117 | a8c9cb5f89 | 10-01 | RS2d part 1: draft temperature scale, one-hot threshold and verify dump | 7 |
+| 0118 | 124840a5c3 | 10-01 | RS2d G1: greedy fast path in the sparse RS draft proposal | 4 |
+| 0119 | fb1e77a05a | 10-01 | RS3: block verification in the sparse chain RS verify (SGLANG_RS_BLOCK_VERIFY) | 6 |
+| 0120 | a78b1a5ebd | 10-01 | RS3: vectorize block verification over the chain (one scan, no per-position loop) | 1 |
+| 0121 | 7118260ce3 (merge of d680442609, 1df3112044, 8801f24173, 47d1b4e8ab) | 10-02 | Candidate 2026-10-02: merge the RS package (opus/rs3-bv) and XA1 on ST1 (opus/xa-st1) | 3 |

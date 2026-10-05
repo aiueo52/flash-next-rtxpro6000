@@ -1,0 +1,281 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: aiueo52 <aiueo52@users.noreply.github.com>
+Date: Thu, 1 Oct 2026 21:28:41 +0900
+Subject: [PATCH 117/121] RS2d part 1: draft temperature scale, one-hot
+ threshold and verify dump
+
+Sharper draft proposals for sparse chain RS (flash-next-bench
+specs/RS2D_DRAFT_SHARPEN_2026-10-01.md sections 1-4). Defaults keep RS2:
+- SGLANG_RS_DRAFT_TEMP_SCALE (1.0): the draft proposal uses temperature x s.
+- SGLANG_RS_DRAFT_ONEHOT_ABOVE (0.0): rows whose top probability reaches
+  the threshold propose one-hot q at rank 0.
+- SGLANG_RS_DUMP_DIR: post-verify CPU dumps of p, q and acceptance for the
+  offline grid (TP = 1 only; measurement runs).
+Any q that both draws and verifies keeps RS lossless.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../kernels/ops/speculative/sparse_rs.py      | 17 ++++-
+ python/sglang/srt/environ.py                  |  3 +
+ python/sglang/srt/speculative/eagle_utils.py  | 18 ++++++
+ .../sglang/srt/speculative/eagle_worker_v2.py |  6 +-
+ python/sglang/srt/speculative/rs_dump.py      | 62 +++++++++++++++++++
+ python/sglang/srt/speculative/spec_info.py    |  4 ++
+ python/sglang/srt/speculative/spec_utils.py   |  2 +
+ 7 files changed, 108 insertions(+), 4 deletions(-)
+ create mode 100644 python/sglang/srt/speculative/rs_dump.py
+
+diff --git a/python/sglang/kernels/ops/speculative/sparse_rs.py b/python/sglang/kernels/ops/speculative/sparse_rs.py
+index e0e02b5bb8..cf6ebc0958 100644
+--- a/python/sglang/kernels/ops/speculative/sparse_rs.py
++++ b/python/sglang/kernels/ops/speculative/sparse_rs.py
+@@ -46,9 +46,10 @@ def _sum_compensated(left_hi, left_lo, right_hi, right_lo):
+ def _draft_finalize_kernel(
+     Keys, Temps, TopKs, TopPs, MinPs, Uniforms, HotTokens,
+     Probs, Tokens, TopkP, TopkIndex, Positions, DraftTokens,
+-    stride_q, stride_t, stride_u, stride_chain, column,
++    stride_q, stride_t, stride_u, stride_chain, column, temp_scale, onehot_above,
+     CANDIDATES: tl.constexpr, K: tl.constexpr, KB: tl.constexpr,
+     HAS_MIN_P: tl.constexpr, HAS_MAP: tl.constexpr,
++    HAS_TEMP_SCALE: tl.constexpr, HAS_ONEHOT: tl.constexpr,
+     WRITE_POSITION: tl.constexpr, WRITE_CHAIN: tl.constexpr, BLOCK: tl.constexpr,
+ ):
+     row = tl.program_id(0).to(tl.int64)
+@@ -63,7 +64,10 @@ def _draft_finalize_kernel(
+     vals = tl.where(condition=ranks < K, x=bits.to(tl.float32, bitcast=True), y=-float("inf"))
+     maximum = tl.max(vals, axis=0)
+     temperature = tl.load(Temps + row).to(tl.float32)
+-    temperature = tl.where(condition=temperature > 0, x=temperature, y=1.0)
++    if HAS_TEMP_SCALE:
++        temperature = tl.where(condition=temperature > 0, x=temperature * temp_scale, y=1.0)
++    else:
++        temperature = tl.where(condition=temperature > 0, x=temperature, y=1.0)
+     weights = tl.where(condition=vals == maximum, x=1.0, y=tl.exp((vals - maximum) / temperature))
+     top_k = tl.load(TopKs + row)
+     weights = tl.where(condition=(ranks < K) & ((ranks < top_k) | (top_k <= 0)), x=weights, y=0.0)
+@@ -78,6 +82,9 @@ def _draft_finalize_kernel(
+         p0 = tl.sum(tl.where(condition=ranks == 0, x=probs, y=0.0), axis=0)
+         probs = tl.where(condition=probs >= p0 * tl.load(MinPs + row), x=probs, y=0.0)
+     probs = probs / tl.sum(probs, axis=0)
++    if HAS_ONEHOT:
++        p0 = tl.sum(tl.where(condition=ranks == 0, x=probs, y=0.0), axis=0)
++        probs = tl.where(condition=p0 >= onehot_above, x=(ranks == 0).to(tl.float32), y=probs)
+     cdf = tl.cumsum(probs, axis=0)
+     u = tl.load(Uniforms + row * stride_u) * tl.sum(probs, axis=0)
+     pick = tl.min(tl.where(condition=(cdf > u) & (probs > 0), x=ranks, y=KB), axis=0)
+@@ -129,7 +136,9 @@ def rs_draft_proposal_sparse(
+     positions: torch.Tensor | None = None, draft_tokens: torch.Tensor | None = None,
+     draft_token_column: int = 0, draft_support_probs: torch.Tensor | None = None,
+     draft_support_tokens: torch.Tensor | None = None, topk_impl: str = "triton",
++    temp_scale: float = 1.0, onehot_above: float = 0.0,
+ ):
++    assert temp_scale > 0 and 0 <= onehot_above <= 1
+     assert next_token_logits.ndim == 2 and next_token_logits.stride(1) == 1
+     n, vocab = next_token_logits.shape
+     assert k > 0 and vocab > 0
+@@ -173,8 +182,10 @@ def rs_draft_proposal_sparse(
+         DraftTokens=draft_tokens if draft_tokens is not None else topk_index,
+         stride_q=probs.stride(0), stride_t=tokens.stride(0), stride_u=uniforms.stride(0),
+         stride_chain=draft_tokens.stride(0) if draft_tokens is not None else 0,
+-        column=draft_token_column, CANDIDATES=keys.shape[1], K=k, KB=k_block,
++        column=draft_token_column, temp_scale=temp_scale, onehot_above=onehot_above,
++        CANDIDATES=keys.shape[1], K=k, KB=k_block,
+         HAS_MIN_P=min_ps is not None, HAS_MAP=hot_token_id is not None,
++        HAS_TEMP_SCALE=temp_scale != 1.0, HAS_ONEHOT=onehot_above > 0,
+         WRITE_POSITION=positions is not None, WRITE_CHAIN=draft_tokens is not None,
+         BLOCK=triton.next_power_of_2(keys.shape[1]), num_warps=4,
+     )
+diff --git a/python/sglang/srt/environ.py b/python/sglang/srt/environ.py
+index 318c9e1760..930213d33b 100644
+--- a/python/sglang/srt/environ.py
++++ b/python/sglang/srt/environ.py
+@@ -1229,6 +1229,9 @@ class Envs:
+     # Support cap of the truncated rejection-sampling draft proposal; 0 = the
+     # untruncated proposal (A/B only: it also samples greedy requests' drafts).
+     SGLANG_RS_DRAFT_TOPK = EnvInt(64)
++    SGLANG_RS_DRAFT_TEMP_SCALE = EnvFloat(1.0)
++    SGLANG_RS_DRAFT_ONEHOT_ABOVE = EnvFloat(0.0)
++    SGLANG_RS_DUMP_DIR = EnvStr("")
+     # Honor min_p in the sampling verify and the RS draft proposal, as the
+     # non-speculative sampler does; off = the verify's top-k/top-p only.
+     SGLANG_SPEC_MIN_P = EnvBool(False)
+diff --git a/python/sglang/srt/speculative/eagle_utils.py b/python/sglang/srt/speculative/eagle_utils.py
+index 610c201020..66d15888eb 100644
+--- a/python/sglang/srt/speculative/eagle_utils.py
++++ b/python/sglang/srt/speculative/eagle_utils.py
+@@ -12,6 +12,7 @@ from sglang.kernels.ops.speculative.spec_tree import (
+     verify_tree_greedy_kernel_triton,
+ )
+ from sglang.kernels.ops.speculative.topk1 import build_chain_tree_topk1
++from sglang.srt.environ import envs
+ from sglang.srt.hardware_backend.npu.dsv4.dsv4_common_hooks import (
+     maybe_build_dsv4_verify_bundle,
+ )
+@@ -56,6 +57,7 @@ _is_xpu = is_xpu()
+ _is_cpu = is_cpu()
+ 
+ logger = logging.getLogger(__name__)
++RS_DUMP_DIR = envs.SGLANG_RS_DUMP_DIR.get()
+ 
+ if _is_cuda or _is_hip or _is_musa:
+     from sgl_kernel import (
+@@ -862,6 +864,22 @@ def eagle_sample(
+                 draft_support_tokens=verify_input.draft_support_tokens,
+                 vocab_size=next_token_logits.shape[-1],
+             )
++            if RS_DUMP_DIR:
++                from sglang.srt.speculative.rs_dump import record_verify
++
++                tp_group = get_parallel().attn_tp_group if is_dp_attention_enabled() else get_tp_group()
++                if tp_group.world_size != 1:
++                    raise ValueError("SGLANG_RS_DUMP_DIR supports TP = 1 only")
++                record_verify(
++                    directory=RS_DUMP_DIR, reqs=batch.reqs, candidates=candidates,
++                    target_probs=target_probs.view(bs, num_draft, sparse_kp),
++                    target_index=target_index.view(bs, num_draft, sparse_kp),
++                    draft_support_probs=verify_input.draft_support_probs,
++                    draft_support_tokens=verify_input.draft_support_tokens,
++                    accept_len=num_correct_drafts, temperatures=sampling_info.temperatures,
++                    top_ks=sampling_info.top_ks, top_ps=sampling_info.top_ps,
++                    min_ps=sampling_info.min_ps,
++                )
+         else:
+             tree_speculative_sampling_target_only_sparse(
+                 predicts=predict,  # mutable
+diff --git a/python/sglang/srt/speculative/eagle_worker_v2.py b/python/sglang/srt/speculative/eagle_worker_v2.py
+index 0fff7fc4bf..4000c8c8b5 100644
+--- a/python/sglang/srt/speculative/eagle_worker_v2.py
++++ b/python/sglang/srt/speculative/eagle_worker_v2.py
+@@ -105,6 +105,8 @@ from sglang.srt.speculative.spec_utils import (
+     get_plan_stream,
+     load_token_map,
+     RS_DRAFT_TOPK,
++    RS_DRAFT_TEMP_SCALE,
++    RS_DRAFT_ONEHOT_ABOVE,
+     SPEC_MIN_P,
+     SPEC_SPARSE_RS,
+     renorm_draft_probs,
+@@ -194,7 +196,7 @@ class EagleDraftWorker(EagleDraftWorkerBase):
+                 raise ValueError("SGLANG_OPT_SPEC_SPARSE_RS requires rejection sampling and SGLANG_RS_DRAFT_TOPK > 0")
+             if server_args.enable_multi_layer_eagle:
+                 raise ValueError("SGLANG_OPT_SPEC_SPARSE_RS does not support multi-layer EAGLE")
+-            logger.info(f"SGLANG_OPT_SPEC_SPARSE_RS on: sparse chain RS, draft support K={RS_DRAFT_TOPK}")
++            logger.info(f"SGLANG_OPT_SPEC_SPARSE_RS on: sparse chain RS, draft support K={RS_DRAFT_TOPK}, temp_scale={RS_DRAFT_TEMP_SCALE}, onehot_above={RS_DRAFT_ONEHOT_ABOVE}")
+         self.topk = get_spec().speculative_eagle_topk
+         if get_spec().speculative_use_rejection_sampling:
+             assert self.topk == 1, "Chain speculative sampling supports only topk=1"
+@@ -942,6 +944,7 @@ class EagleDraftWorker(EagleDraftWorkerBase):
+             uniforms=torch.rand((next_token_logits.shape[0],), device=next_token_logits.device),
+             hot_token_id=self.hot_token_id,
+             k=RS_DRAFT_TOPK,
++            temp_scale=RS_DRAFT_TEMP_SCALE, onehot_above=RS_DRAFT_ONEHOT_ABOVE,
+         )
+ 
+     def draft_forward(self, forward_batch: ForwardBatch):
+@@ -1105,6 +1108,7 @@ class EagleDraftWorker(EagleDraftWorkerBase):
+                         top_ps=forward_batch.sampling_info.top_ps,
+                         min_ps=forward_batch.sampling_info.min_ps if SPEC_MIN_P else None,
+                         uniforms=uniforms[:, i], k=RS_DRAFT_TOPK,
++                        temp_scale=RS_DRAFT_TEMP_SCALE, onehot_above=RS_DRAFT_ONEHOT_ABOVE,
+                         hot_token_id=self.hot_token_id, positions=forward_batch.positions,
+                         draft_tokens=draft_tokens_topk1, draft_token_column=i + 1,
+                         draft_support_probs=draft_support_probs[:, i + 1],
+diff --git a/python/sglang/srt/speculative/rs_dump.py b/python/sglang/srt/speculative/rs_dump.py
+new file mode 100644
+index 0000000000..1478e17ae9
+--- /dev/null
++++ b/python/sglang/srt/speculative/rs_dump.py
+@@ -0,0 +1,62 @@
++"""Post-verify sparse RS dumps for offline analysis; supports TP = 1 only.
++
++Each chunk contains up to 50 CPU records. Normal process exit flushes the tail;
++an abrupt termination can lose the current partial chunk. Dumping synchronizes
++CPU copies and is intended for measurement runs only.
++"""
++
++import atexit
++import os
++from pathlib import Path
++import time
++
++import torch
++
++_records = []
++_directory = ""
++_chunk = 0
++
++
++def flush():
++    global _chunk
++    if not _records:
++        return
++    directory = Path(_directory)
++    directory.mkdir(parents=True, exist_ok=True)
++    torch.save(obj=_records, f=directory / f"rs-dump-{os.getpid()}-{_chunk:05d}.pt")
++    _records.clear()
++    _chunk += 1
++
++
++def record_verify(
++    *, directory, reqs, candidates, target_probs, target_index,
++    draft_support_probs, draft_support_tokens, accept_len,
++    temperatures, top_ks, top_ps, min_ps,
++):
++    global _directory
++    if _directory != directory:
++        flush()
++        _directory = directory
++    record = {
++        "time": time.time(), "rid": [req.rid for req in reqs],
++        "input_len": [len(req.origin_input_ids) for req in reqs],
++    }
++    for name, tensor, dtype in (
++        ("candidates", candidates, torch.int32),
++        ("target_probs", target_probs, torch.float32),
++        ("target_index", target_index, torch.int32),
++        ("draft_support_probs", draft_support_probs, torch.float32),
++        ("draft_support_tokens", draft_support_tokens, torch.int32),
++        ("accept_len", accept_len, torch.int32),
++        ("temperatures", temperatures, torch.float32),
++        ("top_ks", top_ks, torch.int32),
++        ("top_ps", top_ps, torch.float32),
++        ("min_ps", min_ps, torch.float32),
++    ):
++        record[name] = tensor.to(device="cpu", dtype=dtype, copy=True)
++    _records.append(record)
++    if len(_records) == 50:
++        flush()
++
++
++atexit.register(flush)
+diff --git a/python/sglang/srt/speculative/spec_info.py b/python/sglang/srt/speculative/spec_info.py
+index b8bd46e076..20ae3478b2 100644
+--- a/python/sglang/srt/speculative/spec_info.py
++++ b/python/sglang/srt/speculative/spec_info.py
+@@ -269,6 +269,10 @@ class SpeculativeAlgorithm(Enum):
+                 raise ValueError("SGLANG_OPT_SPEC_SPARSE_RS requires rejection sampling")
+             if envs.SGLANG_RS_DRAFT_TOPK.get() <= 0:
+                 raise ValueError("SGLANG_OPT_SPEC_SPARSE_RS requires SGLANG_RS_DRAFT_TOPK > 0")
++            if not envs.SGLANG_RS_DRAFT_TEMP_SCALE.get() > 0:
++                raise ValueError("SGLANG_OPT_SPEC_SPARSE_RS requires SGLANG_RS_DRAFT_TEMP_SCALE > 0")
++            if not 0 <= envs.SGLANG_RS_DRAFT_ONEHOT_ABOVE.get() <= 1:
++                raise ValueError("SGLANG_OPT_SPEC_SPARSE_RS requires 0 <= SGLANG_RS_DRAFT_ONEHOT_ABOVE <= 1")
+             if cfg.speculative_eagle_topk != 1:
+                 raise ValueError("SGLANG_OPT_SPEC_SPARSE_RS requires speculative_eagle_topk == 1")
+             if self not in (SpeculativeAlgorithm.EAGLE, SpeculativeAlgorithm.EAGLE3) or cfg.enable_multi_layer_eagle:
+diff --git a/python/sglang/srt/speculative/spec_utils.py b/python/sglang/srt/speculative/spec_utils.py
+index bd2231c8f2..eca59cc9d9 100644
+--- a/python/sglang/srt/speculative/spec_utils.py
++++ b/python/sglang/srt/speculative/spec_utils.py
+@@ -181,6 +181,8 @@ def sample_draft_proposal(next_token_logits: torch.Tensor, temperatures: torch.T
+ 
+ 
+ RS_DRAFT_TOPK = envs.SGLANG_RS_DRAFT_TOPK.get()
++RS_DRAFT_TEMP_SCALE = envs.SGLANG_RS_DRAFT_TEMP_SCALE.get()
++RS_DRAFT_ONEHOT_ABOVE = envs.SGLANG_RS_DRAFT_ONEHOT_ABOVE.get()
+ SPEC_MIN_P = envs.SGLANG_SPEC_MIN_P.get()
+ SPEC_SPARSE_VERIFY = envs.SGLANG_OPT_SPEC_SPARSE_VERIFY.get()
+ SPEC_SPARSE_RS = envs.SGLANG_OPT_SPEC_SPARSE_RS.get()
+-- 
+2.43.0
+

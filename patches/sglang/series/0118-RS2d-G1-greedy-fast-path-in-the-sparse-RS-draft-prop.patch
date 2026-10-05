@@ -1,0 +1,184 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: aiueo52 <aiueo52@users.noreply.github.com>
+Date: Thu, 1 Oct 2026 21:55:35 +0900
+Subject: [PATCH 118/121] RS2d G1: greedy fast path in the sparse RS draft
+ proposal
+
+SGLANG_RS_GREEDY_FAST (default off): rows with top_k == 1 take the max key in both
+proposal kernels instead of tl.topk; outputs bit-identical, other rows unchanged.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../kernels/ops/speculative/sparse_rs.py      | 37 +++++++++++++------
+ python/sglang/srt/environ.py                  |  1 +
+ .../sglang/srt/speculative/eagle_worker_v2.py |  5 ++-
+ python/sglang/srt/speculative/spec_utils.py   |  1 +
+ 4 files changed, 32 insertions(+), 12 deletions(-)
+
+diff --git a/python/sglang/kernels/ops/speculative/sparse_rs.py b/python/sglang/kernels/ops/speculative/sparse_rs.py
+index cf6ebc0958..3b43ed5a92 100644
+--- a/python/sglang/kernels/ops/speculative/sparse_rs.py
++++ b/python/sglang/kernels/ops/speculative/sparse_rs.py
+@@ -18,8 +18,8 @@ def _logit_keys(vals, indices):
+ 
+ @triton.jit
+ def _draft_partial_topk_kernel(
+-    Logits, Keys, stride_l, VOCAB: tl.constexpr, SPLITS: tl.constexpr,
+-    KB: tl.constexpr, BLOCK: tl.constexpr,
++    Logits, Keys, TopKs, stride_l, VOCAB: tl.constexpr, SPLITS: tl.constexpr,
++    KB: tl.constexpr, GREEDY_FAST: tl.constexpr, BLOCK: tl.constexpr,
+ ):
+     row = tl.program_id(0).to(tl.int64)
+     split = tl.program_id(1)
+@@ -28,7 +28,13 @@ def _draft_partial_topk_kernel(
+                    other=-float("inf")).to(tl.float32)
+     keys = _logit_keys(vals=vals, indices=indices.to(tl.int64))
+     keys = tl.where(condition=indices < VOCAB, x=keys, y=-9223372036854775807 - 1)
+-    best = tl.topk(x=keys, k=KB)
++    if GREEDY_FAST:
++        if tl.load(pointer=TopKs + row) == 1:
++            best = tl.full(shape=(KB,), value=0, dtype=tl.int64) + tl.max(input=keys, axis=0)
++        else:
++            best = tl.topk(x=keys, k=KB)
++    else:
++        best = tl.topk(x=keys, k=KB)
+     tl.store(pointer=Keys + (row * SPLITS + split) * KB + tl.arange(start=0, end=KB), value=best)
+ 
+ 
+@@ -49,14 +55,20 @@ def _draft_finalize_kernel(
+     stride_q, stride_t, stride_u, stride_chain, column, temp_scale, onehot_above,
+     CANDIDATES: tl.constexpr, K: tl.constexpr, KB: tl.constexpr,
+     HAS_MIN_P: tl.constexpr, HAS_MAP: tl.constexpr,
+-    HAS_TEMP_SCALE: tl.constexpr, HAS_ONEHOT: tl.constexpr,
++    HAS_TEMP_SCALE: tl.constexpr, HAS_ONEHOT: tl.constexpr, GREEDY_FAST: tl.constexpr,
+     WRITE_POSITION: tl.constexpr, WRITE_CHAIN: tl.constexpr, BLOCK: tl.constexpr,
+ ):
+     row = tl.program_id(0).to(tl.int64)
+     offs = tl.arange(start=0, end=BLOCK)
+     keys = tl.load(pointer=Keys + row * CANDIDATES + offs, mask=offs < CANDIDATES,
+                    other=-9223372036854775807 - 1)
+-    best = tl.topk(x=keys, k=KB)
++    if GREEDY_FAST:
++        if tl.load(pointer=TopKs + row) == 1:
++            best = tl.full(shape=(KB,), value=0, dtype=tl.int64) + tl.max(input=keys, axis=0)
++        else:
++            best = tl.topk(x=keys, k=KB)
++    else:
++        best = tl.topk(x=keys, k=KB)
+     indices = 0xFFFFFFFF - (best & 0xFFFFFFFF)
+     ordered = ((best >> 32) + 0x80000000).to(tl.uint32)
+     bits = tl.where(condition=ordered & 0x80000000 != 0, x=ordered ^ 0x80000000, y=ordered ^ 0xFFFFFFFF)
+@@ -105,7 +117,7 @@ def _draft_finalize_kernel(
+         tl.store(pointer=Positions + row, value=tl.load(Positions + row) + 1)
+ 
+ 
+-def _proposal_topk_keys(*, logits, k_block, topk_impl):
++def _proposal_topk_keys(*, logits, top_ks, k_block, topk_impl, greedy_fast):
+     n, vocab = logits.shape
+     if topk_impl == "torch":
+         vals = torch.nan_to_num(input=logits.float(), nan=-float("inf"),
+@@ -123,8 +135,8 @@ def _proposal_topk_keys(*, logits, k_block, topk_impl):
+     splits = triton.cdiv(x=vocab, y=block)
+     keys = torch.empty(size=(n, splits * k_block), dtype=torch.int64, device=logits.device)
+     _draft_partial_topk_kernel[(n, splits)](
+-        Logits=logits, Keys=keys, stride_l=logits.stride(0), VOCAB=vocab,
+-        SPLITS=splits, KB=k_block, BLOCK=block, num_warps=4,
++        Logits=logits, Keys=keys, TopKs=top_ks, stride_l=logits.stride(0), VOCAB=vocab,
++        SPLITS=splits, KB=k_block, GREEDY_FAST=greedy_fast, BLOCK=block, num_warps=4,
+     )
+     return keys
+ 
+@@ -136,7 +148,7 @@ def rs_draft_proposal_sparse(
+     positions: torch.Tensor | None = None, draft_tokens: torch.Tensor | None = None,
+     draft_token_column: int = 0, draft_support_probs: torch.Tensor | None = None,
+     draft_support_tokens: torch.Tensor | None = None, topk_impl: str = "triton",
+-    temp_scale: float = 1.0, onehot_above: float = 0.0,
++    temp_scale: float = 1.0, onehot_above: float = 0.0, greedy_fast: bool = False,
+ ):
+     assert temp_scale > 0 and 0 <= onehot_above <= 1
+     assert next_token_logits.ndim == 2 and next_token_logits.stride(1) == 1
+@@ -172,7 +184,10 @@ def rs_draft_proposal_sparse(
+     topk_index = torch.empty(size=(n, 1), dtype=torch.int64, device=device)
+     if n == 0:
+         return probs, tokens, topk_p, topk_index
+-    keys = _proposal_topk_keys(logits=next_token_logits, k_block=k_block, topk_impl=topk_impl)
++    keys = _proposal_topk_keys(
++        logits=next_token_logits, top_ks=top_ks, k_block=k_block,
++        topk_impl=topk_impl, greedy_fast=greedy_fast,
++    )
+     _draft_finalize_kernel[(n,)](
+         Keys=keys, Temps=temperatures, TopKs=top_ks, TopPs=top_ps,
+         MinPs=min_ps if min_ps is not None else top_ps, Uniforms=uniforms,
+@@ -185,7 +200,7 @@ def rs_draft_proposal_sparse(
+         column=draft_token_column, temp_scale=temp_scale, onehot_above=onehot_above,
+         CANDIDATES=keys.shape[1], K=k, KB=k_block,
+         HAS_MIN_P=min_ps is not None, HAS_MAP=hot_token_id is not None,
+-        HAS_TEMP_SCALE=temp_scale != 1.0, HAS_ONEHOT=onehot_above > 0,
++        HAS_TEMP_SCALE=temp_scale != 1.0, HAS_ONEHOT=onehot_above > 0, GREEDY_FAST=greedy_fast,
+         WRITE_POSITION=positions is not None, WRITE_CHAIN=draft_tokens is not None,
+         BLOCK=triton.next_power_of_2(keys.shape[1]), num_warps=4,
+     )
+diff --git a/python/sglang/srt/environ.py b/python/sglang/srt/environ.py
+index 930213d33b..12d93e33e5 100644
+--- a/python/sglang/srt/environ.py
++++ b/python/sglang/srt/environ.py
+@@ -1231,6 +1231,7 @@ class Envs:
+     SGLANG_RS_DRAFT_TOPK = EnvInt(64)
+     SGLANG_RS_DRAFT_TEMP_SCALE = EnvFloat(1.0)
+     SGLANG_RS_DRAFT_ONEHOT_ABOVE = EnvFloat(0.0)
++    SGLANG_RS_GREEDY_FAST = EnvBool(False)
+     SGLANG_RS_DUMP_DIR = EnvStr("")
+     # Honor min_p in the sampling verify and the RS draft proposal, as the
+     # non-speculative sampler does; off = the verify's top-k/top-p only.
+diff --git a/python/sglang/srt/speculative/eagle_worker_v2.py b/python/sglang/srt/speculative/eagle_worker_v2.py
+index 4000c8c8b5..a0fdf2f10d 100644
+--- a/python/sglang/srt/speculative/eagle_worker_v2.py
++++ b/python/sglang/srt/speculative/eagle_worker_v2.py
+@@ -107,6 +107,7 @@ from sglang.srt.speculative.spec_utils import (
+     RS_DRAFT_TOPK,
+     RS_DRAFT_TEMP_SCALE,
+     RS_DRAFT_ONEHOT_ABOVE,
++    RS_GREEDY_FAST,
+     SPEC_MIN_P,
+     SPEC_SPARSE_RS,
+     renorm_draft_probs,
+@@ -196,7 +197,7 @@ class EagleDraftWorker(EagleDraftWorkerBase):
+                 raise ValueError("SGLANG_OPT_SPEC_SPARSE_RS requires rejection sampling and SGLANG_RS_DRAFT_TOPK > 0")
+             if server_args.enable_multi_layer_eagle:
+                 raise ValueError("SGLANG_OPT_SPEC_SPARSE_RS does not support multi-layer EAGLE")
+-            logger.info(f"SGLANG_OPT_SPEC_SPARSE_RS on: sparse chain RS, draft support K={RS_DRAFT_TOPK}, temp_scale={RS_DRAFT_TEMP_SCALE}, onehot_above={RS_DRAFT_ONEHOT_ABOVE}")
++            logger.info(f"SGLANG_OPT_SPEC_SPARSE_RS on: sparse chain RS, draft support K={RS_DRAFT_TOPK}, temp_scale={RS_DRAFT_TEMP_SCALE}, onehot_above={RS_DRAFT_ONEHOT_ABOVE}, greedy_fast={RS_GREEDY_FAST}")
+         self.topk = get_spec().speculative_eagle_topk
+         if get_spec().speculative_use_rejection_sampling:
+             assert self.topk == 1, "Chain speculative sampling supports only topk=1"
+@@ -945,6 +946,7 @@ class EagleDraftWorker(EagleDraftWorkerBase):
+             hot_token_id=self.hot_token_id,
+             k=RS_DRAFT_TOPK,
+             temp_scale=RS_DRAFT_TEMP_SCALE, onehot_above=RS_DRAFT_ONEHOT_ABOVE,
++            **({"greedy_fast": True} if RS_GREEDY_FAST else {}),
+         )
+ 
+     def draft_forward(self, forward_batch: ForwardBatch):
+@@ -1109,6 +1111,7 @@ class EagleDraftWorker(EagleDraftWorkerBase):
+                         min_ps=forward_batch.sampling_info.min_ps if SPEC_MIN_P else None,
+                         uniforms=uniforms[:, i], k=RS_DRAFT_TOPK,
+                         temp_scale=RS_DRAFT_TEMP_SCALE, onehot_above=RS_DRAFT_ONEHOT_ABOVE,
++                        **({"greedy_fast": True} if RS_GREEDY_FAST else {}),
+                         hot_token_id=self.hot_token_id, positions=forward_batch.positions,
+                         draft_tokens=draft_tokens_topk1, draft_token_column=i + 1,
+                         draft_support_probs=draft_support_probs[:, i + 1],
+diff --git a/python/sglang/srt/speculative/spec_utils.py b/python/sglang/srt/speculative/spec_utils.py
+index eca59cc9d9..6d1651cd45 100644
+--- a/python/sglang/srt/speculative/spec_utils.py
++++ b/python/sglang/srt/speculative/spec_utils.py
+@@ -183,6 +183,7 @@ def sample_draft_proposal(next_token_logits: torch.Tensor, temperatures: torch.T
+ RS_DRAFT_TOPK = envs.SGLANG_RS_DRAFT_TOPK.get()
+ RS_DRAFT_TEMP_SCALE = envs.SGLANG_RS_DRAFT_TEMP_SCALE.get()
+ RS_DRAFT_ONEHOT_ABOVE = envs.SGLANG_RS_DRAFT_ONEHOT_ABOVE.get()
++RS_GREEDY_FAST = envs.SGLANG_RS_GREEDY_FAST.get()
+ SPEC_MIN_P = envs.SGLANG_SPEC_MIN_P.get()
+ SPEC_SPARSE_VERIFY = envs.SGLANG_OPT_SPEC_SPARSE_VERIFY.get()
+ SPEC_SPARSE_RS = envs.SGLANG_OPT_SPEC_SPARSE_RS.get()
+-- 
+2.43.0
+

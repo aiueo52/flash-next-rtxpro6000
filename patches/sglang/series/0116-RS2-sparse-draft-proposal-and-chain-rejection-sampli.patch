@@ -1,0 +1,987 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: aiueo52 <aiueo52@users.noreply.github.com>
+Date: Thu, 1 Oct 2026 16:46:38 +0900
+Subject: [PATCH 116/121] RS2: sparse draft proposal and chain rejection
+ sampling (SGLANG_OPT_SPEC_SPARSE_RS)
+
+Default off. Under truncated rejection sampling with topk=1 single-layer
+EAGLE/MTP, the draft keeps only its top-K support (SGLANG_RS_DRAFT_TOPK)
+instead of a vocab-wide q, and verify walks the chain against the sparse
+target support. Two Triton launches per draft step (partial top-k, finalize).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../kernels/ops/speculative/sparse_rs.py      | 269 ++++++++++++++++++
+ python/sglang/srt/environ.py                  |   2 +
+ python/sglang/srt/managers/overlap_utils.py   |  22 ++
+ .../eagle_draft_cuda_graph_runner.py          |  34 ++-
+ python/sglang/srt/speculative/eagle_info.py   |  23 ++
+ python/sglang/srt/speculative/eagle_utils.py  |  70 +++--
+ .../srt/speculative/eagle_worker_common.py    |   4 +
+ .../sglang/srt/speculative/eagle_worker_v2.py | 122 ++++++--
+ python/sglang/srt/speculative/spec_info.py    |  15 +
+ python/sglang/srt/speculative/spec_utils.py   |   1 +
+ 10 files changed, 514 insertions(+), 48 deletions(-)
+ create mode 100644 python/sglang/kernels/ops/speculative/sparse_rs.py
+
+diff --git a/python/sglang/kernels/ops/speculative/sparse_rs.py b/python/sglang/kernels/ops/speculative/sparse_rs.py
+new file mode 100644
+index 0000000000..e0e02b5bb8
+--- /dev/null
++++ b/python/sglang/kernels/ops/speculative/sparse_rs.py
+@@ -0,0 +1,269 @@
++from __future__ import annotations
++
++import torch
++import triton
++import triton.language as tl
++
++_DRAFT_BLOCK = 2048
++
++
++@triton.jit
++def _logit_keys(vals, indices):
++    vals = tl.where(condition=vals == vals, x=vals, y=-float("inf"))
++    vals = tl.where(condition=vals == 0.0, x=0.0, y=vals)
++    bits = vals.to(tl.uint32, bitcast=True)
++    ordered = tl.where(condition=bits & 0x80000000 != 0, x=bits ^ 0xFFFFFFFF, y=bits ^ 0x80000000)
++    return ((ordered.to(tl.int64) - 0x80000000) << 32) | (0xFFFFFFFF - indices)
++
++
++@triton.jit
++def _draft_partial_topk_kernel(
++    Logits, Keys, stride_l, VOCAB: tl.constexpr, SPLITS: tl.constexpr,
++    KB: tl.constexpr, BLOCK: tl.constexpr,
++):
++    row = tl.program_id(0).to(tl.int64)
++    split = tl.program_id(1)
++    indices = split * BLOCK + tl.arange(start=0, end=BLOCK)
++    vals = tl.load(pointer=Logits + row * stride_l + indices, mask=indices < VOCAB,
++                   other=-float("inf")).to(tl.float32)
++    keys = _logit_keys(vals=vals, indices=indices.to(tl.int64))
++    keys = tl.where(condition=indices < VOCAB, x=keys, y=-9223372036854775807 - 1)
++    best = tl.topk(x=keys, k=KB)
++    tl.store(pointer=Keys + (row * SPLITS + split) * KB + tl.arange(start=0, end=KB), value=best)
++
++
++@triton.jit
++def _sum_compensated(left_hi, left_lo, right_hi, right_lo):
++    total = left_hi + right_hi
++    right = total - left_hi
++    error = (left_hi - (total - right)) + (right_hi - right)
++    low = left_lo + right_lo + error
++    high = total + low
++    return high, low - (high - total)
++
++
++@triton.jit
++def _draft_finalize_kernel(
++    Keys, Temps, TopKs, TopPs, MinPs, Uniforms, HotTokens,
++    Probs, Tokens, TopkP, TopkIndex, Positions, DraftTokens,
++    stride_q, stride_t, stride_u, stride_chain, column,
++    CANDIDATES: tl.constexpr, K: tl.constexpr, KB: tl.constexpr,
++    HAS_MIN_P: tl.constexpr, HAS_MAP: tl.constexpr,
++    WRITE_POSITION: tl.constexpr, WRITE_CHAIN: tl.constexpr, BLOCK: tl.constexpr,
++):
++    row = tl.program_id(0).to(tl.int64)
++    offs = tl.arange(start=0, end=BLOCK)
++    keys = tl.load(pointer=Keys + row * CANDIDATES + offs, mask=offs < CANDIDATES,
++                   other=-9223372036854775807 - 1)
++    best = tl.topk(x=keys, k=KB)
++    indices = 0xFFFFFFFF - (best & 0xFFFFFFFF)
++    ordered = ((best >> 32) + 0x80000000).to(tl.uint32)
++    bits = tl.where(condition=ordered & 0x80000000 != 0, x=ordered ^ 0x80000000, y=ordered ^ 0xFFFFFFFF)
++    ranks = tl.arange(start=0, end=KB)
++    vals = tl.where(condition=ranks < K, x=bits.to(tl.float32, bitcast=True), y=-float("inf"))
++    maximum = tl.max(vals, axis=0)
++    temperature = tl.load(Temps + row).to(tl.float32)
++    temperature = tl.where(condition=temperature > 0, x=temperature, y=1.0)
++    weights = tl.where(condition=vals == maximum, x=1.0, y=tl.exp((vals - maximum) / temperature))
++    top_k = tl.load(TopKs + row)
++    weights = tl.where(condition=(ranks < K) & ((ranks < top_k) | (top_k <= 0)), x=weights, y=0.0)
++    probs = weights / tl.sum(weights, axis=0)
++    # Compensated prefixes avoid moving a top-p boundary on equal bf16 logits.
++    prefix_hi, prefix_lo = tl.associative_scan(
++        input=(probs, tl.full(shape=(KB,), value=0.0, dtype=tl.float32)), axis=0, combine_fn=_sum_compensated,
++    )
++    exclusive = (prefix_hi + prefix_lo) - probs
++    probs = tl.where(condition=(exclusive < tl.load(TopPs + row)) | (ranks == 0), x=probs, y=0.0)
++    if HAS_MIN_P:
++        p0 = tl.sum(tl.where(condition=ranks == 0, x=probs, y=0.0), axis=0)
++        probs = tl.where(condition=probs >= p0 * tl.load(MinPs + row), x=probs, y=0.0)
++    probs = probs / tl.sum(probs, axis=0)
++    cdf = tl.cumsum(probs, axis=0)
++    u = tl.load(Uniforms + row * stride_u) * tl.sum(probs, axis=0)
++    pick = tl.min(tl.where(condition=(cdf > u) & (probs > 0), x=ranks, y=KB), axis=0)
++    last = tl.max(tl.where(condition=probs > 0, x=ranks, y=0), axis=0)
++    pick = tl.where(condition=pick == KB, x=last, y=pick)
++    tokens = indices
++    if HAS_MAP:
++        tokens = tl.load(pointer=HotTokens + indices, mask=ranks < K, other=0)
++    draft_token = tl.sum(tl.where(condition=ranks == pick, x=indices, y=0), axis=0)
++    target_token = tl.sum(tl.where(condition=ranks == pick, x=tokens, y=0), axis=0)
++    tl.store(pointer=Probs + row * stride_q + ranks, value=probs, mask=ranks < K)
++    tl.store(pointer=Tokens + row * stride_t + ranks, value=tokens, mask=ranks < K)
++    tl.store(pointer=TopkP + row, value=tl.sum(tl.where(condition=ranks == pick, x=probs, y=0.0), axis=0))
++    tl.store(pointer=TopkIndex + row, value=target_token if WRITE_CHAIN else draft_token)
++    if WRITE_CHAIN:
++        tl.store(pointer=DraftTokens + row * stride_chain + column, value=target_token)
++    if WRITE_POSITION:
++        tl.store(pointer=Positions + row, value=tl.load(Positions + row) + 1)
++
++
++def _proposal_topk_keys(*, logits, k_block, topk_impl):
++    n, vocab = logits.shape
++    if topk_impl == "torch":
++        vals = torch.nan_to_num(input=logits.float(), nan=-float("inf"),
++                                posinf=float("inf"), neginf=-float("inf"))
++        vals = torch.where(condition=vals == 0, input=torch.zeros_like(vals), other=vals)
++        bits = vals.view(torch.int32).to(torch.int64)
++        ordered = torch.where(condition=bits < 0, input=(~bits) & 0xFFFFFFFF,
++                              other=bits ^ 0x80000000)
++        indices = torch.arange(vocab, device=logits.device, dtype=torch.int64)
++        keys = ((ordered - 0x80000000) << 32) | (0xFFFFFFFF - indices)
++        return torch.topk(input=keys, k=min(k_block, vocab), dim=-1).values
++    if topk_impl != "triton":
++        raise ValueError(f"Unknown topk_impl: {topk_impl}")
++    block = max(k_block, min(_DRAFT_BLOCK, triton.next_power_of_2(vocab)))
++    splits = triton.cdiv(x=vocab, y=block)
++    keys = torch.empty(size=(n, splits * k_block), dtype=torch.int64, device=logits.device)
++    _draft_partial_topk_kernel[(n, splits)](
++        Logits=logits, Keys=keys, stride_l=logits.stride(0), VOCAB=vocab,
++        SPLITS=splits, KB=k_block, BLOCK=block, num_warps=4,
++    )
++    return keys
++
++
++def rs_draft_proposal_sparse(
++    *, next_token_logits: torch.Tensor, temperatures: torch.Tensor,
++    top_ks: torch.Tensor, top_ps: torch.Tensor, uniforms: torch.Tensor, k: int,
++    min_ps: torch.Tensor | None = None, hot_token_id: torch.Tensor | None = None,
++    positions: torch.Tensor | None = None, draft_tokens: torch.Tensor | None = None,
++    draft_token_column: int = 0, draft_support_probs: torch.Tensor | None = None,
++    draft_support_tokens: torch.Tensor | None = None, topk_impl: str = "triton",
++):
++    assert next_token_logits.ndim == 2 and next_token_logits.stride(1) == 1
++    n, vocab = next_token_logits.shape
++    assert k > 0 and vocab > 0
++    k = min(k, vocab)
++    k_block = triton.next_power_of_2(k)
++    device = next_token_logits.device
++    probs = draft_support_probs
++    tokens = draft_support_tokens
++    if probs is None:
++        probs = torch.empty(size=(n, k), dtype=torch.float32, device=device)
++    if tokens is None:
++        tokens = torch.empty(size=(n, k), dtype=torch.int64, device=device)
++    assert probs.shape == tokens.shape == (n, k)
++    assert probs.dtype == torch.float32 and tokens.dtype == torch.int64
++    assert probs.stride(1) == tokens.stride(1) == 1
++    assert temperatures.numel() == top_ks.numel() == top_ps.numel() == n
++    assert temperatures.is_contiguous() and top_ks.is_contiguous() and top_ps.is_contiguous()
++    assert uniforms.ndim == 1 and uniforms.shape[0] == n
++    if min_ps is not None:
++        assert min_ps.numel() == n and min_ps.is_contiguous()
++    if hot_token_id is not None:
++        assert hot_token_id.shape == (vocab,) and hot_token_id.dtype == torch.int64
++        assert hot_token_id.is_contiguous()
++    if positions is not None:
++        assert positions.shape == (n,) and positions.is_contiguous()
++    if draft_tokens is not None:
++        assert draft_tokens.shape[0] == n and draft_tokens.stride(1) == 1
++        assert draft_tokens.dtype == torch.int64
++        assert 0 <= draft_token_column < draft_tokens.shape[1]
++    topk_p = torch.empty(size=(n, 1), dtype=torch.float32, device=device)
++    topk_index = torch.empty(size=(n, 1), dtype=torch.int64, device=device)
++    if n == 0:
++        return probs, tokens, topk_p, topk_index
++    keys = _proposal_topk_keys(logits=next_token_logits, k_block=k_block, topk_impl=topk_impl)
++    _draft_finalize_kernel[(n,)](
++        Keys=keys, Temps=temperatures, TopKs=top_ks, TopPs=top_ps,
++        MinPs=min_ps if min_ps is not None else top_ps, Uniforms=uniforms,
++        HotTokens=hot_token_id if hot_token_id is not None else tokens,
++        Probs=probs, Tokens=tokens, TopkP=topk_p, TopkIndex=topk_index,
++        Positions=positions if positions is not None else topk_index,
++        DraftTokens=draft_tokens if draft_tokens is not None else topk_index,
++        stride_q=probs.stride(0), stride_t=tokens.stride(0), stride_u=uniforms.stride(0),
++        stride_chain=draft_tokens.stride(0) if draft_tokens is not None else 0,
++        column=draft_token_column, CANDIDATES=keys.shape[1], K=k, KB=k_block,
++        HAS_MIN_P=min_ps is not None, HAS_MAP=hot_token_id is not None,
++        WRITE_POSITION=positions is not None, WRITE_CHAIN=draft_tokens is not None,
++        BLOCK=triton.next_power_of_2(keys.shape[1]), num_warps=4,
++    )
++    return probs, tokens, topk_p, topk_index
++
++
++@triton.jit
++def _chain_sampling_sparse_kernel(
++    Predicts, AcceptIndex, AcceptTokenNum, Candidates, RetriveIndex,
++    Coins, CoinsFinal, P, PI, Q, QI,
++    NUM_SLOTS: tl.constexpr, K: tl.constexpr, KQ: tl.constexpr,
++    KP: tl.constexpr, VOCAB: tl.constexpr,
++):
++    bx = tl.program_id(0).to(tl.int64)
++    poffs = tl.arange(start=0, end=KP)
++    qoffs = tl.arange(start=0, end=KQ)
++    base = bx * NUM_SLOTS
++    last = tl.load(RetriveIndex + base)
++    tl.store(pointer=AcceptIndex + base, value=last)
++    num_correct = 0
++    walking = 1
++    step = 1
++    while (step < NUM_SLOTS) & (walking == 1):
++        token = tl.load(Candidates + base + step)
++        p = tl.load(P + (base + step - 1) * KP + poffs)
++        pi = tl.load(PI + (base + step - 1) * KP + poffs)
++        qbase = (bx * (NUM_SLOTS - 1) + step - 1) * K
++        q = tl.load(pointer=Q + qbase + qoffs, mask=qoffs < K, other=0.0)
++        qi = tl.load(pointer=QI + qbase + qoffs, mask=qoffs < K, other=-1)
++        q = tl.where(condition=q == q, x=q, y=0.0)
++        pt = tl.sum(tl.where(condition=pi == token, x=p, y=0.0), axis=0)
++        qt = tl.sum(tl.where(condition=qi == token, x=q, y=0.0), axis=0)
++        coin = tl.load(Coins + base + step - 1)
++        if coin * qt < pt:
++            tl.store(pointer=Predicts + last, value=token)
++            last = tl.load(RetriveIndex + base + step)
++            num_correct += 1
++            tl.store(pointer=AcceptIndex + base + num_correct, value=last)
++            step += 1
++        else:
++            walking = 0
++    tl.store(pointer=AcceptTokenNum + bx, value=num_correct)
++    p = tl.load(P + (base + num_correct) * KP + poffs)
++    pi = tl.load(PI + (base + num_correct) * KP + poffs)
++    weights = p
++    if num_correct < NUM_SLOTS - 1:
++        qbase = (bx * (NUM_SLOTS - 1) + num_correct) * K
++        q = tl.load(pointer=Q + qbase + qoffs, mask=qoffs < K, other=0.0)
++        qi = tl.load(pointer=QI + qbase + qoffs, mask=qoffs < K, other=-1)
++        q = tl.where(condition=q == q, x=q, y=0.0)
++        matched = tl.sum(tl.where(condition=pi[:, None] == qi[None, :], x=q[None, :], y=0.0), axis=1)
++        weights = tl.maximum(x=p - matched, y=0.0)
++        # Deliberately draw P on a zero residual; dense RS returns VOCAB - 1.
++        weights = tl.where(condition=tl.sum(weights, axis=0) > 0, x=weights, y=p)
++    order_keys = (pi << 32) | poffs.to(tl.int64)
++    sorted_keys = tl.sort(x=order_keys, descending=False)
++    order = (sorted_keys & 0xFFFFFFFF).to(tl.int32)
++    tokens = sorted_keys >> 32
++    weights = tl.gather(src=weights, index=order, axis=0)
++    u = tl.load(CoinsFinal + bx) * tl.sum(weights, axis=0)
++    hit = (tl.cumsum(weights, axis=0) > u) & (weights > 0)
++    token = tl.min(tl.where(condition=hit, x=tokens, y=VOCAB), axis=0)
++    last_valid = tl.max(tl.where(condition=weights > 0, x=tokens, y=-1), axis=0)
++    token = tl.where(condition=token < VOCAB, x=token, y=tl.where(condition=last_valid >= 0, x=last_valid, y=VOCAB - 1))
++    tl.store(pointer=Predicts + last, value=token)
++
++
++def chain_speculative_sampling_sparse(
++    *, predicts: torch.Tensor, accept_index: torch.Tensor, accept_token_num: torch.Tensor,
++    candidates: torch.Tensor, retrive_index: torch.Tensor, uniform_samples: torch.Tensor,
++    uniform_samples_for_final_sampling: torch.Tensor, target_probs: torch.Tensor,
++    target_index: torch.Tensor, draft_support_probs: torch.Tensor,
++    draft_support_tokens: torch.Tensor, vocab_size: int,
++):
++    bs, num_slots = candidates.shape
++    kp = target_probs.shape[-1]
++    k = draft_support_probs.shape[-1]
++    assert target_probs.shape == target_index.shape == (bs, num_slots, kp)
++    assert draft_support_probs.shape == draft_support_tokens.shape == (bs, num_slots - 1, k)
++    assert accept_index.shape == retrive_index.shape == candidates.shape
++    assert triton.next_power_of_2(kp) == kp
++    if bs == 0:
++        return
++    _chain_sampling_sparse_kernel[(bs,)](
++        Predicts=predicts, AcceptIndex=accept_index, AcceptTokenNum=accept_token_num,
++        Candidates=candidates.contiguous(), RetriveIndex=retrive_index.contiguous(),
++        Coins=uniform_samples.contiguous(), CoinsFinal=uniform_samples_for_final_sampling.contiguous(),
++        P=target_probs.contiguous(), PI=target_index.contiguous(),
++        Q=draft_support_probs.contiguous(), QI=draft_support_tokens.contiguous(),
++        NUM_SLOTS=num_slots, K=k, KQ=triton.next_power_of_2(k), KP=kp, VOCAB=vocab_size,
++        num_warps=4,
++    )
+diff --git a/python/sglang/srt/environ.py b/python/sglang/srt/environ.py
+index 149b565904..318c9e1760 100644
+--- a/python/sglang/srt/environ.py
++++ b/python/sglang/srt/environ.py
+@@ -1235,6 +1235,8 @@ class Envs:
+     # Target-only sampling verify on the top-KP logits instead of full-vocabulary
+     # probabilities, when every request has top_k <= 248; off = the dense verify.
+     SGLANG_OPT_SPEC_SPARSE_VERIFY = EnvBool(False)
++    # Sparse draft proposal and chain rejection sampling; requires truncated RS.
++    SGLANG_OPT_SPEC_SPARSE_RS = EnvBool(False)
+     # FlashInfer radix top-k in that verify instead of torch.topk; the FlashInfer cache
+     # must already hold a built topk module, or the first call JIT-compiles it.
+     SGLANG_OPT_SPEC_SPARSE_TOPK = EnvBool(False)
+diff --git a/python/sglang/srt/managers/overlap_utils.py b/python/sglang/srt/managers/overlap_utils.py
+index 21db5f3960..df4797201f 100644
+--- a/python/sglang/srt/managers/overlap_utils.py
++++ b/python/sglang/srt/managers/overlap_utils.py
+@@ -139,6 +139,8 @@ class RelayPayload:
+     topk_index: Optional[torch.Tensor] = None
+     hidden_states: Optional[torch.Tensor] = None
+     draft_probs: Optional[torch.Tensor] = None
++    draft_support_probs: Optional[torch.Tensor] = None
++    draft_support_tokens: Optional[torch.Tensor] = None
+     dsa_topk_indices: Optional[torch.Tensor] = None
+     # ngram delays the draft extend (ngram update)
+     accept_tokens: Optional[torch.Tensor] = None
+@@ -162,6 +164,8 @@ class RelayPayload:
+             topk_index=draft_input.topk_index,
+             hidden_states=draft_input.hidden_states,
+             draft_probs=getattr(draft_input, "draft_probs", None),
++            draft_support_probs=draft_input.draft_support_probs,
++            draft_support_tokens=draft_input.draft_support_tokens,
+             dsa_topk_indices=draft_input.dsa_topk_indices,
+         )
+ 
+@@ -359,6 +363,18 @@ class FutureMap:
+                 device=self.device,
+             )
+ 
++        self.draft_support_probs_buf = None
++        self.draft_support_tokens_buf = None
++        if payload.draft_support_probs is not None:
++            self.draft_support_probs_buf = torch.empty(
++                (self.req_pool_size, payload.draft_support_probs.shape[-1]),
++                dtype=torch.float32, device=self.device,
++            )
++            self.draft_support_tokens_buf = torch.empty(
++                (self.req_pool_size, payload.draft_support_tokens.shape[-1]),
++                dtype=torch.int64, device=self.device,
++            )
++
+     def _maybe_init_dsa_topk_indices_buf(self, payload: RelayPayload) -> None:
+         if self.dsa_topk_indices_buf is not None or payload.dsa_topk_indices is None:
+             return
+@@ -438,6 +454,9 @@ class FutureMap:
+                 draft_input.hidden_states = hidden_states
+             if self.draft_probs_buf is not None and draft_input.draft_probs is not None:
+                 draft_input.draft_probs = self.draft_probs_buf[indices]
++            if self.draft_support_probs_buf is not None:
++                draft_input.draft_support_probs = self.draft_support_probs_buf[indices]
++                draft_input.draft_support_tokens = self.draft_support_tokens_buf[indices]
+         else:
+             draft_input.bonus_tokens = self.output_tokens_buf[indices]
+         if self.need_hidden_states and not self.need_topk:
+@@ -563,6 +582,9 @@ class FutureMap:
+             )
+         if self.draft_probs_buf is not None and payload.draft_probs is not None:
+             self.draft_probs_buf[indices] = payload.draft_probs
++        if self.draft_support_probs_buf is not None and payload.draft_support_probs is not None:
++            self.draft_support_probs_buf[indices] = payload.draft_support_probs
++            self.draft_support_tokens_buf[indices] = payload.draft_support_tokens
+         if (
+             self.dsa_topk_indices_buf is not None
+             and payload.dsa_topk_indices is not None
+diff --git a/python/sglang/srt/speculative/eagle_draft_cuda_graph_runner.py b/python/sglang/srt/speculative/eagle_draft_cuda_graph_runner.py
+index eacac26556..892aa43f46 100644
+--- a/python/sglang/srt/speculative/eagle_draft_cuda_graph_runner.py
++++ b/python/sglang/srt/speculative/eagle_draft_cuda_graph_runner.py
+@@ -43,7 +43,7 @@ from sglang.srt.sampling.sampling_batch_info import SamplingBatchInfo
+ from sglang.srt.sampling.sampling_params import TOP_K_ALL
+ from sglang.srt.speculative.eagle_info import EagleDraftInput
+ from sglang.srt.speculative.eagle_utils import get_draft_recurrent_hidden_state_spec
+-from sglang.srt.speculative.spec_utils import resolve_num_tokens_per_req
++from sglang.srt.speculative.spec_utils import RS_DRAFT_TOPK, SPEC_SPARSE_RS, resolve_num_tokens_per_req
+ from sglang.srt.utils import (
+     require_attn_tp_gather,
+     require_gathered_buffer,
+@@ -75,6 +75,8 @@ class EagleDraftInputBuffers(ForwardInputBuffers):
+     hidden_states: Optional[torch.Tensor]
+     global_num_tokens_gpu: Optional[torch.Tensor]
+     global_num_tokens_for_logprob_gpu: Optional[torch.Tensor]
++    draft_support_probs: Optional[torch.Tensor] = None
++    draft_support_tokens: Optional[torch.Tensor] = None
+     dsa_seed_topk: Optional[torch.Tensor] = None
+ 
+ 
+@@ -198,8 +200,23 @@ class EAGLEDraftCudaGraphRunner(DecodeCudaGraphRunner):
+                     dtype=torch.float32,
+                 )
+                 if self.model_runner.server_args.speculative_use_rejection_sampling
++                and not SPEC_SPARSE_RS
+                 else None
+             )
++            support_size = min(
++                RS_DRAFT_TOPK,
++                self.eagle_worker.hot_token_id.numel()
++                if self.eagle_worker.hot_token_id is not None
++                else self.model_runner.model_config.vocab_size,
++            ) if SPEC_SPARSE_RS else 0
++            draft_support_probs = (
++                torch.zeros((self.max_bs, support_size), dtype=torch.float32)
++                if SPEC_SPARSE_RS else None
++            )
++            draft_support_tokens = (
++                torch.zeros((self.max_bs, support_size), dtype=torch.int64)
++                if SPEC_SPARSE_RS else None
++            )
+             _hidden_size, _hidden_dtype = get_draft_recurrent_hidden_state_spec(
+                 model_runner
+             )
+@@ -265,6 +282,8 @@ class EAGLEDraftCudaGraphRunner(DecodeCudaGraphRunner):
+             topk_p=topk_p,
+             topk_index=topk_index,
+             draft_probs=draft_probs,
++            draft_support_probs=draft_support_probs,
++            draft_support_tokens=draft_support_tokens,
+             hidden_states=hidden_states,
+             global_num_tokens_gpu=global_num_tokens_gpu,
+             global_num_tokens_for_logprob_gpu=global_num_tokens_for_logprob_gpu,
+@@ -421,6 +440,8 @@ class EAGLEDraftCudaGraphRunner(DecodeCudaGraphRunner):
+             topk_p=topk_p,
+             topk_index=topk_index,
+             draft_probs=draft_probs,
++            draft_support_probs=(buffers.draft_support_probs[:num_seqs] if SPEC_SPARSE_RS else None),
++            draft_support_tokens=(buffers.draft_support_tokens[:num_seqs] if SPEC_SPARSE_RS else None),
+             hidden_states=hidden_states,
+             capture_hidden_mode=capture_mode,
+         )
+@@ -523,10 +544,7 @@ class EAGLEDraftCudaGraphRunner(DecodeCudaGraphRunner):
+             )
+ 
+     def _postprocess_output_to_raw_bs(self, out, raw_bs):
+-        parent_list, top_scores_index, draft_tokens, draft_probs = (
+-            t[:raw_bs] if t is not None else None for t in out
+-        )
+-        return parent_list, top_scores_index, draft_tokens, draft_probs
++        return tuple(t[:raw_bs] if t is not None else None for t in out)
+ 
+     # -----------------------------------------------------------------
+     # Replay
+@@ -564,6 +582,9 @@ class EAGLEDraftCudaGraphRunner(DecodeCudaGraphRunner):
+             buffers.topk_index.zero_()
+             if buffers.draft_probs is not None:
+                 buffers.draft_probs.zero_()
++            if SPEC_SPARSE_RS:
++                buffers.draft_support_probs.zero_()
++                buffers.draft_support_tokens.zero_()
+             if buffers.hidden_states is not None:
+                 buffers.hidden_states.zero_()
+             if buffers.dsa_seed_topk is not None:
+@@ -613,6 +634,9 @@ class EAGLEDraftCudaGraphRunner(DecodeCudaGraphRunner):
+         ):
+             copy_dsts.append(buffers.bootstrap_room_ids_int[:raw_bs])
+             copy_srcs.append(forward_batch.bootstrap_room_ids_int)
++        if SPEC_SPARSE_RS:
++            copy_dsts.extend([buffers.draft_support_probs[:raw_bs], buffers.draft_support_tokens[:raw_bs]])
++            copy_srcs.extend([forward_batch.spec_info.draft_support_probs, forward_batch.spec_info.draft_support_tokens])
+         _grouped_foreach_copy_(copy_dsts, copy_srcs)
+ 
+         # hidden_states is large + contiguous: copy_() uses the cudaMemcpyAsync
+diff --git a/python/sglang/srt/speculative/eagle_info.py b/python/sglang/srt/speculative/eagle_info.py
+index a927efc8bf..d0bc1fbb98 100644
+--- a/python/sglang/srt/speculative/eagle_info.py
++++ b/python/sglang/srt/speculative/eagle_info.py
+@@ -5,11 +5,13 @@ from typing import List, Optional
+ import torch
+ 
+ from sglang.kernels.ops.attention.utils import create_flashinfer_kv_indices_triton
++from sglang.srt.environ import envs
+ from sglang.srt.model_executor.forward_batch_info import CaptureHiddenMode
+ from sglang.srt.runtime_context import get_spec
+ from sglang.srt.speculative.spec_info import SpecInput, SpecInputType
+ 
+ logger = logging.getLogger(__name__)
++SPEC_SPARSE_RS = envs.SGLANG_OPT_SPEC_SPARSE_RS.get()
+ 
+ 
+ @dataclass
+@@ -30,6 +32,8 @@ class EagleVerifyInput(SpecInput):
+     # Stacked per-step draft proposal distribution q, shape (bs, num_steps,
+     # vocab); only set under rejection sampling. Consumed by the verify kernel.
+     draft_probs: torch.Tensor = None
++    draft_support_probs: torch.Tensor = None
++    draft_support_tokens: torch.Tensor = None
+ 
+     # Shape info for padding
+     num_tokens_per_req: int = -1  # -1 auto-fills from draft_token_num.
+@@ -150,6 +154,8 @@ class EagleDraftInput(SpecInput):
+     # Draft proposal q from draft-extend, only set under rejection sampling:
+     # (b, vocab) single-layer; (b, num_steps, vocab) multi-layer chain.
+     draft_probs: torch.Tensor = None
++    draft_support_probs: torch.Tensor = None
++    draft_support_tokens: torch.Tensor = None
+     # shape: (b, hidden_size) - one hidden per req, consumed by `draft` forward.
+     # None when the spec algorithm's draft doesn't read hidden_states
+     # (e.g., STANDALONE — vanilla LLM draft).
+@@ -200,8 +206,17 @@ class EagleDraftInput(SpecInput):
+             draft_probs=(
+                 torch.empty((0, vocab_size), device=device, dtype=torch.float32)
+                 if get_spec().speculative_use_rejection_sampling
++                and not SPEC_SPARSE_RS
+                 else None
+             ),
++            draft_support_probs=(
++                torch.empty((0, envs.SGLANG_RS_DRAFT_TOPK.get()), device=device, dtype=torch.float32)
++                if SPEC_SPARSE_RS else None
++            ),
++            draft_support_tokens=(
++                torch.empty((0, envs.SGLANG_RS_DRAFT_TOPK.get()), device=device, dtype=torch.int64)
++                if SPEC_SPARSE_RS else None
++            ),
+             capture_hidden_mode=capture_hidden_mode,
+         )
+ 
+@@ -218,6 +233,9 @@ class EagleDraftInput(SpecInput):
+         self.topk_index = self.topk_index[new_indices]
+         if self.draft_probs is not None:
+             self.draft_probs = self.draft_probs[new_indices]
++        if self.draft_support_probs is not None:
++            self.draft_support_probs = self.draft_support_probs[new_indices]
++            self.draft_support_tokens = self.draft_support_tokens[new_indices]
+         if self.hidden_states is not None:
+             self.hidden_states = self.hidden_states[new_indices]
+         self.bonus_tokens = self.bonus_tokens[new_indices]
+@@ -245,6 +263,8 @@ class EagleDraftInput(SpecInput):
+             self.topk_p = spec_info.topk_p
+             self.topk_index = spec_info.topk_index
+             self.draft_probs = spec_info.draft_probs
++            self.draft_support_probs = spec_info.draft_support_probs
++            self.draft_support_tokens = spec_info.draft_support_tokens
+             self.dsa_topk_indices = spec_info.dsa_topk_indices
+             return
+         if len(spec_info.topk_index) == 0:
+@@ -266,6 +286,9 @@ class EagleDraftInput(SpecInput):
+             self.dsa_topk_indices = None
+         if self.draft_probs is not None and spec_info.draft_probs is not None:
+             self.draft_probs = torch.cat([self.draft_probs, spec_info.draft_probs])
++        if self.draft_support_probs is not None and spec_info.draft_support_probs is not None:
++            self.draft_support_probs = torch.cat([self.draft_support_probs, spec_info.draft_support_probs])
++            self.draft_support_tokens = torch.cat([self.draft_support_tokens, spec_info.draft_support_tokens])
+ 
+ 
+ @dataclass
+diff --git a/python/sglang/srt/speculative/eagle_utils.py b/python/sglang/srt/speculative/eagle_utils.py
+index f1454a954f..610c201020 100644
+--- a/python/sglang/srt/speculative/eagle_utils.py
++++ b/python/sglang/srt/speculative/eagle_utils.py
+@@ -32,6 +32,7 @@ from sglang.srt.utils import (
+ )
+ from sglang.srt.speculative.spec_utils import (
+     SPEC_MIN_P,
++    SPEC_SPARSE_RS,
+     SPEC_SPARSE_TOPK,
+     SPEC_SPARSE_VERIFY,
+ )
+@@ -703,6 +704,14 @@ def _sparse_verify_kp(batch: ScheduleBatch, sampling_info: SamplingBatchInfo) ->
+     return sparse_verify_width(max(r.sampling_params.top_k for r in batch.reqs))
+ 
+ 
++def _sparse_rs_verify_kp(*, batch: ScheduleBatch, sampling_info: SamplingBatchInfo) -> int:
++    if not sampling_info.need_top_k_sampling:
++        return 0
++    from sglang.kernels.ops.speculative.sparse_verify import sparse_verify_width
++
++    return sparse_verify_width(max(r.sampling_params.top_k for r in batch.reqs))
++
++
+ def eagle_sample(
+     verify_input: EagleVerifyInput,
+     batch: ScheduleBatch,
+@@ -809,9 +818,11 @@ def eagle_sample(
+                 tp_group.broadcast(predict, src=0)
+                 tp_group.broadcast(accept_index, src=0)
+                 tp_group.broadcast(num_correct_drafts, src=0)
+-    elif sparse_kp := _sparse_verify_kp(batch, sampling_info):
+-        # Target-only verify on the top-KP logits (SGLANG_OPT_SPEC_SPARSE_VERIFY);
+-        # same distribution as the dense branch below up to rounding.
++    elif sparse_kp := (
++        _sparse_rs_verify_kp(batch=batch, sampling_info=sampling_info)
++        if SPEC_SPARSE_RS else _sparse_verify_kp(batch, sampling_info)
++    ):
++        # Both sparse verifies use the dense target distribution up to rounding.
+         from sglang.kernels.ops.speculative.sparse_verify import (
+             sparse_target_probs,
+             tree_speculative_sampling_target_only_sparse,
+@@ -838,22 +849,36 @@ def eagle_sample(
+             candidates=candidates,
+             device=device,
+         )
+-        tree_speculative_sampling_target_only_sparse(
+-            predicts=predict,  # mutable
+-            accept_index=accept_index,  # mutable
+-            accept_token_num=num_correct_drafts,  # mutable
+-            candidates=candidates,
+-            retrive_index=verify_input.retrieve_index,
+-            retrive_next_token=verify_input.retrieve_next_token,
+-            retrive_next_sibling=verify_input.retrieve_next_sibling,
+-            uniform_samples=coins,
+-            uniform_samples_for_final_sampling=coins_for_final_sampling,
+-            target_probs=target_probs.view(bs, num_draft, sparse_kp),
+-            target_index=target_index.view(bs, num_draft, sparse_kp),
+-            vocab_size=next_token_logits.shape[-1],
+-            threshold_single=get_spec().speculative_accept_threshold_single,
+-            threshold_acc=get_spec().speculative_accept_threshold_acc,
+-        )
++        if SPEC_SPARSE_RS:
++            from sglang.kernels.ops.speculative.sparse_rs import chain_speculative_sampling_sparse
++
++            chain_speculative_sampling_sparse(
++                predicts=predict, accept_index=accept_index, accept_token_num=num_correct_drafts,
++                candidates=candidates, retrive_index=verify_input.retrieve_index,
++                uniform_samples=coins, uniform_samples_for_final_sampling=coins_for_final_sampling,
++                target_probs=target_probs.view(bs, num_draft, sparse_kp),
++                target_index=target_index.view(bs, num_draft, sparse_kp),
++                draft_support_probs=verify_input.draft_support_probs,
++                draft_support_tokens=verify_input.draft_support_tokens,
++                vocab_size=next_token_logits.shape[-1],
++            )
++        else:
++            tree_speculative_sampling_target_only_sparse(
++                predicts=predict,  # mutable
++                accept_index=accept_index,  # mutable
++                accept_token_num=num_correct_drafts,  # mutable
++                candidates=candidates,
++                retrive_index=verify_input.retrieve_index,
++                retrive_next_token=verify_input.retrieve_next_token,
++                retrive_next_sibling=verify_input.retrieve_next_sibling,
++                uniform_samples=coins,
++                uniform_samples_for_final_sampling=coins_for_final_sampling,
++                target_probs=target_probs.view(bs, num_draft, sparse_kp),
++                target_index=target_index.view(bs, num_draft, sparse_kp),
++                vocab_size=next_token_logits.shape[-1],
++                threshold_single=get_spec().speculative_accept_threshold_single,
++                threshold_acc=get_spec().speculative_accept_threshold_acc,
++            )
+         tp_group = (
+             get_parallel().attn_tp_group
+             if is_dp_attention_enabled()
+@@ -928,6 +953,13 @@ def eagle_sample(
+                 if use_rejection_sampling
+                 else torch.zeros_like(target_probs)
+             )
++            if SPEC_SPARSE_RS:
++                draft_probs = torch.zeros(
++                    (*verify_input.draft_support_probs.shape[:2], target_probs.shape[-1]),
++                    dtype=torch.float32, device=device,
++                )
++                draft_probs.scatter_(dim=2, index=verify_input.draft_support_tokens,
++                                     src=verify_input.draft_support_probs)
+             # Defense-in-depth behind the spec_hook startup allowlist: validate
+             # the actual kernel inputs before the Triton kernel.
+             if use_rejection_sampling and (
+diff --git a/python/sglang/srt/speculative/eagle_worker_common.py b/python/sglang/srt/speculative/eagle_worker_common.py
+index a531f35186..863a83ae06 100644
+--- a/python/sglang/srt/speculative/eagle_worker_common.py
++++ b/python/sglang/srt/speculative/eagle_worker_common.py
+@@ -328,6 +328,8 @@ def build_eagle_verify_input(
+     tree_mask_mode: TreeMaskMode,
+     device: str,
+     chain_topk1: bool = False,
++    draft_support_probs: Optional[torch.Tensor] = None,
++    draft_support_tokens: Optional[torch.Tensor] = None,
+ ) -> EagleVerifyInput:
+     """Shared draft() tail: idle input, tree-mask build, EagleVerifyInput assembly.
+ 
+@@ -402,6 +404,8 @@ def build_eagle_verify_input(
+         seq_lens_sum=None,
+         seq_lens_cpu=None,
+         draft_probs=draft_probs,
++        draft_support_probs=draft_support_probs,
++        draft_support_tokens=draft_support_tokens,
+     )
+ 
+ 
+diff --git a/python/sglang/srt/speculative/eagle_worker_v2.py b/python/sglang/srt/speculative/eagle_worker_v2.py
+index 77b2cad1c8..0fff7fc4bf 100644
+--- a/python/sglang/srt/speculative/eagle_worker_v2.py
++++ b/python/sglang/srt/speculative/eagle_worker_v2.py
+@@ -7,6 +7,7 @@ from typing import List, Optional
+ 
+ import torch
+ 
++from sglang.kernels.ops.speculative.sparse_rs import rs_draft_proposal_sparse
+ from sglang.kernels.ops.speculative.topk1 import (
+     draft_extend_select_topk1,
+     draft_topk1_postprocess,
+@@ -105,6 +106,7 @@ from sglang.srt.speculative.spec_utils import (
+     load_token_map,
+     RS_DRAFT_TOPK,
+     SPEC_MIN_P,
++    SPEC_SPARSE_RS,
+     renorm_draft_probs,
+     sample_draft_proposal,
+     sample_draft_proposal_truncated,
+@@ -186,6 +188,13 @@ class EagleDraftWorker(EagleDraftWorkerBase):
+ 
+         # Args for easy access
+         self.device = get_device().device
++        self.sparse_rs = SPEC_SPARSE_RS
++        if self.sparse_rs:
++            if not get_spec().speculative_use_rejection_sampling or RS_DRAFT_TOPK <= 0:
++                raise ValueError("SGLANG_OPT_SPEC_SPARSE_RS requires rejection sampling and SGLANG_RS_DRAFT_TOPK > 0")
++            if server_args.enable_multi_layer_eagle:
++                raise ValueError("SGLANG_OPT_SPEC_SPARSE_RS does not support multi-layer EAGLE")
++            logger.info(f"SGLANG_OPT_SPEC_SPARSE_RS on: sparse chain RS, draft support K={RS_DRAFT_TOPK}")
+         self.topk = get_spec().speculative_eagle_topk
+         if get_spec().speculative_use_rejection_sampling:
+             assert self.topk == 1, "Chain speculative sampling supports only topk=1"
+@@ -272,13 +281,10 @@ class EagleDraftWorker(EagleDraftWorkerBase):
+         self.init_lm_head()
+ 
+         if get_spec().speculative_use_rejection_sampling:
+-            # A reduced (hot) draft vocab is fine: every draft q is scattered
+-            # into the target vocab (zero off the hot set) before it reaches
+-            # the verify, see _rs_draft_proposal. The draft graph's draft_probs
+-            # buffer is sized by the draft config, so the two must agree.
++            # Only dense RS graph buffers require matching configured vocab sizes.
+             self._rs_vocab_size = self.target_worker.model_config.vocab_size
+             draft_config_vocab = self.draft_runner.model_config.vocab_size
+-            if draft_config_vocab != self._rs_vocab_size:
++            if not self.sparse_rs and draft_config_vocab != self._rs_vocab_size:
+                 raise ValueError(
+                     "--speculative-use-rejection-sampling needs the draft config "
+                     f"vocab ({draft_config_vocab}) to equal the target vocab "
+@@ -819,9 +825,7 @@ class EagleDraftWorker(EagleDraftWorkerBase):
+         with canary_outside_ctx:
+             # Run draft
+             if can_run_decode_cuda_graph:
+-                parent_list, top_scores_index, draft_tokens, draft_probs = (
+-                    self.cuda_graph_runner.execute(forward_batch)
+-                )
++                draft_result = self.cuda_graph_runner.execute(forward_batch)
+             else:
+                 if (
+                     not forward_batch.forward_mode.is_idle()
+@@ -831,9 +835,13 @@ class EagleDraftWorker(EagleDraftWorkerBase):
+                     # `draft_forward` only does sample in this case.
+                     self.draft_attn_backend.init_forward_metadata(forward_batch)
+                     forward_batch.mark_forward_metadata_ready()
+-                parent_list, top_scores_index, draft_tokens, draft_probs = (
+-                    self.draft_forward(forward_batch)
+-                )
++                draft_result = self.draft_forward(forward_batch)
++
++        draft_support_probs = draft_support_tokens = None
++        if self.sparse_rs:
++            parent_list, top_scores_index, draft_tokens, draft_probs, draft_support_probs, draft_support_tokens = draft_result
++        else:
++            parent_list, top_scores_index, draft_tokens, draft_probs = draft_result
+ 
+         if (
+             self._conf_channel is not None
+@@ -848,12 +856,14 @@ class EagleDraftWorker(EagleDraftWorkerBase):
+             )
+ 
+         return build_eagle_verify_input(
+-            batch,
+-            draft_input,
+-            parent_list,
+-            top_scores_index,
+-            draft_tokens,
+-            draft_probs,
++            batch=batch,
++            draft_input=draft_input,
++            parent_list=parent_list,
++            top_scores_index=top_scores_index,
++            draft_tokens=draft_tokens,
++            draft_probs=draft_probs,
++            draft_support_probs=draft_support_probs,
++            draft_support_tokens=draft_support_tokens,
+             target_worker=self.target_worker,
+             topk=self.topk,
+             num_steps=self.speculative_num_steps,
+@@ -922,6 +932,18 @@ class EagleDraftWorker(EagleDraftWorkerBase):
+             out.scatter_(1, ids, probs)
+         return out, topk_p, topk_index
+ 
++    def _rs_sparse_proposal(self, *, next_token_logits, sampling_info):
++        return rs_draft_proposal_sparse(
++            next_token_logits=next_token_logits,
++            temperatures=sampling_info.temperatures,
++            top_ks=sampling_info.top_ks,
++            top_ps=sampling_info.top_ps,
++            min_ps=sampling_info.min_ps if SPEC_MIN_P else None,
++            uniforms=torch.rand((next_token_logits.shape[0],), device=next_token_logits.device),
++            hot_token_id=self.hot_token_id,
++            k=RS_DRAFT_TOPK,
++        )
++
+     def draft_forward(self, forward_batch: ForwardBatch):
+         # Parse args
+         spec_info: EagleDraftInput = forward_batch.spec_info
+@@ -955,7 +977,19 @@ class EagleDraftWorker(EagleDraftWorkerBase):
+         # came from the previous draft-extend; each draft step fills the next
+         # row in place, so no per-step stack of vocab-wide rows is needed.
+         draft_probs = None
+-        if get_spec().speculative_use_rejection_sampling:
++        draft_support_probs = draft_support_tokens = uniforms = None
++        if self.sparse_rs:
++            bs, support_size = spec_info.draft_support_probs.shape
++            draft_support_probs = torch.empty(
++                (bs, self.speculative_num_steps, support_size), dtype=torch.float32, device=topk_index.device,
++            )
++            draft_support_tokens = torch.empty(
++                (bs, self.speculative_num_steps, support_size), dtype=torch.int64, device=topk_index.device,
++            )
++            draft_support_probs[:, 0].copy_(spec_info.draft_support_probs)
++            draft_support_tokens[:, 0].copy_(spec_info.draft_support_tokens)
++            uniforms = torch.rand((bs, self.speculative_num_steps - 1), device=topk_index.device)
++        elif get_spec().speculative_use_rejection_sampling:
+             draft_probs = torch.zeros(
+                 (
+                     topk_index.shape[0],
+@@ -978,7 +1012,7 @@ class EagleDraftWorker(EagleDraftWorkerBase):
+         if (
+             topk1_chain_fits
+             and _is_cuda
+-            and not get_spec().speculative_use_rejection_sampling
++            and (self.sparse_rs or not get_spec().speculative_use_rejection_sampling)
+         ):
+             draft_tokens_topk1 = torch.empty(
+                 (topk_index.shape[0], self.speculative_num_steps),
+@@ -987,6 +1021,14 @@ class EagleDraftWorker(EagleDraftWorkerBase):
+             )
+             draft_tokens_topk1[:, :1].copy_(topk_index)
+ 
++        if self.sparse_rs and draft_tokens_topk1 is None:
++            draft_tokens_topk1 = torch.empty(
++                (topk_index.shape[0], self.speculative_num_steps), dtype=topk_index.dtype, device=topk_index.device,
++            )
++            draft_tokens_topk1[:, :1].copy_(topk_index)
++            if not topk1_chain_fits:
++                raise ValueError("RS2 batch exceeds the topk1 chain preallocations")
++
+         # C1: per-position draft confidence (trace only; None in production).
+         # Column 0 was written by the previous iteration's draft-extend, which
+         # is where this chain's first token came from.
+@@ -1055,7 +1097,20 @@ class EagleDraftWorker(EagleDraftWorkerBase):
+                 maybe_detect_inf(
+                     logits_output.next_token_logits, f"draft_forward step {i}"
+                 )
+-                if get_spec().speculative_use_rejection_sampling:
++                if self.sparse_rs:
++                    _, _, topk_p, topk_index = rs_draft_proposal_sparse(
++                        next_token_logits=logits_output.next_token_logits,
++                        temperatures=forward_batch.sampling_info.temperatures,
++                        top_ks=forward_batch.sampling_info.top_ks,
++                        top_ps=forward_batch.sampling_info.top_ps,
++                        min_ps=forward_batch.sampling_info.min_ps if SPEC_MIN_P else None,
++                        uniforms=uniforms[:, i], k=RS_DRAFT_TOPK,
++                        hot_token_id=self.hot_token_id, positions=forward_batch.positions,
++                        draft_tokens=draft_tokens_topk1, draft_token_column=i + 1,
++                        draft_support_probs=draft_support_probs[:, i + 1],
++                        draft_support_tokens=draft_support_tokens[:, i + 1],
++                    )
++                elif get_spec().speculative_use_rejection_sampling:
+                     _, topk_p, topk_index = self._rs_draft_proposal(
+                         logits_output.next_token_logits,
+                         forward_batch.sampling_info,
+@@ -1115,6 +1170,8 @@ class EagleDraftWorker(EagleDraftWorkerBase):
+             bs = draft_tokens_topk1.shape[0]
+             top_scores_index = self._topk1_score_indices_prealloc[:bs]
+             parent_list = self._topk1_parents_prealloc[:bs]
++            if self.sparse_rs:
++                return parent_list, top_scores_index, draft_tokens_topk1, None, draft_support_probs, draft_support_tokens
+             return parent_list, top_scores_index, draft_tokens_topk1, draft_probs
+ 
+         if topk1_chain_fits:
+@@ -1160,7 +1217,7 @@ class EagleDraftWorker(EagleDraftWorkerBase):
+             ):
+                 self.draft_runner.forward(forward_batch)
+ 
+-        return None, None, None, None
++        return (None,) * (6 if self.sparse_rs else 4)
+ 
+     def draft_extend(self):
+         pass
+@@ -1259,7 +1316,12 @@ class EagleDraftWorker(EagleDraftWorkerBase):
+ 
+         # Assemble the next-iter draft spec_info from the extend output.
+         draft_probs = None
+-        if get_spec().speculative_use_rejection_sampling:
++        draft_support_probs = draft_support_tokens = None
++        if self.sparse_rs:
++            draft_support_probs, draft_support_tokens, topk_p, topk_index = self._rs_sparse_proposal(
++                next_token_logits=logits_output.next_token_logits, sampling_info=batch.sampling_info,
++            )
++        elif get_spec().speculative_use_rejection_sampling:
+             draft_probs, topk_p, topk_index = self._rs_draft_proposal(
+                 logits_output.next_token_logits, batch.sampling_info
+             )
+@@ -1272,6 +1334,8 @@ class EagleDraftWorker(EagleDraftWorkerBase):
+             topk_p=topk_p,
+             topk_index=topk_index,
+             draft_probs=draft_probs,
++            draft_support_probs=draft_support_probs,
++            draft_support_tokens=draft_support_tokens,
+             hidden_states=logits_output.hidden_states,
+             bonus_tokens=next_token_ids,
+             num_tokens_per_req=1,
+@@ -1443,7 +1507,13 @@ class EagleDraftWorker(EagleDraftWorkerBase):
+             ]
+         # The draft-extend graph only anchors full logits; selected-row topk is
+         # owned by the worker for both graph and eager paths.
+-        if get_spec().speculative_use_rejection_sampling:
++        if self.sparse_rs:
++            ret_support_probs, ret_support_tokens, ret_topk_p, ret_topk_index = self._rs_sparse_proposal(
++                next_token_logits=draft_logits_output.next_token_logits, sampling_info=batch.sampling_info,
++            )
++            ret_draft_probs = None
++            self._record_position0_confidence(draft_logits_output.next_token_logits)
++        elif get_spec().speculative_use_rejection_sampling:
+             ret_draft_probs, ret_topk_p, ret_topk_index = self._rs_draft_proposal(
+                 draft_logits_output.next_token_logits, batch.sampling_info
+             )
+@@ -1479,7 +1549,11 @@ class EagleDraftWorker(EagleDraftWorkerBase):
+             ret_topk_index,
+             ret_hidden_states,
+         )
+-        if get_spec().speculative_use_rejection_sampling:
++        if self.sparse_rs:
++            next_draft_input.draft_support_probs = ret_support_probs
++            next_draft_input.draft_support_tokens = ret_support_tokens
++            next_draft_input.draft_probs = None
++        elif get_spec().speculative_use_rejection_sampling:
+             next_draft_input.draft_probs = ret_draft_probs
+         if self.seed_dsa_topk_from_draft_extend:
+             next_draft_input.dsa_topk_indices = dsa_seed_topk_indices
+diff --git a/python/sglang/srt/speculative/spec_info.py b/python/sglang/srt/speculative/spec_info.py
+index 3a2cbb9aa7..b8bd46e076 100644
+--- a/python/sglang/srt/speculative/spec_info.py
++++ b/python/sglang/srt/speculative/spec_info.py
+@@ -262,6 +262,17 @@ class SpeculativeAlgorithm(Enum):
+         from sglang.srt.arg_groups.overrides import resolving_view
+ 
+         cfg = resolving_view(server_args)
++        from sglang.srt.environ import envs
++
++        if envs.SGLANG_OPT_SPEC_SPARSE_RS.get():
++            if not cfg.speculative_use_rejection_sampling:
++                raise ValueError("SGLANG_OPT_SPEC_SPARSE_RS requires rejection sampling")
++            if envs.SGLANG_RS_DRAFT_TOPK.get() <= 0:
++                raise ValueError("SGLANG_OPT_SPEC_SPARSE_RS requires SGLANG_RS_DRAFT_TOPK > 0")
++            if cfg.speculative_eagle_topk != 1:
++                raise ValueError("SGLANG_OPT_SPEC_SPARSE_RS requires speculative_eagle_topk == 1")
++            if self not in (SpeculativeAlgorithm.EAGLE, SpeculativeAlgorithm.EAGLE3) or cfg.enable_multi_layer_eagle:
++                raise ValueError("SGLANG_OPT_SPEC_SPARSE_RS supports only single-layer EAGLE/MTP")
+         assert (
+             not self.is_none()
+         ), "Cannot create worker for NONE speculative algorithm."
+@@ -346,6 +357,10 @@ class SpecInput(ABC):
+     # ragged_verify_layout) so scheduler/relay/attention code reads them
+     # uniformly on any SpecInput; only the EAGLE-family inputs override them.
+     dsa_topk_indices: Optional[torch.Tensor] = None
++    # Sparse RS support crosses the relay; class defaults avoid overwriting
++    # dataclass constructor fields when __post_init__ calls super().__init__.
++    draft_support_probs: Optional[torch.Tensor] = None
++    draft_support_tokens: Optional[torch.Tensor] = None
+     future_dsa_topk_indices_available: bool = False
+     dsa_seed_topk_capture: Optional[torch.Tensor] = None
+ 
+diff --git a/python/sglang/srt/speculative/spec_utils.py b/python/sglang/srt/speculative/spec_utils.py
+index ef3e10b0ce..bd2231c8f2 100644
+--- a/python/sglang/srt/speculative/spec_utils.py
++++ b/python/sglang/srt/speculative/spec_utils.py
+@@ -183,6 +183,7 @@ def sample_draft_proposal(next_token_logits: torch.Tensor, temperatures: torch.T
+ RS_DRAFT_TOPK = envs.SGLANG_RS_DRAFT_TOPK.get()
+ SPEC_MIN_P = envs.SGLANG_SPEC_MIN_P.get()
+ SPEC_SPARSE_VERIFY = envs.SGLANG_OPT_SPEC_SPARSE_VERIFY.get()
++SPEC_SPARSE_RS = envs.SGLANG_OPT_SPEC_SPARSE_RS.get()
+ SPEC_SPARSE_TOPK = envs.SGLANG_OPT_SPEC_SPARSE_TOPK.get()
+ 
+ 
+-- 
+2.43.0
+

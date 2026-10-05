@@ -1,0 +1,153 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: aiueo52 <aiueo52@users.noreply.github.com>
+Date: Thu, 1 Oct 2026 22:58:49 +0900
+Subject: [PATCH 120/121] RS3: vectorize block verification over the chain (one
+ scan, no per-position loop)
+
+pi comes from an associative scan of the maps pi -> min(a*pi + c, b); the
+matched mass for every slot is computed in one [SP, KP, 8] tile loop, and tau
+is a vector max. Outputs equal the sequential BV of fb1e77a05a on CPU (B6:
+1592 rows, no mismatch). BV uses 8 warps when slots > 8; block_verify=False
+keeps the old code and 4 warps.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../kernels/ops/speculative/sparse_rs.py      | 105 +++++++++++-------
+ 1 file changed, 65 insertions(+), 40 deletions(-)
+
+diff --git a/python/sglang/kernels/ops/speculative/sparse_rs.py b/python/sglang/kernels/ops/speculative/sparse_rs.py
+index 4b1d9663dc..8a7f83fb06 100644
+--- a/python/sglang/kernels/ops/speculative/sparse_rs.py
++++ b/python/sglang/kernels/ops/speculative/sparse_rs.py
+@@ -207,12 +207,17 @@ def rs_draft_proposal_sparse(
+     return probs, tokens, topk_p, topk_index
+ 
+ 
++@triton.jit
++def _bv_combine(a1, c1, b1, a2, c2, b2):
++    return a2 * a1, a2 * c1 + c2, tl.minimum(x=a2 * b1 + c2, y=b2)
++
++
+ @triton.jit
+ def _chain_sampling_sparse_kernel(
+     Predicts, AcceptIndex, AcceptTokenNum, Candidates, RetriveIndex,
+     Coins, CoinsFinal, P, PI, Q, QI,
+     NUM_SLOTS: tl.constexpr, K: tl.constexpr, KQ: tl.constexpr,
+-    KP: tl.constexpr, VOCAB: tl.constexpr, BLOCK_VERIFY: tl.constexpr,
++    KP: tl.constexpr, VOCAB: tl.constexpr, BLOCK_VERIFY: tl.constexpr, SP: tl.constexpr,
+ ):
+     bx = tl.program_id(0).to(tl.int64)
+     poffs = tl.arange(start=0, end=KP)
+@@ -222,44 +227,63 @@ def _chain_sampling_sparse_kernel(
+     tl.store(pointer=AcceptIndex + base, value=last)
+     num_correct = 0
+     if BLOCK_VERIFY:
+-        path_pi = tl.full(shape=(), value=1.0, dtype=tl.float32)
+-        final_pi = path_pi
+-        step = 1
+-        while (step < NUM_SLOTS) & (path_pi > 0):
+-            token = tl.load(pointer=Candidates + base + step)
+-            p = tl.load(pointer=P + (base + step - 1) * KP + poffs).to(dtype=tl.float32)
+-            pi = tl.load(pointer=PI + (base + step - 1) * KP + poffs)
+-            qbase = (bx * (NUM_SLOTS - 1) + step - 1) * K
+-            q = tl.load(pointer=Q + qbase + qoffs, mask=qoffs < K, other=0.0).to(dtype=tl.float32)
+-            qi = tl.load(pointer=QI + qbase + qoffs, mask=qoffs < K, other=-1)
+-            q = tl.where(condition=q == q, x=q, y=0.0)
+-            pt = tl.sum(input=tl.where(condition=pi == token, x=p, y=0.0), axis=0)
+-            qt = tl.sum(input=tl.where(condition=qi == token, x=q, y=0.0), axis=0)
+-            path_pi = tl.where(condition=pt <= 0, x=0.0,
+-                               y=tl.where(condition=qt == 0, x=1.0, y=tl.minimum(x=path_pi * pt / qt, y=1.0)))
+-            h = path_pi
+-            if step < NUM_SLOTS - 1:
+-                p = tl.load(pointer=P + (base + step) * KP + poffs).to(dtype=tl.float32)
+-                pi = tl.load(pointer=PI + (base + step) * KP + poffs)
+-                qbase = (bx * (NUM_SLOTS - 1) + step) * K
+-                q = tl.load(pointer=Q + qbase + qoffs, mask=qoffs < K, other=0.0).to(dtype=tl.float32)
+-                qi = tl.load(pointer=QI + qbase + qoffs, mask=qoffs < K, other=-1)
+-                q = tl.where(condition=q == q, x=q, y=0.0)
+-                matched = tl.sum(input=tl.where(condition=pi[:, None] == qi[None, :], x=q[None, :], y=0.0), axis=1)
+-                n = tl.sum(input=tl.maximum(x=path_pi * p - matched, y=0.0), axis=0)
+-                denominator = n + 1.0 - path_pi
+-                h = tl.where(condition=denominator > 0, x=n / denominator, y=1.0)
+-            if tl.load(pointer=Coins + base + step - 1) < h:
+-                num_correct = step
+-                final_pi = path_pi
+-            step += 1
+-        step = 1
+-        while step <= num_correct:
+-            token = tl.load(pointer=Candidates + base + step)
+-            tl.store(pointer=Predicts + last, value=token)
+-            last = tl.load(pointer=RetriveIndex + base + step)
+-            tl.store(pointer=AcceptIndex + base + step, value=last)
+-            step += 1
++        u = tl.arange(start=0, end=SP)
++        valid = (u >= 1) & (u < NUM_SLOTS)
++        token = tl.load(pointer=Candidates + base + u, mask=valid, other=-1)
++        coin = tl.load(pointer=Coins + base + u - 1, mask=valid, other=1.0)
++        position_p = tl.load(pointer=P + (base + u[:, None] - 1) * KP + poffs[None, :],
++                             mask=valid[:, None], other=0.0).to(dtype=tl.float32)
++        position_ids = tl.load(pointer=PI + (base + u[:, None] - 1) * KP + poffs[None, :],
++                               mask=valid[:, None], other=-1)
++        position_qbase = (bx * (NUM_SLOTS - 1) + u - 1) * K
++        position_q = tl.load(pointer=Q + position_qbase[:, None] + qoffs[None, :],
++                             mask=valid[:, None] & (qoffs[None, :] < K), other=0.0).to(dtype=tl.float32)
++        position_qids = tl.load(pointer=QI + position_qbase[:, None] + qoffs[None, :],
++                                mask=valid[:, None] & (qoffs[None, :] < K), other=-1)
++        position_q = tl.where(condition=position_q == position_q, x=position_q, y=0.0)
++        pt = tl.sum(input=tl.where(condition=position_ids == token[:, None], x=position_p, y=0.0), axis=1)
++        qt = tl.sum(input=tl.where(condition=position_qids == token[:, None], x=position_q, y=0.0), axis=1)
++        a = tl.where(condition=valid & (pt > 0) & (qt != 0),
++                     x=pt / tl.where(condition=qt != 0, x=qt, y=1.0), y=0.0)
++        c = tl.where(condition=valid & (pt > 0) & (qt == 0), x=1.0, y=0.0)
++        b = tl.where(condition=valid & (pt > 0), x=1.0, y=0.0)
++        a = tl.where(condition=u == 0, x=1.0, y=a)
++        b = tl.where(condition=u == 0, x=1.0, y=b)
++        a, c, b = tl.associative_scan(input=(a, c, b), axis=0, combine_fn=_bv_combine)
++        path_pi = tl.minimum(x=a + c, y=b)
++        first_zero = tl.min(input=tl.where(condition=valid & (path_pi == 0), x=u, y=SP), axis=0)
++        path_pi = tl.where(condition=u >= first_zero, x=0.0, y=path_pi)
++        next_valid = valid & (u < NUM_SLOTS - 1)
++        position_p = tl.load(pointer=P + (base + u[:, None]) * KP + poffs[None, :],
++                             mask=next_valid[:, None], other=0.0).to(dtype=tl.float32)
++        position_ids = tl.load(pointer=PI + (base + u[:, None]) * KP + poffs[None, :],
++                               mask=next_valid[:, None], other=-1)
++        position_matched = tl.full(shape=(SP, KP), value=0.0, dtype=tl.float32)
++        # Bound the match tile to [SP, KP, 8] instead of [SP, KP, KQ].
++        chunks = tl.arange(start=0, end=8)
++        position_qbase = (bx * (NUM_SLOTS - 1) + u) * K
++        for chunk in range(triton.cdiv(x=KQ, y=8)):
++            koffs = chunk * 8 + chunks
++            chunk_q = tl.load(pointer=Q + position_qbase[:, None] + koffs[None, :],
++                              mask=next_valid[:, None] & (koffs[None, :] < K), other=0.0).to(dtype=tl.float32)
++            chunk_qi = tl.load(pointer=QI + position_qbase[:, None] + koffs[None, :],
++                               mask=next_valid[:, None] & (koffs[None, :] < K), other=-1)
++            chunk_q = tl.where(condition=chunk_q == chunk_q, x=chunk_q, y=0.0)
++            position_matched += tl.sum(input=tl.where(condition=position_ids[:, :, None] == chunk_qi[:, None, :],
++                                                      x=chunk_q[:, None, :], y=0.0), axis=2)
++        n = tl.sum(input=tl.maximum(x=path_pi[:, None] * position_p - position_matched, y=0.0), axis=1)
++        denominator = n + 1.0 - path_pi
++        h = tl.where(condition=denominator > 0, x=n / denominator, y=1.0)
++        h = tl.where(condition=u == NUM_SLOTS - 1, x=path_pi, y=h)
++        h = tl.where(condition=valid & (u < first_zero), x=h, y=0.0)
++        num_correct = tl.max(input=tl.where(condition=coin < h, x=u, y=0), axis=0)
++        final_pi = tl.sum(input=tl.where(condition=u == num_correct, x=path_pi, y=0.0), axis=0)
++        accepted = valid & (u <= num_correct)
++        previous = tl.load(pointer=RetriveIndex + base + u - 1, mask=accepted, other=0)
++        current = tl.load(pointer=RetriveIndex + base + u, mask=accepted, other=0)
++        tl.store(pointer=Predicts + previous, value=token, mask=accepted)
++        tl.store(pointer=AcceptIndex + base + u, value=current, mask=accepted)
++        last = tl.load(pointer=RetriveIndex + base + num_correct)
+     else:
+         walking = 1
+         step = 1
+@@ -338,5 +362,6 @@ def chain_speculative_sampling_sparse(
+         P=target_probs.contiguous(), PI=target_index.contiguous(),
+         Q=draft_support_probs.contiguous(), QI=draft_support_tokens.contiguous(),
+         NUM_SLOTS=num_slots, K=k, KQ=triton.next_power_of_2(k), KP=kp, VOCAB=vocab_size, BLOCK_VERIFY=block_verify,
+-        num_warps=4,
++        SP=triton.next_power_of_2(n=num_slots),
++        num_warps=8 if block_verify and num_slots > 8 else 4,
+     )
+-- 
+2.43.0
+
